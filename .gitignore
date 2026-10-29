@@ -1,0 +1,35 @@
+# Build outputs & caches
+dist/
+.build_cache/
+*.apk
+*.idsig
+*.dex
+*.class
+*.pyc
+__pycache__/
+
+# Logs & Traces
+*.log
+anr.txt
+
+# Reverse engineering dumps & scratch binaries
+oppo/
+xiaomi/
+.analysis/
+poc/work/
+poc/build/
+poc/lsposed/jadx_fw/
+poc/lsposed/miui-services/
+poc/lsposed/LSPosed/
+
+# System & IDE
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Preserve specific jars and assets
+!bridge/libs/classes.jar
+!bridge/assets/*.png
+!signing/*.jks
+!aes/base/*.apk
