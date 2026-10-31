@@ -16,11 +16,7 @@ anr.txt
 oppo/
 xiaomi/
 .analysis/
-poc/work/
-poc/build/
-poc/lsposed/jadx_fw/
-poc/lsposed/miui-services/
-poc/lsposed/LSPosed/
+poc/
 
 # System & IDE
 .idea/
