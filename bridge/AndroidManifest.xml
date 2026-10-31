@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.dragshare.portal"
+    package="com.github.leaf.hyperportal"
     android:versionCode="1"
     android:versionName="1.0">
 
@@ -16,7 +16,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="DragShare Bridge"
+        android:label="HyperPortal"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
@@ -31,7 +31,7 @@
 
         <provider
             android:name=".PortalFileProvider"
-            android:authorities="com.dragshare.portal.files"
+            android:authorities="com.github.leaf.hyperportal.files"
             android:exported="true"
             android:grantUriPermissions="true" />
 
@@ -39,8 +39,8 @@
             android:name=".PortalReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.dragshare.portal.SHOW" />
-                <action android:name="com.dragshare.portal.DRAG_STATE_CHANGED" />
+                <action android:name="com.github.leaf.hyperportal.SHOW" />
+                <action android:name="com.github.leaf.hyperportal.ACTION_DRAG_STATE" />
             </intent-filter>
         </receiver>
 
@@ -59,7 +59,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="ColorOS-style task zoom and global drag for HyperOS" />
+            android:value="HyperPortal: ColorOS 15 Fluid Cloud &amp; Content DragShare for HyperOS" />
         <meta-data
             android:name="xposedminversion"
             android:value="102" />

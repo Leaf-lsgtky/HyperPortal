@@ -1,4 +1,4 @@
-package com.dragshare.portal.system;
+package com.github.leaf.hyperportal.system;
 
 import android.content.ClipData;
 import android.content.ComponentName;
@@ -50,6 +50,20 @@ public final class PortalSystemModule extends XposedModule {
     private static final ExecutorService sNotifyExecutor = Executors.newSingleThreadExecutor();
 
     private static volatile PortalSystemModule sInstance;
+    private static volatile XposedInterface sXposed;
+
+    public static void initSystemServer(XposedInterface xposed, io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam param) {
+        sXposed = xposed;
+        if (sInstance == null) {
+            sInstance = new PortalSystemModule();
+        }
+        sSystemClassLoader = resolveSystemClassLoader();
+        if (xposed != null) {
+            xposed.log(Log.INFO, TAG, "onSystemServerStarting cl=" + sSystemClassLoader);
+        }
+        sInstance.installHooks(sSystemClassLoader);
+        preloadWallpaperBitmap();
+    }
 
     private static volatile boolean sDragActive;
     private static volatile Object sTask;
@@ -169,20 +183,20 @@ public final class PortalSystemModule extends XposedModule {
             for (Method method : controller.getDeclaredMethods()) {
                 String name = method.getName();
                 if ("performDrag".equals(name)) {
-                    hook(method).setId("ddc-performDrag").intercept(this::onPerformDrag);
+                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-performDrag").intercept(this::onPerformDrag);
                     log(Log.INFO, TAG, "hooked performDrag " + method);
                 } else if ("handleMotionEvent".equals(name)) {
-                    hook(method).setId("ddc-handleMotionEvent").intercept(this::onHandleMotion);
+                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-handleMotionEvent").intercept(this::onHandleMotion);
                     log(Log.INFO, TAG, "hooked handleMotionEvent " + method);
                 } else if ("onDragStateClosedLocked".equals(name)) {
-                    hook(method).setId("ddc-onDragStateClosed").intercept(this::onDragClosed);
+                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-onDragStateClosed").intercept(this::onDragClosed);
                     log(Log.INFO, TAG, "hooked onDragStateClosedLocked " + method);
                 }
             }
             Class<?> dragState = Class.forName("com.android.server.wm.DragState", false, classLoader);
             for (Method method : dragState.getDeclaredMethods()) {
                 if ("updateDragSurfaceLocked".equals(method.getName())) {
-                    hook(method).setId("drag-updateSurface").intercept(this::onHandleMotion);
+                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("drag-updateSurface").intercept(this::onHandleMotion);
                     log(Log.INFO, TAG, "hooked updateDragSurfaceLocked " + method);
                 }
             }
@@ -411,8 +425,8 @@ public final class PortalSystemModule extends XposedModule {
         sNotifyExecutor.execute(() -> {
             try {
                 // Foreground broadcast: bypasses HyperOS Greezer Denial
-                Intent broadcast = new Intent("com.dragshare.portal.DRAG_STATE_CHANGED");
-                broadcast.setPackage("com.dragshare.portal");
+                Intent broadcast = new Intent("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
+                broadcast.setPackage("com.github.leaf.hyperportal");
                 broadcast.putExtra("state", state);
                 broadcast.putExtra("y", y);
                 broadcast.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);

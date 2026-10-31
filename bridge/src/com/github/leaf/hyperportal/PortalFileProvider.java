@@ -1,4 +1,4 @@
-package com.dragshare.portal;
+package com.github.leaf.hyperportal;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -21,7 +21,7 @@ import java.io.FileNotFoundException;
  */
 public class PortalFileProvider extends ContentProvider {
 
-    public static final String AUTHORITY = "com.dragshare.portal.files";
+    public static final String AUTHORITY = "com.github.leaf.hyperportal.files";
     public static final String INCOMING = "incoming";
 
     @Override

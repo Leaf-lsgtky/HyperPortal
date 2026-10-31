@@ -4,7 +4,7 @@
 
 Builds both:
   1. AES (ContentCatcher-patched.apk) - Hooked privileged plugin
-  2. DragShareBridge (DragShareBridge.apk) - Companion Service & LSPosed 3D tilt module
+  2. DragShareBridge (HyperPortal.apk) - Companion Service & LSPosed 3D tilt module
 
 Usage:
   python tools/build.py bridge [--clean]
@@ -152,7 +152,7 @@ def build_bridge(clean=False):
         aligned_apk.unlink()
     run_cmd(f'"{cfg.ZIPALIGN_EXE}" -f -p 4 "{unsigned_apk}" "{aligned_apk}"')
 
-    final_apk = cfg.DIST_DIR / "DragShareBridge.apk"
+    final_apk = cfg.DIST_DIR / "HyperPortal.apk"
     sign_and_verify(aligned_apk, final_apk)
     return final_apk
 

@@ -183,4 +183,4 @@ Before submitting PRs or prompting AI agents, **please read [AGENTS.md](AGENTS.m
 
 ## 📄 License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).

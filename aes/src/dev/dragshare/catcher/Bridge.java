@@ -83,7 +83,7 @@ import java.util.WeakHashMap;
 public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
-    private static final String PORTAL_PACKAGE = "com.dragshare.portal";
+    private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
     private static final String PORTAL_SERVICE = PORTAL_PACKAGE + ".PortalService";
     private static volatile WeakReference<Context> sContextRef;
     private static volatile PointF sLastTouchPoint;
@@ -3078,7 +3078,7 @@ public final class Bridge {
             name = "drag_" + SystemClock.uptimeMillis() + suffix;
         }
         name = name.replaceAll("[^A-Za-z0-9._-]", "_");
-        Uri target = Uri.parse("content://com.dragshare.portal.files/incoming/" + Uri.encode(name));
+        Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
         try (OutputStream output = context.getContentResolver().openOutputStream(target, "w");
              InputStream input = new FileInputStream(pfd.getFileDescriptor())) {
             if (output == null) {
@@ -3302,7 +3302,7 @@ public final class Bridge {
             }
             if (!started) {
                 try {
-                    Intent broadcast = new Intent("com.dragshare.portal.SHOW");
+                    Intent broadcast = new Intent("com.github.leaf.hyperportal.SHOW");
                     broadcast.setPackage(PORTAL_PACKAGE);
                     broadcast.putExtras(intent);
                     context.sendBroadcast(broadcast);
@@ -3328,7 +3328,7 @@ public final class Bridge {
         // receiver with a small payload (preview bitmap / text only) so the
         // portal always gets a visible card.
         try {
-            Intent mirror = new Intent("com.dragshare.portal.SHOW");
+            Intent mirror = new Intent("com.github.leaf.hyperportal.SHOW");
             mirror.setPackage(PORTAL_PACKAGE);
             mirror.putExtras(intent);
             // Keep imageBytes in the mirror: if HyperOS dropped the direct

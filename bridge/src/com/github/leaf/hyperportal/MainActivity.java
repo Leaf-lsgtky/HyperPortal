@@ -1,4 +1,4 @@
-package com.dragshare.portal;
+package com.github.leaf.hyperportal;
 
 import android.app.Activity;
 import android.app.SearchManager;

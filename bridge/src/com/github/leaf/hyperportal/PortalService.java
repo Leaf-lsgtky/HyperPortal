@@ -1,4 +1,4 @@
-package com.dragshare.portal;
+package com.github.leaf.hyperportal;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -81,7 +81,7 @@ public class PortalService extends Service {
     private static final String TAG = "DragSharePortal";
     private static final String CHANNEL = "dragshare_portal";
     private static final int NOTIFICATION_ID = 0x4453;
-    public static final String ACTION_DRAG_STATE = "com.dragshare.portal.DRAG_STATE_CHANGED";
+    public static final String ACTION_DRAG_STATE = "com.github.leaf.hyperportal.DRAG_STATE_CHANGED";
 
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
     private static volatile PortalService sInstance;
@@ -1181,7 +1181,7 @@ public class PortalService extends Service {
         // Serve straight from the portal's own cache through PortalFileProvider.
         // No MediaStore copy and no extra READ_MEDIA_IMAGES permission needed;
         // the share Intent grants a temporary read URI permission.
-        return Uri.parse("content://com.dragshare.portal.files/incoming/"
+        return Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
                 + Uri.encode(mLocalFile.getName()));
     }
 

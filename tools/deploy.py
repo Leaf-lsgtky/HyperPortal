@@ -44,9 +44,9 @@ def install_apk(apk_path):
 
 
 def refresh_lsposed():
-    print("[LSP] Refreshing LSPosed module scope and path for com.dragshare.portal...")
-    adb("shell \"su -c 'lspctl module disable --user=0 com.dragshare.portal && lspctl module enable --user=0 com.dragshare.portal'\"")
-    res = adb("shell \"su -c 'lspctl module show com.dragshare.portal'\"")
+    print("[LSP] Refreshing LSPosed module scope and path for com.github.leaf.hyperportal...")
+    adb("shell \"su -c 'lspctl module disable --user=0 com.github.leaf.hyperportal && lspctl module enable --user=0 com.github.leaf.hyperportal'\"")
+    res = adb("shell \"su -c 'lspctl module show com.github.leaf.hyperportal'\"")
     print(res.stdout.strip())
 
 
@@ -59,7 +59,7 @@ def soft_reboot():
 
 def start_portal_service():
     print("[PORTAL] Starting DragShareBridge service...")
-    adb("shell am start -n com.dragshare.portal/.MainActivity")
+    adb("shell am start -n com.github.leaf.hyperportal/.MainActivity")
 
 
 def monitor_logs():
@@ -94,7 +94,7 @@ def main():
         print("=== Running full workflow: build -> install -> sync lsp -> start ===")
         build.build_bridge()
         build.build_aes()
-        install_apk(cfg.DIST_DIR / "DragShareBridge.apk")
+        install_apk(cfg.DIST_DIR / "HyperPortal.apk")
         install_apk(cfg.DIST_DIR / "ContentCatcher-patched.apk")
         refresh_lsposed()
         start_portal_service()
@@ -103,7 +103,7 @@ def main():
 
     if args.install:
         if args.install in ("bridge", "all"):
-            install_apk(cfg.DIST_DIR / "DragShareBridge.apk")
+            install_apk(cfg.DIST_DIR / "HyperPortal.apk")
         if args.install in ("aes", "all"):
             install_apk(cfg.DIST_DIR / "ContentCatcher-patched.apk")
 
