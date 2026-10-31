@@ -1,6 +1,10 @@
 # Build outputs & caches
 dist/
 .build_cache/
+.gradle/
+build/
+**/build/
+*.hprof
 *.apk
 *.idsig
 *.dex

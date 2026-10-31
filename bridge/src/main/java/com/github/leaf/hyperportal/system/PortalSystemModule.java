@@ -143,7 +143,6 @@ public final class PortalSystemModule extends XposedModule {
         ArrayList<ClassLoader> candidates = new ArrayList<>();
         candidates.add(null);
         candidates.add(ClassLoader.getSystemClassLoader());
-        candidates.add(ClassLoader.getPlatformClassLoader());
         if (ClassLoader.getSystemClassLoader() != null) {
             candidates.add(ClassLoader.getSystemClassLoader().getParent());
         }

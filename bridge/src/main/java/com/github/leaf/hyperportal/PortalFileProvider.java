@@ -1,16 +1,22 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 package com.github.leaf.hyperportal;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
+import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+
+import com.github.leaf.hyperportal.data.HyperPortalPreferences;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.ArrayList;
 
 /**
- * Write-only staging provider.
+ * Write-only staging provider & cross-process configuration server.
  *
  * AES runs in the target app process, so it cannot write directly into the
  * portal's private cache. This provider exposes a single write-only
@@ -18,11 +24,30 @@ import java.io.FileNotFoundException;
  * then sends only the cache file name to PortalService, avoiding both the
  * 1MB Binder limit and the Android 14 "no file descriptors in startService"
  * restriction.
+ *
+ * It also handles cross-process configuration queries (master switch, duration,
+ * touch slop, gesture blacklist) via call("getConfig", ...).
  */
 public class PortalFileProvider extends ContentProvider {
 
     public static final String AUTHORITY = "com.github.leaf.hyperportal.files";
     public static final String INCOMING = "incoming";
+
+    @Override
+    public Bundle call(String method, String arg, Bundle extras) {
+        if ("getConfig".equals(method)) {
+            Context ctx = getContext();
+            if (ctx == null) return null;
+            HyperPortalPreferences.Config cfg = HyperPortalPreferences.INSTANCE.getConfig(ctx);
+            Bundle bundle = new Bundle();
+            bundle.putBoolean("master_switch", cfg.getMasterSwitch());
+            bundle.putInt("long_press_duration", cfg.getLongPressDuration());
+            bundle.putInt("touch_slop", cfg.getTouchSlop());
+            bundle.putStringArrayList("gesture_blacklist", new ArrayList<>(cfg.getBlacklist()));
+            return bundle;
+        }
+        return super.call(method, arg, extras);
+    }
 
     @Override
     public boolean onCreate() {

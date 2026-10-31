@@ -136,6 +136,68 @@ public final class Bridge {
             updateSystemShadow(state >= 2);
         }
     };
+    private static volatile boolean sMasterSwitch = true;
+    private static volatile int sLongPressDurationMs = 400;
+    private static volatile int sTouchSlopDp = 24;
+    private static volatile java.util.Set<String> sBlacklist = new java.util.HashSet<>();
+    private static volatile long sLastConfigCheckTime = 0;
+    private static volatile boolean sConfigReceiverRegistered = false;
+
+    private static final BroadcastReceiver sConfigReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            sLastConfigCheckTime = 0;
+            refreshConfig(context);
+        }
+    };
+
+    private static void ensureConfig(Context context) {
+        if (context == null) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - sLastConfigCheckTime > 3000 || sLastConfigCheckTime == 0) {
+            sLastConfigCheckTime = now;
+            refreshConfig(context);
+        }
+        if (!sConfigReceiverRegistered) {
+            try {
+                IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    context.registerReceiver(sConfigReceiver, filter, Context.RECEIVER_EXPORTED);
+                } else {
+                    context.registerReceiver(sConfigReceiver, filter);
+                }
+                sConfigReceiverRegistered = true;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void refreshConfig(Context context) {
+        try {
+            Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+            Bundle res = context.getContentResolver().call(uri, "getConfig", null, null);
+            if (res != null) {
+                sMasterSwitch = res.getBoolean("master_switch", true);
+                sLongPressDurationMs = res.getInt("long_press_duration", 400);
+                sTouchSlopDp = res.getInt("touch_slop", 24);
+                java.util.ArrayList<String> list = res.getStringArrayList("gesture_blacklist");
+                if (list != null) {
+                    sBlacklist = new java.util.HashSet<>(list);
+                }
+                Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " duration=" + sLongPressDurationMs
+                        + " slop=" + sTouchSlopDp + " blacklist=" + sBlacklist.size());
+            }
+        } catch (Throwable t) {
+            // Keep defaults if unreachable
+        }
+    }
+
+    private static boolean isBlacklisted(Context context) {
+        if (context == null || sBlacklist.isEmpty()) return false;
+        String pkg = context.getPackageName();
+        return pkg != null && sBlacklist.contains(pkg);
+    }
+
     private static volatile long sDownAt;
     private static volatile int sGestureGeneration;
     private static volatile int sPendingGeneration;
@@ -191,7 +253,12 @@ public final class Bridge {
     public static void ping(MotionEvent event, View view, Activity activity) {
         try {
             rememberContext(activity);
-            ensureShadowReceiver(activity != null ? activity.getApplicationContext() : currentContext());
+            Context appContext = activity != null ? activity.getApplicationContext() : currentContext();
+            ensureShadowReceiver(appContext);
+            ensureConfig(appContext);
+            if (!sMasterSwitch || isBlacklisted(appContext)) {
+                return;
+            }
             if (activity != null) {
                 sLastActivity = activity;
             }
@@ -234,9 +301,10 @@ public final class Bridge {
                     float dy = rawY - sDownRawY;
                     float dist = (float) Math.hypot(dx, dy);
 
-                    // ColorOS touch slop: allow natural finger micro-tremors (up to 100px).
-                    // Only cancel if user actually dragged far away (> 100px).
-                    if (dist > 100f) {
+                    // Configurable touch slop: allow natural finger micro-tremors.
+                    float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
+                    float slopPx = sTouchSlopDp * density;
+                    if (dist > slopPx) {
                         sMovedSinceDown = true;
                         if (sGestureState.get() == STATE_IDLE) {
                             sMainHandler.removeCallbacks(sCustomLongPressRunnable);
@@ -2985,6 +3053,12 @@ public final class Bridge {
      */
     public static void deliverContent(Object content) {
         try {
+            Context ctx = currentContext();
+            ensureConfig(ctx);
+            if (!sMasterSwitch || isBlacklisted(ctx)) {
+                Log.d(TAG, "deliverContent ignored (disabled or blacklisted)");
+                return;
+            }
             if (content == null || sGestureState.get() == STATE_DRAGGING) {
                 Log.d(TAG, "deliverContent ignored (custom engine already dragging)");
                 return;

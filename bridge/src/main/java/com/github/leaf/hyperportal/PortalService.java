@@ -1,5 +1,7 @@
 package com.github.leaf.hyperportal;
 
+import com.github.leaf.hyperportal.ui.MainActivity;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;

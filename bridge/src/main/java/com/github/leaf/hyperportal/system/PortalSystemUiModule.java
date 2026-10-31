@@ -22,6 +22,7 @@ import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -260,7 +261,7 @@ public final class PortalSystemUiModule {
             mContainer.setOnDragListener((v, event) -> {
                 int action = event.getAction();
                 if (action == DragEvent.ACTION_DRAG_STARTED) {
-                    return true;
+                    return isMasterEnabled();
                 } else if (action == DragEvent.ACTION_DROP) {
                     // Check if dropped onto one of our AppTargets
                     float dropX = event.getX();
@@ -414,6 +415,18 @@ public final class PortalSystemUiModule {
             }
         }
 
+        private boolean isMasterEnabled() {
+            try {
+                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                Bundle res = mContext.getContentResolver().call(uri, "getConfig", null, null);
+                if (res != null) {
+                    return res.getBoolean("master_switch", true);
+                }
+            } catch (Throwable ignored) {
+            }
+            return true;
+        }
+
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
@@ -430,6 +443,10 @@ public final class PortalSystemUiModule {
             } else if (ACTION_DRAG_STATE.equals(action)) {
                 int state = intent.getIntExtra("state", 0);
                 float y = intent.getFloatExtra("y", 0f);
+                if (state > 0 && !isMasterEnabled()) {
+                    handleDragStateChanged(0, 0f);
+                    return;
+                }
                 handleDragStateChanged(state, y);
             }
         }

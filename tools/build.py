@@ -31,7 +31,7 @@ def run_cmd(cmd, shell=True, check=True):
         cmd_str = subprocess.list2cmdline([str(c) for c in cmd])
     else:
         cmd_str = str(cmd)
-    res = subprocess.run(cmd_str, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    res = subprocess.run(cmd_str, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
     if res.returncode != 0 and check:
         print(f"[ERROR] Command failed with code {res.returncode}:\n{cmd_str}\n\nOutput:\n{res.stdout}", file=sys.stderr)
         raise RuntimeError(f"Command failed: {cmd_str}")
@@ -60,102 +60,25 @@ def sign_and_verify(aligned_apk, output_apk):
 
 def build_bridge(clean=False):
     print("=" * 60)
-    print("Building DragShareBridge (Companion App & LSPosed Module)...")
+    print("Building HyperPortal (Miuix Compose App & LSPosed Module)...")
     print("=" * 60)
     cfg.ensure_dirs()
-    b_cache = cfg.BUILD_CACHE_DIR / "bridge"
-    classes_dir = b_cache / "classes"
-    dex_dir = b_cache / "dex"
+    gradle_cmd = "gradlew.bat" if os.name == "nt" else "./gradlew"
+    task = ":bridge:assembleRelease"
+    if clean:
+        task = ":bridge:clean " + task
+    cmd = f"{gradle_cmd} {task}"
+    print(f"[1/2] Running Gradle: {cmd}...")
+    run_cmd(cmd, shell=True)
 
-    if clean and b_cache.exists():
-        shutil.rmtree(b_cache, ignore_errors=True)
-    classes_dir.mkdir(parents=True, exist_ok=True)
-    dex_dir.mkdir(parents=True, exist_ok=True)
+    built_apk = cfg.ROOT_DIR / "bridge" / "build" / "outputs" / "apk" / "release" / "bridge-release.apk"
+    if not built_apk.is_file():
+        raise RuntimeError(f"Gradle failed to produce release APK at {built_apk}")
 
-    # 1. Compile AndroidManifest.xml with aapt2
-    aapt2_exe = cfg.BUILD_TOOLS_DIR / ("aapt2.exe" if os.name == "nt" else "aapt2")
-    base_apk = b_cache / "base.apk"
-    if not base_apk.exists() or clean:
-        print("[1/5] Linking resources with aapt2...")
-        run_cmd(f'"{aapt2_exe}" link -o "{base_apk}" -I "{cfg.ANDROID_JAR}" --manifest "{cfg.BRIDGE_MANIFEST}"')
-
-    # 2. Compile Java sources
-    print("[2/5] Compiling Java sources with javac...")
-    java_files = list(cfg.BRIDGE_SRC.rglob("*.java"))
-    if not java_files:
-        raise RuntimeError("No Java files found in bridge/src!")
-    
-    cp_items = [str(cfg.ANDROID_JAR)]
-    xposed_jar = cfg.BRIDGE_LIBS / "classes.jar"
-    if xposed_jar.is_file():
-        cp_items.append(str(xposed_jar))
-    stubs_dir = cfg.BRIDGE_LIBS / "stubs-classes"
-    if stubs_dir.is_dir():
-        cp_items.append(str(stubs_dir))
-    cp_str = ";".join(cp_items) if os.name == "nt" else ":".join(cp_items)
-
-    javac_cmd = [
-        "javac", "-encoding", "utf-8",
-        "-cp", cp_str,
-        "-d", str(classes_dir)
-    ] + [str(p) for p in java_files]
-    run_cmd(javac_cmd)
-
-    # 3. Dex with d8
-    print("[3/5] Dexing with D8...")
-    class_files = list(classes_dir.rglob("*.class"))
-    if not class_files:
-        raise RuntimeError("No class files compiled!")
-    
-    # Clean old dex
-    for old_dex in dex_dir.glob("*.dex"):
-        old_dex.unlink()
-
-    d8_cmd = f'{cfg.D8_CMD} --min-api 26 --output "{dex_dir}" ' + " ".join(f'"{str(cf)}"' for cf in class_files)
-    run_cmd(d8_cmd)
-
-    classes_dex = dex_dir / "classes.dex"
-    if not classes_dex.is_file():
-        raise RuntimeError("D8 failed to generate classes.dex!")
-
-    # 4. Package unsigned APK
-    print("[4/5] Packaging APK with assets & xposed metadata...")
-    unsigned_apk = b_cache / "bridge-unsigned.apk"
-    aligned_apk = b_cache / "bridge-aligned.apk"
-
-    with zipfile.ZipFile(base_apk, "r") as zin, zipfile.ZipFile(unsigned_apk, "w") as zout:
-        for item in zin.infolist():
-            if item.filename == "classes.dex" or item.filename.startswith("META-INF/"):
-                continue
-            zout.writestr(item, zin.read(item.filename))
-        
-        # Add classes.dex
-        zout.write(classes_dex, "classes.dex")
-
-        # Add assets
-        if cfg.BRIDGE_ASSETS.is_dir():
-            for p in cfg.BRIDGE_ASSETS.rglob("*"):
-                if p.is_file():
-                    rel = p.relative_to(cfg.BRIDGE_ASSETS).as_posix()
-                    zout.write(p, f"assets/{rel}")
-
-        # Add META-INF/xposed
-        if cfg.BRIDGE_RESOURCES.is_dir():
-            for p in cfg.BRIDGE_RESOURCES.rglob("*"):
-                if p.is_file():
-                    rel = p.relative_to(cfg.BRIDGE_RESOURCES).as_posix()
-                    zout.write(p, rel)
-
-    # 5. Zipalign & Sign
-    print("[5/5] Zipalign and signing...")
-    if aligned_apk.exists():
-        aligned_apk.unlink()
-    run_cmd(f'"{cfg.ZIPALIGN_EXE}" -f -p 4 "{unsigned_apk}" "{aligned_apk}"')
-
-    final_apk = cfg.DIST_DIR / "HyperPortal.apk"
-    sign_and_verify(aligned_apk, final_apk)
-    return final_apk
-
+    out_apk = cfg.DIST_DIR / "HyperPortal.apk"
+    shutil.copy2(built_apk, out_apk)
+    print(f"[2/2] [OK] Built & Verified: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
+    return out_apk
 
 def build_aes(clean=False, version_code=1000000045):
     print("=" * 60)
