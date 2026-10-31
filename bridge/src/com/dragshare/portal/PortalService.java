@@ -1357,10 +1357,11 @@ public class PortalService extends Service {
         }
 
         public void setPhase1Progress(float progress) {
-            mTargetCenterY = -4.134f + 0.22f * progress;
-            mTargetStart = 4.0f;
-            mTargetSpace = 0.18f;
-            mTargetAlpha = 0.25f + 0.75f * progress;
+            float p = Math.max(0f, Math.min(1.0f, progress));
+            mTargetCenterY = -2.5f + 1.34f * p;
+            mTargetStart = 2.5f - 1.5f * p;
+            mTargetSpace = 0.30f + 0.46f * p;
+            mTargetAlpha = 0.50f + 0.45f * p;
             invalidate();
         }
 
@@ -1388,7 +1389,7 @@ public class PortalService extends Service {
             mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * damping;
 
             if (mShader != null) {
-                float time = (System.currentTimeMillis() - mStartTime) / 1000.0f;
+                float time = (SystemClock.uptimeMillis() % 60000) / 1000.0f;
                 mShader.setFloatUniform("u_time", time);
                 mShader.setFloatUniform("u_resolution", (float) w, (float) h);
                 mShader.setFloatUniform("_HaloCenter", 0.5f, mCurrentCenterY);
