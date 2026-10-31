@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <attr name="capability" format="string" />
+    <attr name="contentAuthority" format="string" />
+    <attr name="pushName" format="string" />
+    <attr name="pushType" format="string" />
+</resources>

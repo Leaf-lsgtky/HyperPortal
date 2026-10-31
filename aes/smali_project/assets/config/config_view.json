@@ -1,0 +1,75 @@
+{
+  "target": "",
+  "job_tag": "view",
+  "config_version": 4,
+  "packages": [
+    {
+      "package": "com.tencent.mm",
+      "configs": [
+        {
+          "version": 1300,
+          "catchers": [
+            {
+              "activity": "com.tencent.mm.ui.LauncherUI",
+              "views": [
+                {
+                  "type": "com.tencent.mm.ui.widget.MMNeatTextView",
+                  "name": "mText/CharSequence,miuiCE_mText/CharSequence"
+                },{
+                  "type": "com.tencent.mm.ui.chatting.ChattingImageBGView",
+                  "name": "viewBitmap,mDrawable/Bitmap"
+                }
+              ]
+            },{
+              "activity": "com.tencent.mm.plugin.sns.ui.SnsTimeLineUI",
+              "views": [
+                {
+                  "type": "com.tencent.mm.plugin.sns.ui.MaskImageView",
+                  "name": "viewBitmap,mDrawable/Bitmap"
+                },{
+                  "type": "com.tencent.mm.plugin.sns.ui.widget.SnsPostDescPreloadTextView",
+                  "name": "fZf/TextView/text/Object/vXw/CharSequence,miuiCE_fZf/TextView/text/Object/vXw/CharSequence"
+                },
+                {
+                  "type": "com.tencent.mm.plugin.sns.ui.widget.SnsCommentPreloadTextView",
+                  "name": "fZf/TextView/text/Object/vXw/CharSequence,miuiCE_fZf/TextView/text/Object/vXw/CharSequence"
+                }
+              ]
+            }
+          ]
+        },{
+          "version": 1320,
+          "catchers": [
+            {
+              "activity": "com.tencent.mm.ui.LauncherUI",
+              "views": [
+                {
+                  "type": "com.tencent.mm.ui.widget.MMNeatTextView",
+                  "name": "mText/CharSequence,miuiCE_mText/CharSequence"
+                },{
+                  "type": "com.tencent.mm.ui.chatting.ChattingImageBGView",
+                  "name": "viewBitmap,mDrawable/Bitmap"
+                }
+              ]
+            },{
+              "activity": "com.tencent.mm.plugin.sns.ui.SnsTimeLineUI",
+              "views": [
+                {
+                  "type": "com.tencent.mm.plugin.sns.ui.MaskImageView",
+                  "name": "viewBitmap,mDrawable/Bitmap"
+                },                {
+                  "type": "com.tencent.mm.plugin.sns.ui.widget.SnsPostDescPreloadTextView",
+                  "name": "dui/TextView/text/Object/qQb/CharSequence,miuiCE_dui/TextView/text/Object/qQb/CharSequence"
+                },
+                {
+                  "type": "com.tencent.mm.plugin.sns.ui.widget.SnsCommentPreloadTextView",
+                  "name": "dui/TextView/text/Object/qQb/CharSequence,miuiCE_dui/TextView/text/Object/qQb/CharSequence"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

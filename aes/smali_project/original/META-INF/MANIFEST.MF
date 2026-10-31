@@ -1,0 +1,56 @@
+Manifest-Version: 1.0
+
+Name: AndroidManifest.xml
+SHA-256-Digest: G17akQ/tmcp3pZwqiUfWV4TGV6A7RbaNOfIytEq498k=
+
+Name: META-INF/com/android/build/gradle/app-metadata.properties
+SHA-256-Digest: fc8TDUh0Jw5FDexQZJMEwPVvjIZuK9ACUwqmZBPYjC0=
+
+Name: META-INF/version-control-info.textproto
+SHA-256-Digest: Z0kvygPvxnkgI8PcmZQXTTGD7M3WMjgGW2/Bou+ew9U=
+
+Name: assets/config/config_imagepickmode.json
+SHA-256-Digest: PzGsAogf2hb9IfKZ7KSrCw6kTglHBCQfWF4//R1lk44=
+
+Name: assets/config/config_pickmode.json
+SHA-256-Digest: 7aKzfpSRHihhCP9prJV2/70IWZN70NgKsGqxHyl/L8E=
+
+Name: assets/config/config_view.json
+SHA-256-Digest: e1g30AS1PdDU6+tTvuaFnA+mtZEmeaqLuMfo8hidOow=
+
+Name: assets/config/fav.cfg
+SHA-256-Digest: BV7q5yOB63Wx7jRwwc8slIttxy/hIRxOoobwR+U6OCw=
+
+Name: classes.dex
+SHA-256-Digest: FznBDJaqVimcjWFeEKGsvAVs5QBjQponqXjftUqVsk4=
+
+Name: kotlin/annotation/annotation.kotlin_builtins
+SHA-256-Digest: 98k+cGfKErqbPZTG5UDkwjy2/djJr/cEtVPKumUPw1c=
+
+Name: kotlin/collections/collections.kotlin_builtins
+SHA-256-Digest: U5uFwkA/bvBjgWGtmd97ESVkEulBEzXtLqOTGj79fHY=
+
+Name: kotlin/coroutines/coroutines.kotlin_builtins
+SHA-256-Digest: WabWMrip9duibyponDhl4ZU1HffDwIqhZp/g35+euIM=
+
+Name: kotlin/internal/internal.kotlin_builtins
+SHA-256-Digest: DDrUFnIknBLnN97vwYS9n9uXDdLxEwJDy+cOx1zIleY=
+
+Name: kotlin/kotlin.kotlin_builtins
+SHA-256-Digest: 9J/OIwngx9divFWgDkG5c/xibLNLyvTq9fmTwnc/VBA=
+
+Name: kotlin/ranges/ranges.kotlin_builtins
+SHA-256-Digest: M1GCyseFH4A5FsPHsXHR+WJ/VUZSj7PHxOCrD4ufzVM=
+
+Name: kotlin/reflect/reflect.kotlin_builtins
+SHA-256-Digest: CfYev4QzIIHgKT80irDvPxg18jpRcRoNbU73/U7Iudc=
+
+Name: res/8G.xml
+SHA-256-Digest: uI7NN7cNzWnJ6hCJwBUcrqtOM2V3CsCW8KHdKMrpAbw=
+
+Name: res/pN.webp
+SHA-256-Digest: uomgn4oZ4pCASERPCO9y88OaiS5M9SIMD5dffQSL+jg=
+
+Name: resources.arsc
+SHA-256-Digest: K9JuCk6fJAMkXDnkx9kCBIt/HFgSPEzhbSUzGcSLKzk=
+

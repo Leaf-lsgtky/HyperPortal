@@ -1,0 +1,19 @@
+version: 3.0.2
+apkFileName: Application Extension Service_5.1.7.apk
+usesFramework:
+  ids:
+  - 1
+sdkInfo:
+  minSdkVersion: 29
+  targetSdkVersion: 35
+versionInfo:
+  versionCode: 520260911
+  versionName: 5.1.7
+resourcesInfo:
+  packageId: 127
+doNotCompress:
+- arsc
+- dex
+- webp
+- META-INF/com/android/build/gradle/app-metadata.properties
+- META-INF/version-control-info.textproto

@@ -1,0 +1,15 @@
+{
+  "target": "com.miui.contentextension",
+  "job_tag": "image_pick",
+  "config_version": 3,
+  "features": [
+    {
+      "feature": {
+        "name": "image_pick_mode",
+        "enable": false,
+        "blacklist": "com.miui.home",
+        "catchers": "WebViewCatcher,ImageViewCatcher"
+      }
+    }
+  ]
+}

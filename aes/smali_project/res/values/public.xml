@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <public type="attr" name="capability" id="0x7f010000" />
+    <public type="attr" name="contentAuthority" id="0x7f010001" />
+    <public type="attr" name="pushName" id="0x7f010002" />
+    <public type="attr" name="pushType" id="0x7f010003" />
+    <public type="drawable" name="autofill_icon" id="0x7f040000" />
+    <public type="string" name="app_name" id="0x7f060000" />
+    <public type="xml" name="network_security_config" id="0x7f070000" />
+</resources>

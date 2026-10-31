@@ -1,0 +1,15 @@
+{
+  "target": "com.miui.contentextension",
+  "job_tag": "text_pick",
+  "config_version": "1",
+  "features": [
+    {
+      "feature": {
+        "name": "pick_mode",
+        "enable": false,
+        "blacklist": "com.miui.home",
+        "catchers": "WebViewCatcher,NativeTextCatcher"
+      }
+    }
+  ]
+}
