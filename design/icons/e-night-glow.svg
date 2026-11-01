@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2B3036"/>
+      <stop offset="1" stop-color="#121417"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#5EF2D0" stop-opacity="0.9"/>
+      <stop offset="0.55" stop-color="#36C9F0" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#36C9F0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#36C9F0"/>
+      <stop offset="1" stop-color="#5EF2D0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <ellipse cx="512" cy="760" rx="420" ry="190" fill="url(#glow)"/>
+  <rect x="262" y="746" width="500" height="20" rx="10" fill="url(#line)"/>
+  <!-- floating card -->
+  <rect x="352" y="250" width="320" height="420" rx="52" fill="#FFFFFF"/>
+  <rect x="396" y="300" width="160" height="22" rx="11" fill="#2B3036"/>
+  <rect x="396" y="344" width="220" height="22" rx="11" fill="#C9CED4"/>
+  <rect x="396" y="404" width="232" height="220" rx="28" fill="#E6FBF6"/>
+  <path d="M420 600 L494 510 L548 572 L580 538 L612 600 Z" fill="#36C9F0"/>
+  <circle cx="584" cy="458" r="20" fill="#5EF2D0"/>
+</svg>

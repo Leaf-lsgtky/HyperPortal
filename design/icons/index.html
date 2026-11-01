@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HyperPortal 图标候选</title>
+<style>
+  body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F2F2F7; color: #1C1C1E; }
+  h1 { font-size: 22px; font-weight: 600; margin: 28px 32px 8px; }
+  p.sub { margin: 0 32px 20px; color: #8E8E93; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; padding: 0 32px; }
+  .card { background: #fff; border-radius: 20px; padding: 24px; text-align: center; }
+  .card img.big { width: 168px; height: 168px; filter: drop-shadow(0 8px 18px rgba(0,0,0,.12)); }
+  .card .name { font-weight: 600; margin-top: 14px; }
+  .card .desc { color: #8E8E93; font-size: 13px; margin-top: 4px; line-height: 1.5; }
+  .row { display: flex; gap: 0; margin: 28px 32px 32px; border-radius: 20px; overflow: hidden; }
+  .wall { flex: 1; display: flex; justify-content: space-around; padding: 28px 12px; }
+  .wall.light { background: linear-gradient(160deg, #E8F0EC, #F6E9DF); }
+  .wall.dark { background: linear-gradient(160deg, #1D2226, #2A2420); }
+  .app { text-align: center; font-size: 11px; width: 64px; }
+  .wall.dark .app { color: #fff; }
+  .app img { width: 56px; height: 56px; display: block; margin: 0 auto 6px; }
+</style>
+</head>
+<body>
+<h1>HyperPortal 图标候选</h1>
+<p class="sub">纯矢量，可直接转 Android Adaptive Icon（无滤镜/阴影依赖）。</p>
+<div class="grid" id="grid"></div>
+<div class="row">
+  <div class="wall light" id="light"></div>
+  <div class="wall dark" id="dark"></div>
+</div>
+<script>
+const icons = [
+  ["g-sunset-shelf.svg", "G · 暖阳底栏", "D + C 融合：扇形卡片放大，悬停在发光底栏上方。"],
+  ["d-sunset-cards.svg", "D · 暖阳卡片（对照）", "原版 D，用于对比。"],
+  ["c-sky-shelf.svg", "C · 天蓝底栏（对照）", "原版 C，用于对比。"],
+  ["a-mint-door.svg", "A · 薄荷之门", "半开的门，内容卡片从门里飞出。薄荷绿，清爽。"],
+  ["b-coral-ring.svg", "B · 珊瑚传送环", "白底，卡片正沉入橙珊瑚色的传送环。最贴“传送门”。"],
+  ["e-night-glow.svg", "E · 夜色极光", "深灰底 + 薄荷青光带，呼应拖拽时的极光辉光。"],
+  ["f-teal-arch.svg", "F · 青绿拱门", "拱形门洞 + 珊瑚卡片穿过，互补配色。"],
+];
+const grid = document.getElementById("grid");
+for (const [f, n, d] of icons) {
+  grid.insertAdjacentHTML("beforeend",
+    `<div class="card"><img class="big" src="${f}"><div class="name">${n}</div><div class="desc">${d}</div></div>`);
+  for (const id of ["light", "dark"]) {
+    document.getElementById(id).insertAdjacentHTML("beforeend",
+      `<div class="app"><img src="${f}">${n.split(" · ")[0]}</div>`);
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFB547"/>
+      <stop offset="1" stop-color="#FF5E62"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF8A5B"/>
+      <stop offset="1" stop-color="#FF5E62"/>
+    </linearGradient>
+    <radialGradient id="hole" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFE2CF"/>
+      <stop offset="1" stop-color="#FFF4EC"/>
+    </radialGradient>
+    <clipPath id="above">
+      <rect x="0" y="0" width="1024" height="640"/>
+    </clipPath>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="#FFFFFF"/>
+  <!-- portal ring (back half + hole) -->
+  <ellipse cx="512" cy="640" rx="300" ry="96" fill="url(#hole)"/>
+  <path d="M212 640 A300 96 0 0 1 812 640" fill="none" stroke="url(#ring)" stroke-width="44" stroke-linecap="round"/>
+  <!-- card sinking in, clipped at ring plane -->
+  <g clip-path="url(#above)">
+    <g transform="rotate(-8 512 470)">
+      <rect x="372" y="250" width="280" height="460" rx="48" fill="url(#card)"/>
+      <rect x="414" y="300" width="150" height="22" rx="11" fill="#FFFFFF"/>
+      <rect x="414" y="344" width="196" height="22" rx="11" fill="#FFFFFF" opacity="0.7"/>
+      <rect x="414" y="404" width="196" height="150" rx="24" fill="#FFFFFF" opacity="0.95"/>
+      <path d="M440 530 L500 462 L540 506 L566 480 L590 530 Z" fill="#FF8A5B"/>
+      <circle cx="566" cy="440" r="14" fill="#FFB547"/>
+    </g>
+  </g>
+  <!-- portal ring (front half) -->
+  <path d="M212 640 A300 96 0 0 0 812 640" fill="none" stroke="url(#ring)" stroke-width="44" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4FC3F7"/>
+      <stop offset="1" stop-color="#1E88E5"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <!-- shelf glow -->
+  <ellipse cx="512" cy="720" rx="360" ry="120" fill="url(#glow)"/>
+  <rect x="232" y="708" width="560" height="24" rx="12" fill="#FFFFFF"/>
+  <!-- tilted card (perspective trapezoid) -->
+  <path d="M362 300 Q366 268 398 268 L626 268 Q658 268 662 300 L708 610 Q712 644 678 644 L346 644 Q312 644 316 610 Z" fill="#FFFFFF"/>
+  <path d="M398 324 L560 324 Q572 324 572 336 Q572 348 560 348 L396 348 Q384 348 385 336 Q386 324 398 324 Z" fill="#1E88E5"/>
+  <path d="M392 376 L612 376 Q624 376 625 388 Q626 400 614 400 L390 400 Q378 400 379 388 Q380 376 392 376 Z" fill="#90CAF9"/>
+  <path d="M384 436 L640 436 Q656 436 658 452 L670 566 Q672 588 650 588 L374 588 Q352 588 354 566 L366 452 Q368 436 384 436 Z" fill="#E3F2FD"/>
+  <path d="M396 566 L468 486 L516 536 L548 506 L628 566 Z" fill="#4FC3F7"/>
+  <circle cx="594" cy="478" r="18" fill="#1E88E5"/>
+</svg>

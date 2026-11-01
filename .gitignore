@@ -27,6 +27,7 @@ dumps/
 # System & IDE
 .idea/
 .vscode/
+.claude/
 Thumbs.db
 .DS_Store
 

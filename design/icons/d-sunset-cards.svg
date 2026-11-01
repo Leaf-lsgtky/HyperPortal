@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC94D"/>
+      <stop offset="1" stop-color="#FF8A3D"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <!-- back card: link -->
+  <g transform="rotate(-14 512 780)">
+    <rect x="372" y="290" width="280" height="390" rx="44" fill="#FFFFFF" opacity="0.55"/>
+  </g>
+  <!-- middle card: image -->
+  <g transform="rotate(14 512 780)">
+    <rect x="372" y="290" width="280" height="390" rx="44" fill="#FFFFFF" opacity="0.75"/>
+  </g>
+  <!-- front card: text + image -->
+  <rect x="372" y="270" width="280" height="410" rx="44" fill="#FFFFFF"/>
+  <rect x="412" y="318" width="140" height="22" rx="11" fill="#FF8A3D"/>
+  <rect x="412" y="362" width="200" height="22" rx="11" fill="#FFD9B8"/>
+  <rect x="412" y="406" width="170" height="22" rx="11" fill="#FFD9B8"/>
+  <rect x="412" y="460" width="200" height="176" rx="26" fill="#FFF1E0"/>
+  <path d="M432 616 L494 540 L536 590 L564 560 L596 616 Z" fill="#FFB547"/>
+  <circle cx="574" cy="500" r="16" fill="#FF8A3D"/>
+</svg>

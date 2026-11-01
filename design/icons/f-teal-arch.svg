@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3DD9C1"/>
+      <stop offset="1" stop-color="#0FA3A3"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9A6B"/>
+      <stop offset="1" stop-color="#FF6B6B"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="#F4F7F6"/>
+  <!-- arch portal -->
+  <path d="M290 780 L290 470 A222 222 0 0 1 734 470 L734 780 Z" fill="url(#arch)"/>
+  <path d="M352 780 L352 480 A160 160 0 0 1 672 480 L672 780 Z" fill="#E0F7F3"/>
+  <!-- speed lines -->
+  <rect x="210" y="560" width="120" height="20" rx="10" fill="#FF9A6B" opacity="0.5"/>
+  <rect x="250" y="612" width="80" height="20" rx="10" fill="#FF9A6B" opacity="0.35"/>
+  <!-- card passing through -->
+  <g transform="rotate(-10 540 560)">
+    <rect x="400" y="440" width="300" height="230" rx="42" fill="url(#card)"/>
+    <rect x="440" y="484" width="130" height="22" rx="11" fill="#FFFFFF"/>
+    <rect x="440" y="526" width="200" height="22" rx="11" fill="#FFFFFF" opacity="0.7"/>
+    <rect x="440" y="568" width="160" height="22" rx="11" fill="#FFFFFF" opacity="0.7"/>
+  </g>
+</svg>

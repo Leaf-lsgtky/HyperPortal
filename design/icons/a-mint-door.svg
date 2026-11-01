@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5EE0C2"/>
+      <stop offset="1" stop-color="#17B897"/>
+    </linearGradient>
+    <linearGradient id="hole" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0E8F78"/>
+      <stop offset="1" stop-color="#14A989"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <!-- door frame -->
+  <rect x="300" y="250" width="300" height="524" rx="56" fill="#FFFFFF"/>
+  <rect x="340" y="290" width="220" height="444" rx="30" fill="url(#hole)"/>
+  <!-- open door leaf -->
+  <path d="M600 250 L452 304 Q430 312 430 336 L430 690 Q430 714 452 722 L600 774 Z" fill="#FFFFFF" opacity="0.92"/>
+  <circle cx="462" cy="512" r="12" fill="#17B897"/>
+  <!-- card flying out -->
+  <g transform="rotate(12 690 470)">
+    <rect x="560" y="360" width="260" height="220" rx="40" fill="#FFFFFF"/>
+    <rect x="600" y="400" width="150" height="20" rx="10" fill="#17B897"/>
+    <rect x="600" y="440" width="110" height="20" rx="10" fill="#9BE7D5"/>
+    <rect x="600" y="490" width="180" height="56" rx="16" fill="#D8F6EE"/>
+    <circle cx="630" cy="518" r="12" fill="#17B897"/>
+  </g>
+</svg>
