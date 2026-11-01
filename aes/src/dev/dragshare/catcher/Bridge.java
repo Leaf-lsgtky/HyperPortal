@@ -556,6 +556,28 @@ public final class Bridge {
                 && (view instanceof android.view.ViewTreeObserver.OnTouchModeChangeListener);
     }
 
+    /**
+     * Compose's AndroidViewsHandler is an interop container for AndroidView nodes.
+     * It lives in androidx.compose.ui.platform, but it has no semantics owner. It is
+     * also full-screen and transparent when no AndroidView is present, so a naive
+     * top-down hit test selects it and extractCompose() then logs
+     * "compose semanticsOwner miss on androidx.compose.ui.platform.e0".
+     * Treat it as a native passthrough ViewGroup instead.
+     */
+    private static boolean isAndroidViewsHandler(View view) {
+        if (!(view instanceof ViewGroup)) {
+            return false;
+        }
+        String name = view.getClass().getName();
+        if (name.equals("androidx.compose.ui.platform.AndroidViewsHandler")
+                || (name.startsWith("androidx.compose.ui.platform.") && name.endsWith(".e0"))) {
+            return true;
+        }
+        // R8-renamed AndroidViewsHandler keeps these two unique method names.
+        return findMethod(view.getClass(), "getHolderToLayoutNode") != null
+                && findMethod(view.getClass(), "getLayoutNodeToHolder") != null;
+    }
+
     private static int viewKind(View view) {
         if (view == null) {
             return VIEW_KIND_NORMAL;
@@ -568,7 +590,11 @@ public final class Bridge {
         int kind = VIEW_KIND_NORMAL;
         try {
             String name = clazz.getName();
-            if (name.contains("AndroidComposeView") || name.contains("compose.ui.platform")
+            if (isAndroidViewsHandler(view)) {
+                // Compose interop container: traverse its native children instead of
+                // treating it as a semantics owner (it has none).
+                kind = VIEW_KIND_NORMAL;
+            } else if (name.contains("AndroidComposeView") || name.contains("compose.ui.platform")
                     || isObfuscatedAndroidComposeView(view)
                     || findMethod(clazz, "getSemanticsOwner") != null) {
                 kind = VIEW_KIND_COMPOSE;
@@ -2973,6 +2999,17 @@ public final class Bridge {
                             + " candidates=" + candidates.size());
 
                     ComposeSemanticsMatch best = pickBestComposeMatch(candidates, viewWidth, viewHeight);
+                    if (best == null && wantBitmap) {
+                        ComposeSemanticsMatch geom = pickBestEmptyImageCandidate(candidates, viewWidth, viewHeight);
+                        if (geom != null && geom.bounds != null) {
+                            Log.i(TAG, "compose empty image candidate bounds=" + geom.bounds
+                                    + " depth=" + geom.depth + " area=" + geom.area);
+                            Bundle geomResult = cropComposeImage(actualComposeView, geom.bounds, "semantics-empty");
+                            if (geomResult != null && isBundleMeaningful(geomResult)) {
+                                return geomResult;
+                            }
+                        }
+                    }
                     if (best != null) {
                         if (wantText && !TextUtils.isEmpty(best.text) && isMeaningfulUserText(best.text)) {
                             Bundle b = new Bundle();
@@ -3067,6 +3104,12 @@ public final class Bridge {
         } catch (Throwable throwable) {
             Log.w(TAG, "extractCompose failed: " + throwable);
         }
+        if (wantBitmap) {
+            Bundle geom = extractComposeImageFallback(actualComposeView, rawX, rawY);
+            if (geom != null && isBundleMeaningful(geom)) {
+                return geom;
+            }
+        }
         if (wantText) {
             String a11y = accessibilityText(actualComposeView, new PointF(rawX, rawY));
             if (isMeaningfulUserText(a11y)) {
@@ -3078,6 +3121,160 @@ public final class Bridge {
             }
         }
         return null;
+    }
+
+    /**
+     * Last-resort image crop for Compose viewers whose image is a pure Canvas /
+     * Painter draw and therefore has no semantics text, ContentDescription or
+     * Role.Image. The accessibility tree still carries the image layout bounds
+     * (e.g. Bilibili's comment image viewer: 1220x915 inside a full-screen
+     * overlay). Crop only that rectangle from the ComposeView; never capture
+     * the whole screen.
+     */
+    private static Bundle extractComposeImageFallback(View composeView, float rawX, float rawY) {
+        if (composeView == null || composeView.getWidth() < 80 || composeView.getHeight() < 80) {
+            return null;
+        }
+        try {
+            Context ctx = composeView.getContext();
+            if (ctx == null || !"tv.danmaku.bili".equals(ctx.getPackageName())) {
+                return null;
+            }
+            Rect screen = findAccessibilityImageBounds(composeView, rawX, rawY);
+            if (screen == null) {
+                Log.i(TAG, "compose image fallback: no accessibility bounds under touch");
+                return null;
+            }
+            int[] loc = new int[2];
+            composeView.getLocationOnScreen(loc);
+            Rect local = new Rect(screen.left - loc[0], screen.top - loc[1],
+                    screen.right - loc[0], screen.bottom - loc[1]);
+            return cropComposeImage(composeView, local, "accessibility");
+        } catch (Throwable throwable) {
+            Log.w(TAG, "compose image fallback failed", throwable);
+            return null;
+        }
+    }
+
+    private static Bundle cropComposeImage(View composeView, Rect bounds, String source) {
+        if (composeView == null || bounds == null) {
+            return null;
+        }
+        try {
+            int viewWidth = composeView.getWidth();
+            int viewHeight = composeView.getHeight();
+            int x = Math.max(0, bounds.left);
+            int y = Math.max(0, bounds.top);
+            int w = Math.min(viewWidth - x, bounds.width());
+            int h = Math.min(viewHeight - y, bounds.height());
+            if (w < 32 || h < 32) {
+                return null;
+            }
+            Bitmap full = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888);
+            composeView.draw(new Canvas(full));
+            Bitmap crop = Bitmap.createBitmap(full, x, y, w, h);
+            full.recycle();
+            Bitmap clean = trimLetterbox(crop);
+            if (clean == null || clean.isRecycled()) {
+                return null;
+            }
+            float aspect = clean.getWidth() / (float) Math.max(1, clean.getHeight());
+            if (aspect < 0.5f || aspect > 2.0f) {
+                Log.i(TAG, "compose image crop rejected by aspect: " + aspect);
+                clean.recycle();
+                return null;
+            }
+            Bundle result = new Bundle();
+            result.putParcelable("viewBitmap", toSoftwareBitmap(clean));
+            result.putInt("catchType", 2);
+            Log.i(TAG, "compose image crop source=" + source + " bounds=" + bounds
+                    + " crop=" + clean.getWidth() + "x" + clean.getHeight());
+            return result;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "cropComposeImage failed", throwable);
+            return null;
+        }
+    }
+
+    private static ComposeSemanticsMatch pickBestEmptyImageCandidate(List<ComposeSemanticsMatch> candidates,
+                                                                     int viewWidth, int viewHeight) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        int viewArea = Math.max(1, viewWidth * viewHeight);
+        ComposeSemanticsMatch best = null;
+        for (ComposeSemanticsMatch m : candidates) {
+            if (m == null || m.bounds == null || m.hasText || m.isImageLike) {
+                continue;
+            }
+            float aspect = m.bounds.width() / (float) Math.max(1, m.bounds.height());
+            if (m.area < viewArea * 0.10f || aspect < 0.5f || aspect > 2.0f) {
+                continue;
+            }
+            if (best == null || m.area < best.area
+                    || (m.area == best.area && m.depth > best.depth)) {
+                best = m;
+            }
+        }
+        return best;
+    }
+
+    private static Rect findAccessibilityImageBounds(View composeView, float rawX, float rawY) {
+        try {
+            AccessibilityNodeInfo root = composeView.createAccessibilityNodeInfo();
+            if (root == null) {
+                return null;
+            }
+            Rect[] best = new Rect[]{null};
+            int[] bestArea = new int[]{Integer.MAX_VALUE};
+            int viewArea = Math.max(1, composeView.getWidth() * composeView.getHeight());
+            collectAccessibilityImageBounds(root, 0, rawX, rawY, viewArea, best, bestArea);
+            return best[0];
+        } catch (Throwable throwable) {
+            Log.w(TAG, "findAccessibilityImageBounds failed", throwable);
+            return null;
+        }
+    }
+
+    private static void collectAccessibilityImageBounds(AccessibilityNodeInfo node, int depth,
+                                                        float rawX, float rawY, int viewArea,
+                                                        Rect[] best, int[] bestArea) {
+        if (node == null || depth > 30) {
+            return;
+        }
+        try {
+            int count = Math.min(node.getChildCount(), 64);
+            for (int i = 0; i < count; i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) {
+                    continue;
+                }
+                Rect rect = new Rect();
+                child.getBoundsInScreen(rect);
+                if (rect.width() < 150 || rect.height() < 150
+                        || rawX < rect.left - 24 || rawX > rect.right + 24
+                        || rawY < rect.top - 24 || rawY > rect.bottom + 24) {
+                    collectAccessibilityImageBounds(child, depth + 1, rawX, rawY, viewArea, best, bestArea);
+                    continue;
+                }
+                CharSequence text = child.getText();
+                if (!isMeaningfulUserText(text)) {
+                    text = child.getContentDescription();
+                }
+                float aspect = rect.width() / (float) Math.max(1, rect.height());
+                int area = rect.width() * rect.height();
+                boolean bigEnough = area >= viewArea * 0.10f
+                        && rect.width() >= 150
+                        && rect.height() >= 150;
+                if (!isMeaningfulUserText(text) && bigEnough
+                        && aspect >= 0.5f && aspect <= 2.0f && area < bestArea[0]) {
+                    best[0] = new Rect(rect);
+                    bestArea[0] = area;
+                }
+                collectAccessibilityImageBounds(child, depth + 1, rawX, rawY, viewArea, best, bestArea);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     private static boolean isPlausibleSemanticsNodeClass(Class<?> nc) {
@@ -5176,6 +5373,14 @@ public final class Bridge {
         }
         if (isPassthroughOverlay(root)) {
             return null;
+        }
+        // Compose's AndroidViewsHandler is full-screen/transparent when no
+        // AndroidView child is under the finger. Returning the handler itself
+        // would hide the real AndroidComposeView and make extractCompose() fail
+        // with "compose semanticsOwner miss". Return null when it has no native
+        // child so the caller can continue with the actual Compose root.
+        if (isAndroidViewsHandler(root)) {
+            return findDeepChildInGroup((ViewGroup) root, rawX, rawY, skipCompose);
         }
         try {
             if (isWebViewLike(root)) {
