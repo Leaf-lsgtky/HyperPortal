@@ -95,9 +95,12 @@ public final class PortalSystemModule {
     private static volatile float sProgress = 0f;
     private static volatile float sTargetProgress = 0f;
     private static volatile float sLastLogged = -1f;
+    private static volatile float sLastNotifiedX = -1f;
     private static volatile float sLastNotifiedY = -1f;
     private static volatile int sCurrentState = 0; // 0 = closed, 1 = glow only, 2 = tilt + appbar
+    private static volatile float sDragStartX = -1f;
     private static volatile float sDragStartY = -1f;
+    private static volatile String sTriggerPosition = "bottom";
     private static volatile boolean sTickerRunning;
     private static volatile ClassLoader sSystemClassLoader;
     private static volatile Context sSystemContext;
@@ -424,11 +427,13 @@ public final class PortalSystemModule {
             }
             if (clip != null && clip.getDescription().hasMimeType(DRAG_MIME)) {
                 sDragActive = true;
+                sDragStartX = -1f;
                 sDragStartY = -1f;
                 sProgress = 0f;
                 sTargetProgress = 0f;
                 sCurrentState = 1; // Drag started: Phase 1 (Glow mode)
                 sLastLogged = -1f;
+                sLastNotifiedX = -1f;
                 sLastNotifiedY = -1f;
 
                 Object controller = chain.getThisObject();
@@ -454,7 +459,7 @@ public final class PortalSystemModule {
                     log(Log.WARN, TAG, "our drag started but no valid fullscreen task found");
                 }
 
-                notifyPortalState(1, 0f);
+                notifyPortalState(1, 0f, 0f);
                 if (sSystemContext != null) {
                     ensureConfigReceiver(sSystemContext);
                     queryConfigAsync(sSystemContext);
@@ -557,45 +562,72 @@ public final class PortalSystemModule {
     private static Object onHandleMotion(XposedInterface.Chain chain) throws Throwable {
         if (sDragActive && sTaskSurface != null) {
             try {
-                Object yArg = chain.getArg(3);
-                float y = ((Number) yArg).floatValue();
+                float x = 0f;
+                float y = 0f;
+                List<Object> args = chain.getArgs();
+                if (args != null) {
+                    if (args.size() >= 4 && args.get(2) instanceof Number && args.get(3) instanceof Number) {
+                        x = ((Number) args.get(2)).floatValue();
+                        y = ((Number) args.get(3)).floatValue();
+                    } else if (args.size() == 2 && args.get(0) instanceof Number && args.get(1) instanceof Number) {
+                        x = ((Number) args.get(0)).floatValue();
+                        y = ((Number) args.get(1)).floatValue();
+                    } else {
+                        try {
+                            y = ((Number) chain.getArg(3)).floatValue();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+                int width = android.content.res.Resources.getSystem().getDisplayMetrics().widthPixels;
                 int height = android.content.res.Resources.getSystem().getDisplayMetrics().heightPixels;
 
-                // Thresholds based on ColorOS reverse engineering:
-                // Upper/middle screen: only bottom glow effect, tilt remains 0.
-                // Bottom threshold (bottom ~18% of screen): page tilts and app bar expands!
                 if (sDragStartY < 0f) {
                     sDragStartY = y;
                 }
-
-                float enterFactor = sTriggerThreshold > 0f ? sTriggerThreshold : 0.76f;
-                float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
-                float bottomThreshold = height * enterFactor;
-                float exitThreshold = height * exitFactor; // Hysteresis to prevent flutter
-
-                boolean enterCondition;
-                if (sDragStartY >= bottomThreshold) {
-                    float downwardRequired = dp(35);
-                    enterCondition = (y >= sDragStartY + downwardRequired) && (y >= bottomThreshold);
-                } else {
-                    enterCondition = (y >= bottomThreshold);
+                if (sDragStartX < 0f) {
+                    sDragStartX = x;
                 }
 
+                boolean isRight = "right".equals(sTriggerPosition);
+                float enterFactor = sTriggerThreshold > 0f ? sTriggerThreshold : 0.76f;
+                float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
+
+                boolean enterCondition;
                 boolean exitCondition;
-                if (sDragStartY >= bottomThreshold) {
-                    exitCondition = (y < sDragStartY + dp(10)) || (y < exitThreshold);
+
+                if (isRight) {
+                    float rightThreshold = width * enterFactor;
+                    float exitThreshold = width * exitFactor;
+                    if (sDragStartX >= rightThreshold) {
+                        float rightwardRequired = dp(35);
+                        enterCondition = (x >= sDragStartX + rightwardRequired) && (x >= rightThreshold);
+                        exitCondition = (x < sDragStartX + dp(10)) || (x < exitThreshold);
+                    } else {
+                        enterCondition = (x >= rightThreshold);
+                        exitCondition = (x < exitThreshold);
+                    }
                 } else {
-                    exitCondition = (y < exitThreshold);
+                    float bottomThreshold = height * enterFactor;
+                    float exitThreshold = height * exitFactor; // Hysteresis to prevent flutter
+                    if (sDragStartY >= bottomThreshold) {
+                        float downwardRequired = dp(35);
+                        enterCondition = (y >= sDragStartY + downwardRequired) && (y >= bottomThreshold);
+                        exitCondition = (y < sDragStartY + dp(10)) || (y < exitThreshold);
+                    } else {
+                        enterCondition = (y >= bottomThreshold);
+                        exitCondition = (y < exitThreshold);
+                    }
                 }
 
                 int newState;
                 float target;
                 if (sCurrentState == 2 ? !exitCondition : enterCondition) {
-                    // Phase 2: Bottom threshold reached -> 3D tilt & expand app bar
+                    // Phase 2: Hot zone reached -> 3D tilt & expand app bar
                     target = 1.0f;
                     newState = 2;
                 } else if (exitCondition) {
-                    // Phase 1: Above threshold -> flat page, only glow
+                    // Phase 1: Outside hot zone -> flat page, only glow
                     target = 0.0f;
                     newState = 1;
                 } else {
@@ -610,12 +642,16 @@ public final class PortalSystemModule {
 
                 if (newState != sCurrentState) {
                     sCurrentState = newState;
-                    notifyPortalState(newState, y);
+                    notifyPortalState(newState, x, y);
+                    sLastNotifiedX = x;
                     sLastNotifiedY = y;
-                } else if (newState == 1 && Math.abs(y - sLastNotifiedY) > 25.0f) {
-                    // While dragging down towards threshold, update glow intensity smoothly
-                    sLastNotifiedY = y;
-                    notifyPortalState(1, y);
+                } else if (newState == 1) {
+                    float dist = isRight ? Math.abs(x - sLastNotifiedX) : Math.abs(y - sLastNotifiedY);
+                    if (dist > 25.0f) {
+                        sLastNotifiedX = x;
+                        sLastNotifiedY = y;
+                        notifyPortalState(1, x, y);
+                    }
                 }
             } catch (Throwable throwable) {
                 if (true) {
@@ -629,11 +665,12 @@ public final class PortalSystemModule {
     private static Object onDragClosed(XposedInterface.Chain chain) throws Throwable {
         if (sDragActive) {
             sDragActive = false;
+            sDragStartX = -1f;
             sDragStartY = -1f;
             sCurrentState = 0;
             sTargetProgress = 0f;
             startTicker();
-            notifyPortalState(0, 0f);
+            notifyPortalState(0, 0f, 0f);
             sHandler.postDelayed(() -> {
                 if (!sDragActive) {
                     sProgress = 0f;
@@ -652,7 +689,7 @@ public final class PortalSystemModule {
         return chain.proceed();
     }
 
-    private static void notifyPortalState(int state, float y) {
+    private static void notifyPortalState(int state, float x, float y) {
         if (sSystemContext == null) {
             return;
         }
@@ -675,7 +712,9 @@ public final class PortalSystemModule {
                             Intent b = new Intent(act);
                             b.setPackage(pkg);
                             b.putExtra("state", state);
+                            b.putExtra("x", x);
                             b.putExtra("y", y);
+                            b.putExtra("position", sTriggerPosition);
                             b.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
                             if (Build.VERSION.SDK_INT >= 29) {
                                 b.addFlags(0x01000000); // Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
@@ -689,10 +728,12 @@ public final class PortalSystemModule {
 
                 // The drag shadow lives in the source app process. Send the
                 // same state globally so its Bridge receiver can morph the
-                // system DragShadowBuilder at the bottom hot zone.
+                // system DragShadowBuilder at the hot zone.
                 Intent shadowBroadcast = new Intent("com.dragshare.bridge.SHADOW_STATE");
                 shadowBroadcast.putExtra("state", state);
+                shadowBroadcast.putExtra("x", x);
                 shadowBroadcast.putExtra("y", y);
+                shadowBroadcast.putExtra("position", sTriggerPosition);
                 shadowBroadcast.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
                 if (Build.VERSION.SDK_INT >= 29) {
                     shadowBroadcast.addFlags(0x01000000);
@@ -714,6 +755,11 @@ public final class PortalSystemModule {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     if (intent != null) {
+                        String pos = intent.getStringExtra("trigger_position");
+                        if (pos != null) {
+                            sTriggerPosition = pos;
+                            log(Log.INFO, TAG, "trigger position updated: " + sTriggerPosition);
+                        }
                         int pct = intent.getIntExtra("trigger_threshold", -1);
                         if (pct >= 50 && pct <= 95) {
                             sTriggerThreshold = pct / 100.0f;
@@ -742,6 +788,11 @@ public final class PortalSystemModule {
                 Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
                 Bundle res = ctx.getContentResolver().call(uri, "getConfig", null, null);
                 if (res != null) {
+                    String pos = res.getString("trigger_position");
+                    if (pos != null) {
+                        sTriggerPosition = pos;
+                        log(Log.INFO, TAG, "trigger position queried: " + sTriggerPosition);
+                    }
                     int pct = res.getInt("trigger_threshold", 76);
                     if (pct >= 50 && pct <= 95) {
                         sTriggerThreshold = pct / 100.0f;
@@ -836,10 +887,18 @@ public final class PortalSystemModule {
         }
 
         // 2. 2D scale and position:
-        // Subtle 5% scale down and slight downward shift, floating like a card
+        // Subtle 5% scale down, floating like a card
         float scale = 1.0f - 0.05f * progress;
-        float x = (width - width * scale) / 2.0f;
-        float y = dp(14) * progress;
+        boolean isRight = "right".equals(sTriggerPosition);
+        float x;
+        float y;
+        if (isRight) {
+            x = -dp(14) * progress;
+            y = (height - height * scale) / 2.0f;
+        } else {
+            x = (width - width * scale) / 2.0f;
+            y = dp(14) * progress;
+        }
 
         transaction.setScale(surface, scale, scale);
         transaction.setPosition(surface, x, y);
@@ -849,15 +908,21 @@ public final class PortalSystemModule {
         transaction.setCrop(surface, new Rect(0, 0, width, height));
 
         // 3. 3D perspective tilt:
-        // - pitch angle: -12.5 degrees in radians
-        // - centerOffsets: { 0f, -height / 2.0f } -> TOP AXIS of the screen!
-        // - layerOffsets: { 0f, 0f, 0f }
-        // - camDegree: 30.0f, spaceDepth: 5500.0f
+        // - bottom trigger: Pitch angle (-12.5 deg), pivot at screen top axis {0f, -height / 2.0f}
+        // - right trigger: Yaw angle (+12.5 deg), pivot at screen left axis {-width / 2.0f, 0f}
         boolean rotationApplied = false;
         try {
-            float pitchRad = (float) Math.toRadians(-12.5f * progress);
-            float[] rotDegrees = new float[]{pitchRad, 0f, 0f};
-            float[] centerOffsets = new float[]{0f, -height / 2.0f};
+            float[] rotDegrees;
+            float[] centerOffsets;
+            if (isRight) {
+                float yawRad = (float) Math.toRadians(12.5f * progress);
+                rotDegrees = new float[]{0f, yawRad, 0f};
+                centerOffsets = new float[]{-width / 2.0f, 0f};
+            } else {
+                float pitchRad = (float) Math.toRadians(-12.5f * progress);
+                rotDegrees = new float[]{pitchRad, 0f, 0f};
+                centerOffsets = new float[]{0f, -height / 2.0f};
+            }
             float[] layerOffsets = new float[]{0f, 0f, 0f};
             float camDegree = 30.0f;
             float spaceDepth = 5500.0f;

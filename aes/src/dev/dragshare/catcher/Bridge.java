@@ -111,7 +111,9 @@ public final class Bridge {
     private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
     private static volatile boolean sMasterSwitch = true;
     private static volatile boolean sLandscapeTrigger = false;
+    private static volatile float sDragStartX = -1f;
     private static volatile float sDragStartY = -1f;
+    private static volatile String sTriggerPosition = "bottom";
     private static volatile int sLongPressDurationMs = 800;
     private static volatile int sTouchSlopDp = 24;
     private static volatile float sTriggerThreshold = 0.76f;
@@ -125,10 +127,18 @@ public final class Bridge {
         public void onReceive(Context context, Intent intent) {
             sLastConfigCheckTime = 0;
             sLastConfigFailTime = 0;
-            if (intent != null && intent.hasExtra("trigger_threshold")) {
-                int pct = intent.getIntExtra("trigger_threshold", 76);
-                if (pct >= 50 && pct <= 95) {
-                    sTriggerThreshold = pct / 100.0f;
+            if (intent != null) {
+                if (intent.hasExtra("trigger_position")) {
+                    String pos = intent.getStringExtra("trigger_position");
+                    if (pos != null) {
+                        sTriggerPosition = pos;
+                    }
+                }
+                if (intent.hasExtra("trigger_threshold")) {
+                    int pct = intent.getIntExtra("trigger_threshold", 76);
+                    if (pct >= 50 && pct <= 95) {
+                        sTriggerThreshold = pct / 100.0f;
+                    }
                 }
             }
             refreshConfig(context);
@@ -171,6 +181,10 @@ public final class Bridge {
                 int thresholdPct = res.getInt("trigger_threshold", 76);
                 if (thresholdPct >= 50 && thresholdPct <= 95) {
                     sTriggerThreshold = thresholdPct / 100.0f;
+                }
+                String pos = res.getString("trigger_position");
+                if (pos != null) {
+                    sTriggerPosition = pos;
                 }
                 java.util.ArrayList<String> list = res.getStringArrayList("gesture_blacklist");
                 if (list != null) {
@@ -5798,23 +5812,27 @@ public final class Bridge {
     }
 
     private static int sLastNotifiedState = -1;
+    private static float sLastNotifiedX = -1f;
     private static float sLastNotifiedY = -1f;
     private static long sLastNotifyTime = 0;
 
     private static void notifyPortalDragState(Context context, int state, float x, float y) {
         if (context == null) return;
         long now = SystemClock.uptimeMillis();
+        boolean isRight = "right".equals(sTriggerPosition);
         if (state != 0) {
             if (state == 2 && sLastNotifiedState == 2) {
                 return;
             }
             if (state == 1 && sLastNotifiedState == 1) {
-                if (now - sLastNotifyTime < 50 || Math.abs(y - sLastNotifiedY) < 15f) {
+                float dist = isRight ? Math.abs(x - sLastNotifiedX) : Math.abs(y - sLastNotifiedY);
+                if (now - sLastNotifyTime < 50 || dist < 15f) {
                     return;
                 }
             }
         }
         sLastNotifiedState = state;
+        sLastNotifiedX = x;
         sLastNotifiedY = y;
         sLastNotifyTime = now;
         try {
@@ -5822,6 +5840,7 @@ public final class Bridge {
             intent.putExtra("state", state);
             intent.putExtra("x", x);
             intent.putExtra("y", y);
+            intent.putExtra("position", sTriggerPosition);
             intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
 
             Intent appIntent = new Intent(intent);
@@ -5832,7 +5851,7 @@ public final class Bridge {
             sysUiIntent.setPackage("com.android.systemui");
             context.sendBroadcast(sysUiIntent);
 
-            Log.i(TAG, "notified portal drag state=" + state + " x=" + x + " y=" + y);
+            Log.i(TAG, "notified portal drag state=" + state + " x=" + x + " y=" + y + " pos=" + sTriggerPosition);
         } catch (Throwable t) {
             Log.w(TAG, "notifyPortalDragState failed", t);
         }
@@ -5937,6 +5956,7 @@ public final class Bridge {
             try {
                 View root = target.getRootView();
                 root.setOnDragListener(new View.OnDragListener() {
+                    private float lastNotifiedMotionX = -1f;
                     private float lastNotifiedMotionY = -1f;
 
                     @Override
@@ -5945,7 +5965,8 @@ public final class Bridge {
                         int action = event.getAction();
                         if (action == DragEvent.ACTION_DRAG_STARTED) {
                             sDragStartY = -1f;
-                            notifyPortalDragState(v.getContext(), 1, 0f);
+                            sDragStartX = -1f;
+                            notifyPortalDragState(v.getContext(), 1, 0f, 0f);
                             return true;
                         }
                         if (action == DragEvent.ACTION_DRAG_LOCATION) {
@@ -5959,36 +5980,64 @@ public final class Bridge {
                             if (sDragStartY < 0f) {
                                 sDragStartY = sDownRawY > 0 ? sDownRawY : screenY;
                             }
+                            if (sDragStartX < 0f) {
+                                sDragStartX = sDownRawX > 0 ? sDownRawX : screenX;
+                            }
+                            boolean isRight = "right".equals(sTriggerPosition);
                             float enterFactor = sTriggerThreshold > 0f ? sTriggerThreshold : 0.76f;
                             float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
-                            int enterThreshold = (int) (screenH * enterFactor);
-                            int exitThreshold = (int) (screenH * exitFactor);
+
                             boolean inHotZone;
-                            if (sDragStartY >= enterThreshold) {
-                                float downwardRequired = dp(v.getContext(), 35);
-                                if (sActiveShadowSquare) {
-                                    inHotZone = (screenY >= sDragStartY + dp(v.getContext(), 10)) && (screenY >= exitThreshold);
+                            if (isRight) {
+                                int enterThreshold = (int) (screenW * enterFactor);
+                                int exitThreshold = (int) (screenW * exitFactor);
+                                if (sDragStartX >= enterThreshold) {
+                                    float rightwardRequired = dp(v.getContext(), 35);
+                                    if (sActiveShadowSquare) {
+                                        inHotZone = (screenX >= sDragStartX + dp(v.getContext(), 10)) && (screenX >= exitThreshold);
+                                    } else {
+                                        inHotZone = (screenX >= sDragStartX + rightwardRequired) && (screenX >= enterThreshold);
+                                    }
                                 } else {
-                                    inHotZone = (screenY >= sDragStartY + downwardRequired) && (screenY >= enterThreshold);
+                                    inHotZone = sActiveShadowSquare
+                                            ? (screenX >= exitThreshold)
+                                            : (screenX >= enterThreshold);
                                 }
                             } else {
-                                inHotZone = sActiveShadowSquare
-                                        ? (screenY >= exitThreshold)
-                                        : (screenY >= enterThreshold);
+                                int enterThreshold = (int) (screenH * enterFactor);
+                                int exitThreshold = (int) (screenH * exitFactor);
+                                if (sDragStartY >= enterThreshold) {
+                                    float downwardRequired = dp(v.getContext(), 35);
+                                    if (sActiveShadowSquare) {
+                                        inHotZone = (screenY >= sDragStartY + dp(v.getContext(), 10)) && (screenY >= exitThreshold);
+                                    } else {
+                                        inHotZone = (screenY >= sDragStartY + downwardRequired) && (screenY >= enterThreshold);
+                                    }
+                                } else {
+                                    inHotZone = sActiveShadowSquare
+                                            ? (screenY >= exitThreshold)
+                                            : (screenY >= enterThreshold);
+                                }
                             }
                             if (inHotZone != sActiveShadowSquare) {
-                                Log.i(TAG, "onDrag hotZone=" + inHotZone + " screenY=" + screenY);
+                                Log.i(TAG, "onDrag hotZone=" + inHotZone + " screenX=" + screenX + " screenY=" + screenY + " pos=" + sTriggerPosition);
                                 updateSystemShadow(inHotZone);
                                 notifyPortalDragState(v.getContext(), inHotZone ? 2 : 1, screenX, screenY);
+                                lastNotifiedMotionX = screenX;
                                 lastNotifiedMotionY = screenY;
-                            } else if (!inHotZone && Math.abs(screenY - lastNotifiedMotionY) > 25.0f) {
-                                lastNotifiedMotionY = screenY;
-                                notifyPortalDragState(v.getContext(), 1, screenX, screenY);
+                            } else if (!inHotZone) {
+                                float dist = isRight ? Math.abs(screenX - lastNotifiedMotionX) : Math.abs(screenY - lastNotifiedMotionY);
+                                if (dist > 25.0f) {
+                                    lastNotifiedMotionX = screenX;
+                                    lastNotifiedMotionY = screenY;
+                                    notifyPortalDragState(v.getContext(), 1, screenX, screenY);
+                                }
                             }
                             return true;
                         }
                         if (action == DragEvent.ACTION_DROP) {
                             sDragStartY = -1f;
+                            sDragStartX = -1f;
                             // Return false so WMS treats the drop as unhandled outside targets,
                             // triggering WMS createCancelAnimationLocked to smoothly fly the
                             // drag shadow back to its original text position!
@@ -5997,10 +6046,11 @@ public final class Bridge {
                         }
                         if (action == DragEvent.ACTION_DRAG_ENDED) {
                             sDragStartY = -1f;
+                            sDragStartX = -1f;
                             cancelShadowMorphAnimator();
                             sShadowMorphProgress = 0f;
                             sActiveShadowSquare = false;
-                            notifyPortalDragState(v.getContext(), 0, 0f);
+                            notifyPortalDragState(v.getContext(), 0, 0f, 0f);
                             sActiveDragView = null;
                             sActiveDragText = null;
                             sActiveDragBitmap = null;

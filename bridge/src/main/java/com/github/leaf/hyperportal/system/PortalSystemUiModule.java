@@ -198,6 +198,7 @@ public final class PortalSystemUiModule {
         private boolean mShowing = false;
         private long mLastHapticTime = 0L;
         private float mTriggerThreshold = 0.76f;
+        private String mTriggerPosition = "bottom";
 
         // Current dragged content payload
         private String mText;
@@ -758,6 +759,10 @@ public final class PortalSystemUiModule {
                     if (thresholdPct >= 50 && thresholdPct <= 95) {
                         mTriggerThreshold = thresholdPct / 100.0f;
                     }
+                    String pos = res.getString("trigger_position");
+                    if (pos != null) {
+                        mTriggerPosition = pos;
+                    }
                     boolean landscapeAllowed = res.getBoolean("landscape_trigger", false);
                     if (!landscapeAllowed && isLandscape()) {
                         return false;
@@ -802,6 +807,10 @@ public final class PortalSystemUiModule {
                 int state = intent.getIntExtra("state", 0);
                 float x = intent.getFloatExtra("x", -1f);
                 float y = intent.getFloatExtra("y", 0f);
+                String pos = intent.getStringExtra("position");
+                if (pos != null) {
+                    mTriggerPosition = pos;
+                }
                 if (state > 0 && !isMasterEnabled()) {
                     handleDragStateChanged(0, -1f, 0f);
                     return;
@@ -886,12 +895,15 @@ public final class PortalSystemUiModule {
                 // Phase 1: Glow view active, shelf collapsed
                 showOverlay();
                 setTouchable(false);
-                int screenHeight = mContext.getResources().getDisplayMetrics().heightPixels;
+                boolean isRight = "right".equals(mTriggerPosition);
+                float coord = isRight ? x : y;
+                int screenDim = isRight ? mContext.getResources().getDisplayMetrics().widthPixels
+                                        : mContext.getResources().getDisplayMetrics().heightPixels;
                 float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
                 float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
-                float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * glowSpan)));
+                float progress = Math.max(0f, Math.min(1.0f, (coord - screenDim * 0.15f) / (screenDim * glowSpan)));
                 if (mGlowView != null) {
-                    mGlowView.setPhase1Progress(progress);
+                    mGlowView.setPhase1Progress(progress, isRight);
                     mGlowView.setVisibility(View.VISIBLE);
                 }
                 if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
@@ -906,11 +918,12 @@ public final class PortalSystemUiModule {
                             .start();
                 }
             } else if (state == 2) {
-                // Phase 2: Crossed 76% threshold -> Expand shelf & enable touch
+                // Phase 2: Crossed threshold -> Expand shelf & enable touch
                 showOverlay();
                 setTouchable(true);
+                boolean isRight = "right".equals(mTriggerPosition);
                 if (mGlowView != null) {
-                    mGlowView.setPhase2();
+                    mGlowView.setPhase2(isRight);
                     mGlowView.setVisibility(View.VISIBLE);
                 }
                 if (mDockBar != null) {
@@ -1078,6 +1091,8 @@ public final class PortalSystemUiModule {
         private RuntimeShader mShader;
         private Bitmap mNoiseBmp;
 
+        private float mTargetCenterX = 0.5f;
+        private float mCurrentCenterX = 0.5f;
         private float mTargetCenterY = -4.134f;
         private float mCurrentCenterY = -4.134f;
         private float mTargetStart = 4.0f;
@@ -1086,6 +1101,7 @@ public final class PortalSystemUiModule {
         private float mCurrentSpace = 0.18f;
         private float mTargetAlpha = 0.0f;
         private float mCurrentAlpha = 0.0f;
+        private boolean mIsRight = false;
 
         public GlowView(Context context) {
             super(context);
@@ -1212,8 +1228,22 @@ public final class PortalSystemUiModule {
         }
 
         public void setPhase1Progress(float progress) {
+            setPhase1Progress(progress, false);
+        }
+
+        public void setPhase1Progress(float progress, boolean isRight) {
+            mIsRight = isRight;
             float p = Math.max(0f, Math.min(1.0f, progress));
-            mTargetCenterY = -2.5f + 1.34f * p;
+            if (isRight) {
+                int w = getWidth() > 0 ? getWidth() : 1080;
+                int h = getHeight() > 0 ? getHeight() : 2400;
+                float aspect = h / (float) w;
+                mTargetCenterX = 2.5f - 1.34f * p;
+                mTargetCenterY = aspect * 0.5f;
+            } else {
+                mTargetCenterX = 0.5f;
+                mTargetCenterY = -2.5f + 1.34f * p;
+            }
             mTargetStart = 2.5f - 1.5f * p;
             mTargetSpace = 0.30f + 0.46f * p;
             mTargetAlpha = 0.50f + 0.45f * p;
@@ -1221,7 +1251,21 @@ public final class PortalSystemUiModule {
         }
 
         public void setPhase2() {
-            mTargetCenterY = -1.16f;
+            setPhase2(false);
+        }
+
+        public void setPhase2(boolean isRight) {
+            mIsRight = isRight;
+            if (isRight) {
+                int w = getWidth() > 0 ? getWidth() : 1080;
+                int h = getHeight() > 0 ? getHeight() : 2400;
+                float aspect = h / (float) w;
+                mTargetCenterX = 1.16f;
+                mTargetCenterY = aspect * 0.5f;
+            } else {
+                mTargetCenterX = 0.5f;
+                mTargetCenterY = -1.16f;
+            }
             mTargetStart = 1.0f;
             mTargetSpace = 0.76f;
             mTargetAlpha = 0.95f;
@@ -1235,6 +1279,7 @@ public final class PortalSystemUiModule {
             int h = getHeight();
             if (w <= 0 || h <= 0) return;
 
+            mCurrentCenterX += (mTargetCenterX - mCurrentCenterX) * 0.18f;
             mCurrentCenterY += (mTargetCenterY - mCurrentCenterY) * 0.18f;
             mCurrentStart += (mTargetStart - mCurrentStart) * 0.18f;
             mCurrentSpace += (mTargetSpace - mCurrentSpace) * 0.18f;
@@ -1244,15 +1289,15 @@ public final class PortalSystemUiModule {
                 float time = (SystemClock.uptimeMillis() % 60000) / 1000.0f;
                 mShader.setFloatUniform("u_time", time);
                 mShader.setFloatUniform("u_resolution", (float) w, (float) h);
-                mShader.setFloatUniform("_HaloCenter", 0.5f, mCurrentCenterY);
+                mShader.setFloatUniform("_HaloCenter", mCurrentCenterX, mCurrentCenterY);
                 mShader.setFloatUniform("_HaloStart", mCurrentStart);
                 mShader.setFloatUniform("_HaloSpace", mCurrentSpace);
                 mShader.setFloatUniform("_HaloAlpha", mCurrentAlpha);
                 canvas.drawRect(0, 0, w, h, mPaint);
                 postInvalidateOnAnimation();
             } else {
-                float cx = w * 0.5f;
-                float cy = h * 0.92f;
+                float cx = mIsRight ? (w * 0.95f) : (w * 0.5f);
+                float cy = mIsRight ? (h * 0.5f) : (h * 0.92f);
                 float radius = Math.max(w, h) * 0.85f;
                 int alpha = Math.max(0, Math.min(255, (int) (mCurrentAlpha * 220)));
                 int[] colors = new int[]{

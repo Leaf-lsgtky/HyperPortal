@@ -41,6 +41,7 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -81,6 +82,9 @@ private fun HyperPortalMainScreen() {
     var triggerThreshold by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).triggerThreshold)
     }
+    var triggerPosition by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).triggerPosition)
+    }
     var blacklist by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).blacklist)
     }
@@ -100,6 +104,7 @@ private fun HyperPortalMainScreen() {
                 longPressDuration = config.longPressDuration
                 touchSlop = config.touchSlop
                 triggerThreshold = config.triggerThreshold
+                triggerPosition = config.triggerPosition
                 blacklist = config.blacklist
                 preloadTextSegmenter = config.preloadTextSegmenter
             }
@@ -242,9 +247,29 @@ private fun HyperPortalMainScreen() {
                             HyperPortalPreferences.setEdgeScrollMargin(context, rounded)
                         },
                     )
+                    val positionItems = listOf("下侧（底部）", "右侧（边缘）")
+                    val selectedPositionIndex = if (triggerPosition == HyperPortalPreferences.POSITION_RIGHT) 1 else 0
+                    val isRight = triggerPosition == HyperPortalPreferences.POSITION_RIGHT
+
+                    OverlayDropdownPreference(
+                        title = "触发位置",
+                        summary = if (isRight) "手指拖至屏幕右侧边缘触发倾斜与应用列表" else "手指拖至屏幕底部触发倾斜与应用列表",
+                        items = positionItems,
+                        selectedIndex = selectedPositionIndex,
+                        enabled = masterSwitch,
+                        onSelectedIndexChange = { index ->
+                            val newPos = if (index == 1) HyperPortalPreferences.POSITION_RIGHT else HyperPortalPreferences.POSITION_BOTTOM
+                            triggerPosition = newPos
+                            HyperPortalPreferences.setTriggerPosition(context, newPos)
+                        },
+                    )
                     SliderPreference(
-                        title = "倾斜与应用列表触发位置",
-                        summary = "$triggerThreshold% 屏幕高度 (手指拖至屏幕下方 $triggerThreshold% 时触发倾斜与应用列表)",
+                        title = if (isRight) "右侧触发阈值" else "下侧触发阈值",
+                        summary = if (isRight) {
+                            "$triggerThreshold% 屏幕宽度 (手指拖至屏幕右侧 $triggerThreshold% 时触发倾斜与应用列表)"
+                        } else {
+                            "$triggerThreshold% 屏幕高度 (手指拖至屏幕下方 $triggerThreshold% 时触发倾斜与应用列表)"
+                        },
                         value = triggerThreshold.toFloat(),
                         valueRange = 50f..95f,
                         steps = 44, // 50%..95% step 1%

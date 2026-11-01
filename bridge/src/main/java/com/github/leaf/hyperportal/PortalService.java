@@ -139,6 +139,8 @@ public class PortalService extends Service {
 
     private final List<AppTarget> mTargets = new ArrayList<>();
     private float mTriggerThreshold = 0.76f;
+    private String mTriggerPosition = "bottom";
+    private float mStartDragX = -1f;
 
     private final BroadcastReceiver mStateReceiver = new BroadcastReceiver() {
         @Override
@@ -147,8 +149,13 @@ public class PortalService extends Service {
                 return;
             }
             int state = intent.getIntExtra("state", 0);
+            float x = intent.getFloatExtra("x", -1f);
             float y = intent.getFloatExtra("y", 0f);
-            handleDragStateChanged(state, y);
+            String pos = intent.getStringExtra("position");
+            if (pos != null) {
+                mTriggerPosition = pos;
+            }
+            handleDragStateChanged(state, x, y);
         }
     };
 
@@ -459,8 +466,12 @@ public class PortalService extends Service {
     }
 
     private void handleDragStateChanged(int state, float y) {
+        handleDragStateChanged(state, -1f, y);
+    }
+
+    private void handleDragStateChanged(int state, float x, float y) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mMainHandler.post(() -> handleDragStateChanged(state, y));
+            mMainHandler.post(() -> handleDragStateChanged(state, x, y));
             return;
         }
         if (PortalFileProvider.isSystemUiActive()) {
@@ -468,12 +479,13 @@ public class PortalService extends Service {
             // Avoid duplicate overlays and duplicate haptics.
             return;
         }
-        if (state == 1 && mCurrentDragState == 2 && y <= 0f) {
+        if (state == 1 && mCurrentDragState == 2 && y <= 0f && x <= 0f) {
             // Ignore late/synthetic y=0 state=1 broadcasts while already in hot zone
             return;
         }
         HyperPortalPreferences.Config cfg = HyperPortalPreferences.INSTANCE.getConfig(this);
         mTriggerThreshold = cfg.getTriggerThreshold() / 100.0f;
+        mTriggerPosition = cfg.getTriggerPosition();
         if (!cfg.getMasterSwitch() || (!cfg.getLandscapeTrigger() && isLandscape())) {
             removeBottomPortal();
             notifyBridgeShadowState(0, 0f);
@@ -483,7 +495,7 @@ public class PortalService extends Service {
         if (mDockBar != null) {
             mDockBar.setEdgeScrollMarginDp(cfg.getEdgeScrollMargin());
         }
-        Log.i(TAG, "handleDragStateChanged state=" + state + " y=" + y);
+        Log.i(TAG, "handleDragStateChanged state=" + state + " x=" + x + " y=" + y + " pos=" + mTriggerPosition);
         mCurrentDragState = state;
         if (state == 0) {
             notifyBridgeShadowState(0, y);
@@ -493,17 +505,20 @@ public class PortalService extends Service {
             return;
         }
         if (state == 1) {
-            // Drag active in upper screen: glow prompt only, app row collapsed
+            // Drag active outside hot zone: glow prompt only, app row collapsed
             showBottomPortal();
             setBottomPortalTouchable(false);
-            notifyBridgeShadowState(1, y);
-            int screenHeight = getPhysicalScreenHeight(this);
+            boolean isRight = "right".equals(mTriggerPosition);
+            notifyBridgeShadowState(1, isRight ? x : y);
+            float coord = isRight ? x : y;
+            int screenDim = isRight ? getResources().getDisplayMetrics().widthPixels
+                                    : getPhysicalScreenHeight(this);
             // Phase 1 progress (0.0 to 1.0 as finger moves from 15% to trigger threshold)
             float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
             float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
-            float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * glowSpan)));
+            float progress = Math.max(0f, Math.min(1.0f, (coord - screenDim * 0.15f) / (screenDim * glowSpan)));
             if (mGlowView != null) {
-                mGlowView.setPhase1Progress(progress);
+                mGlowView.setPhase1Progress(progress, isRight);
                 mGlowView.setVisibility(View.VISIBLE);
             }
             if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
@@ -520,12 +535,13 @@ public class PortalService extends Service {
                         .start();
             }
         } else if (state == 2) {
-            // Bottom threshold reached: 3D tilt active, expand app row
+            // Hot zone reached: 3D tilt active, expand app row
             showBottomPortal();
             setBottomPortalTouchable(true);
-            notifyBridgeShadowState(2, y);
+            boolean isRight = "right".equals(mTriggerPosition);
+            notifyBridgeShadowState(2, isRight ? x : y);
             if (mGlowView != null) {
-                mGlowView.setPhase2();
+                mGlowView.setPhase2(isRight);
                 mGlowView.setVisibility(View.VISIBLE);
             }
             if (mDockBar != null) {
@@ -764,9 +780,11 @@ public class PortalService extends Service {
                 float rawX = location[0] + event.getX();
                 float rawY = location[1] + event.getY();
                 int screenH = getPhysicalScreenHeight(this);
+                int screenW = getResources().getDisplayMetrics().widthPixels;
                 switch (event.getAction()) {
                     case DragEvent.ACTION_DRAG_STARTED:
                         mStartDragY = -1f;
+                        mStartDragX = -1f;
                         return true;
                     case DragEvent.ACTION_DRAG_ENTERED:
                         return true;
@@ -777,31 +795,52 @@ public class PortalService extends Service {
                         if (mStartDragY < 0f) {
                             mStartDragY = rawY;
                         }
+                        if (mStartDragX < 0f) {
+                            mStartDragX = rawX;
+                        }
+                        boolean isRight = "right".equals(mTriggerPosition);
                         float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
                         float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
-                        float enterThreshold = screenH * enterFactor;
-                        float exitThreshold = screenH * exitFactor;
                         boolean inHotZone;
-                        if (mStartDragY >= enterThreshold) {
-                            float downwardRequired = dp(35);
-                            if (mCurrentDragState == 2) {
-                                inHotZone = (rawY >= mStartDragY + dp(10)) && (rawY >= exitThreshold);
+                        if (isRight) {
+                            float enterThreshold = screenW * enterFactor;
+                            float exitThreshold = screenW * exitFactor;
+                            if (mStartDragX >= enterThreshold) {
+                                float rightwardRequired = dp(35);
+                                if (mCurrentDragState == 2) {
+                                    inHotZone = (rawX >= mStartDragX + dp(10)) && (rawX >= exitThreshold);
+                                } else {
+                                    inHotZone = (rawX >= mStartDragX + rightwardRequired) && (rawX >= enterThreshold);
+                                }
                             } else {
-                                inHotZone = (rawY >= mStartDragY + downwardRequired) && (rawY >= enterThreshold);
+                                inHotZone = (mCurrentDragState == 2)
+                                        ? (rawX >= exitThreshold)
+                                        : (rawX >= enterThreshold);
                             }
                         } else {
-                            inHotZone = (mCurrentDragState == 2)
-                                    ? (rawY >= exitThreshold)
-                                    : (rawY >= enterThreshold);
+                            float enterThreshold = screenH * enterFactor;
+                            float exitThreshold = screenH * exitFactor;
+                            if (mStartDragY >= enterThreshold) {
+                                float downwardRequired = dp(35);
+                                if (mCurrentDragState == 2) {
+                                    inHotZone = (rawY >= mStartDragY + dp(10)) && (rawY >= exitThreshold);
+                                } else {
+                                    inHotZone = (rawY >= mStartDragY + downwardRequired) && (rawY >= enterThreshold);
+                                }
+                            } else {
+                                inHotZone = (mCurrentDragState == 2)
+                                        ? (rawY >= exitThreshold)
+                                        : (rawY >= enterThreshold);
+                            }
                         }
                         if (inHotZone) {
                             if (mDockBar != null) {
                                 mDockBar.onDragLocation(rawX, rawY);
                             }
-                            notifyBridgeShadowState(2, rawY);
+                            notifyBridgeShadowState(2, isRight ? rawX : rawY);
                             mCurrentDragState = 2;
                         } else {
-                            handleDragStateChanged(1, rawY);
+                            handleDragStateChanged(1, rawX, rawY);
                         }
                         return true;
                     case DragEvent.ACTION_DRAG_EXITED:
@@ -811,6 +850,7 @@ public class PortalService extends Service {
                         return true;
                     case DragEvent.ACTION_DROP:
                         mStartDragY = -1f;
+                        mStartDragX = -1f;
                         String dropped = null;
                         ClipData clip = event.getClipData();
                         if (clip != null && clip.getItemCount() > 0) {
@@ -832,6 +872,7 @@ public class PortalService extends Service {
                         return false;
                     case DragEvent.ACTION_DRAG_ENDED:
                         mStartDragY = -1f;
+                        mStartDragX = -1f;
                         if (mDockBar != null) {
                             mDockBar.resetMagnification(false);
                         }
@@ -1351,6 +1392,8 @@ public class PortalService extends Service {
         private long mStartTime;
 
         // Dynamic uniform values for smooth animation & state transitions
+        private float mTargetCenterX = 0.5f;
+        private float mCurrentCenterX = 0.5f;
         private float mTargetCenterY = -4.134f;
         private float mCurrentCenterY = -4.134f;
         private float mTargetStart = 4.0f;
@@ -1359,6 +1402,7 @@ public class PortalService extends Service {
         private float mCurrentSpace = 0.18f;
         private float mTargetAlpha = 0.0f;
         private float mCurrentAlpha = 0.0f;
+        private boolean mIsRight = false;
 
         public GlowView(Context context) {
             super(context);
@@ -1467,8 +1511,22 @@ public class PortalService extends Service {
         }
 
         public void setPhase1Progress(float progress) {
+            setPhase1Progress(progress, false);
+        }
+
+        public void setPhase1Progress(float progress, boolean isRight) {
+            mIsRight = isRight;
             float p = Math.max(0f, Math.min(1.0f, progress));
-            mTargetCenterY = -2.5f + 1.34f * p;
+            if (isRight) {
+                int w = getWidth() > 0 ? getWidth() : 1080;
+                int h = getHeight() > 0 ? getHeight() : 2400;
+                float aspect = h / (float) w;
+                mTargetCenterX = 2.5f - 1.34f * p;
+                mTargetCenterY = aspect * 0.5f;
+            } else {
+                mTargetCenterX = 0.5f;
+                mTargetCenterY = -2.5f + 1.34f * p;
+            }
             mTargetStart = 2.5f - 1.5f * p;
             mTargetSpace = 0.30f + 0.46f * p;
             mTargetAlpha = 0.50f + 0.45f * p;
@@ -1476,7 +1534,21 @@ public class PortalService extends Service {
         }
 
         public void setPhase2() {
-            mTargetCenterY = -1.16f;
+            setPhase2(false);
+        }
+
+        public void setPhase2(boolean isRight) {
+            mIsRight = isRight;
+            if (isRight) {
+                int w = getWidth() > 0 ? getWidth() : 1080;
+                int h = getHeight() > 0 ? getHeight() : 2400;
+                float aspect = h / (float) w;
+                mTargetCenterX = 1.16f;
+                mTargetCenterY = aspect * 0.5f;
+            } else {
+                mTargetCenterX = 0.5f;
+                mTargetCenterY = -1.16f;
+            }
             mTargetStart = 1.0f;
             mTargetSpace = 0.76f;
             mTargetAlpha = 0.95f;
@@ -1493,6 +1565,7 @@ public class PortalService extends Service {
             }
 
             float damping = 0.20f;
+            mCurrentCenterX += (mTargetCenterX - mCurrentCenterX) * damping;
             mCurrentCenterY += (mTargetCenterY - mCurrentCenterY) * damping;
             mCurrentStart += (mTargetStart - mCurrentStart) * damping;
             mCurrentSpace += (mTargetSpace - mCurrentSpace) * damping;
@@ -1502,7 +1575,7 @@ public class PortalService extends Service {
                 float time = (SystemClock.uptimeMillis() % 60000) / 1000.0f;
                 mShader.setFloatUniform("u_time", time);
                 mShader.setFloatUniform("u_resolution", (float) w, (float) h);
-                mShader.setFloatUniform("_HaloCenter", 0.5f, mCurrentCenterY);
+                mShader.setFloatUniform("_HaloCenter", mCurrentCenterX, mCurrentCenterY);
                 mShader.setFloatUniform("_HaloStart", mCurrentStart);
                 mShader.setFloatUniform("_HaloSpace", mCurrentSpace);
                 mShader.setFloatUniform("_HaloAlpha", mCurrentAlpha);
@@ -1511,8 +1584,10 @@ public class PortalService extends Service {
             } else {
                 int alpha = (int) (240 * mCurrentAlpha);
                 if (alpha > 0) {
+                    float cx = mIsRight ? (w * 0.95f) : (w * 0.5f);
+                    float cy = mIsRight ? (h * 0.5f) : (h * 1.05f);
                     RadialGradient gradient = new RadialGradient(
-                            w * 0.5f, h * 1.05f, w * 0.85f,
+                            cx, cy, Math.max(w, h) * 0.85f,
                             new int[]{
                                     Color.argb(alpha, 0x5C, 0xFD, 0xAC),
                                     Color.argb((int) (alpha * 0.85f), 0x18, 0xD4, 0xF2),

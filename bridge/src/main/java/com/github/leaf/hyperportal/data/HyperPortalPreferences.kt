@@ -36,6 +36,11 @@ object HyperPortalPreferences {
     const val MIN_TRIGGER_THRESHOLD = 50
     const val MAX_TRIGGER_THRESHOLD = 95
 
+    const val KEY_TRIGGER_POSITION = "trigger_position"
+    const val POSITION_BOTTOM = "bottom"
+    const val POSITION_RIGHT = "right"
+    const val DEFAULT_TRIGGER_POSITION = POSITION_BOTTOM
+
     const val KEY_BLACKLIST = "gesture_blacklist"
 
     const val KEY_PRELOAD_TEXT_SEGMENTER = "preload_text_segmenter"
@@ -107,6 +112,7 @@ object HyperPortalPreferences {
         val longPressDuration: Int,
         val touchSlop: Int,
         val triggerThreshold: Int,
+        val triggerPosition: String,
         val blacklist: Set<String>,
         val preloadTextSegmenter: Boolean,
         val targetLimit: Int,
@@ -150,6 +156,7 @@ object HyperPortalPreferences {
             longPressDuration = prefs.getInt(KEY_LONG_PRESS_DURATION, DEFAULT_LONG_PRESS_DURATION),
             touchSlop = prefs.getInt(KEY_TOUCH_SLOP, DEFAULT_TOUCH_SLOP),
             triggerThreshold = prefs.getInt(KEY_TRIGGER_THRESHOLD, DEFAULT_TRIGGER_THRESHOLD),
+            triggerPosition = prefs.getString(KEY_TRIGGER_POSITION, DEFAULT_TRIGGER_POSITION) ?: DEFAULT_TRIGGER_POSITION,
             blacklist = prefs.getStringSet(KEY_BLACKLIST, emptySet())?.toSet() ?: emptySet(),
             preloadTextSegmenter = prefs.getBoolean(
                 KEY_PRELOAD_TEXT_SEGMENTER,
@@ -205,6 +212,12 @@ object HyperPortalPreferences {
     fun setTriggerThreshold(context: Context, threshold: Int) {
         val clamped = threshold.coerceIn(MIN_TRIGGER_THRESHOLD, MAX_TRIGGER_THRESHOLD)
         getPrefs(context).edit { putInt(KEY_TRIGGER_THRESHOLD, clamped) }
+        notifyChanged(context)
+    }
+
+    fun setTriggerPosition(context: Context, position: String) {
+        val validPosition = if (position == POSITION_RIGHT) POSITION_RIGHT else POSITION_BOTTOM
+        getPrefs(context).edit { putString(KEY_TRIGGER_POSITION, validPosition) }
         notifyChanged(context)
     }
 
@@ -336,6 +349,7 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_LONG_PRESS_DURATION, cfg.longPressDuration)
             intent.putExtra(KEY_TOUCH_SLOP, cfg.touchSlop)
             intent.putExtra(KEY_TRIGGER_THRESHOLD, cfg.triggerThreshold)
+            intent.putExtra(KEY_TRIGGER_POSITION, cfg.triggerPosition)
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)
             intent.putExtra(KEY_DEDUPLICATE_APP_TARGETS, cfg.deduplicateAppTargets)
             intent.putExtra(KEY_ENABLE_QR_SCAN, cfg.enableQrScan)
