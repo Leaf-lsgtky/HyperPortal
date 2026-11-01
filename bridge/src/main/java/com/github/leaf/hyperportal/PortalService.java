@@ -27,6 +27,8 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.RadialGradient;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
@@ -509,6 +511,8 @@ public class PortalService extends Service {
             showBottomPortal();
             setBottomPortalTouchable(false);
             boolean isRight = "right".equals(mTriggerPosition);
+            updateBottomWindowParams(isRight);
+            updateDockConfiguration(isRight);
             notifyBridgeShadowState(1, isRight ? x : y);
             float coord = isRight ? x : y;
             int screenDim = isRight ? getResources().getDisplayMetrics().widthPixels
@@ -518,45 +522,75 @@ public class PortalService extends Service {
             float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
             float progress = Math.max(0f, Math.min(1.0f, (coord - screenDim * 0.15f) / (screenDim * glowSpan)));
             if (mGlowView != null) {
-                mGlowView.setPhase1Progress(progress, isRight);
+                mGlowView.setPhase1Progress(progress, isRight, y);
                 mGlowView.setVisibility(View.VISIBLE);
             }
             if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
                 mDockBar.stopAutoScroll();
-                mDockBar.animate()
-                        .translationY(dp(60))
-                        .alpha(0f)
-                        .setDuration(160)
-                        .withEndAction(() -> {
-                            if (mDockBar != null) {
-                                mDockBar.setVisibility(View.GONE);
-                            }
-                        })
-                        .start();
+                if (isRight) {
+                    mDockBar.animate()
+                            .translationX(dp(60))
+                            .alpha(0f)
+                            .setDuration(160)
+                            .withEndAction(() -> {
+                                if (mDockBar != null) {
+                                    mDockBar.setVisibility(View.GONE);
+                                }
+                            })
+                            .start();
+                } else {
+                    mDockBar.animate()
+                            .translationY(dp(60))
+                            .alpha(0f)
+                            .setDuration(160)
+                            .withEndAction(() -> {
+                                if (mDockBar != null) {
+                                    mDockBar.setVisibility(View.GONE);
+                                }
+                            })
+                            .start();
+                }
             }
         } else if (state == 2) {
             // Hot zone reached: 3D tilt active, expand app row
             showBottomPortal();
             setBottomPortalTouchable(true);
             boolean isRight = "right".equals(mTriggerPosition);
+            updateBottomWindowParams(isRight);
+            updateDockConfiguration(isRight);
             notifyBridgeShadowState(2, isRight ? x : y);
             if (mGlowView != null) {
-                mGlowView.setPhase2(isRight);
+                mGlowView.setPhase2(isRight, y);
                 mGlowView.setVisibility(View.VISIBLE);
             }
             if (mDockBar != null) {
                 if (mDockBar.getVisibility() != View.VISIBLE) {
                     mDockBar.setVisibility(View.VISIBLE);
-                    mDockBar.setTranslationY(dp(60));
+                    if (isRight) {
+                        mDockBar.setTranslationX(dp(60));
+                        mDockBar.setTranslationY(0f);
+                    } else {
+                        mDockBar.setTranslationX(0f);
+                        mDockBar.setTranslationY(dp(60));
+                    }
                     mDockBar.setAlpha(0f);
                     mDockBar.startEnterAnimation();
                 }
-                mDockBar.animate()
-                        .translationY(0f)
-                        .alpha(1.0f)
-                        .setDuration(220)
-                        .setInterpolator(new DecelerateInterpolator())
-                        .start();
+                if (isRight) {
+                    mDockBar.animate()
+                            .translationX(0f)
+                            .alpha(1.0f)
+                            .setDuration(220)
+                            .setInterpolator(new DecelerateInterpolator())
+                            .start();
+                } else {
+                    mDockBar.animate()
+                            .translationY(0f)
+                            .alpha(1.0f)
+                            .setDuration(220)
+                            .setInterpolator(new DecelerateInterpolator())
+                            .start();
+                }
             }
         }
     }
@@ -798,6 +832,9 @@ public class PortalService extends Service {
                         if (mStartDragX < 0f) {
                             mStartDragX = rawX;
                         }
+                        if (mGlowView != null) {
+                            mGlowView.setTouchPosition(rawX, rawY);
+                        }
                         boolean isRight = "right".equals(mTriggerPosition);
                         float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
                         float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
@@ -885,7 +922,9 @@ public class PortalService extends Service {
                 return false;
             });
 
-            int height = dp(380);
+            boolean isRight = "right".equals(mTriggerPosition);
+            int height = isRight ? WindowManager.LayoutParams.MATCH_PARENT : dp(380);
+            int gravity = isRight ? Gravity.FILL : (Gravity.BOTTOM | Gravity.START);
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     height,
@@ -902,17 +941,75 @@ public class PortalService extends Service {
             if (Build.VERSION.SDK_INT >= 28) {
                 params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             }
-            params.gravity = Gravity.BOTTOM | Gravity.START;
+            params.gravity = gravity;
             params.x = 0;
             params.y = 0;
 
             mWindowManager.addView(container, params);
             mBottomContainer = container;
             mBottomParams = params;
+            updateDockConfiguration(isRight);
             Log.i(TAG, "bottom portal overlay added (height=" + height + ")");
         } catch (Throwable throwable) {
             Log.w(TAG, "showBottomPortal failed", throwable);
         }
+    }
+
+    private void updateBottomWindowParams(boolean isRight) {
+        if (mBottomParams == null || mBottomContainer == null) return;
+        int targetHeight = isRight ? WindowManager.LayoutParams.MATCH_PARENT : dp(380);
+        int targetGravity = isRight ? Gravity.FILL : (Gravity.BOTTOM | Gravity.START);
+        if (mBottomParams.height != targetHeight || mBottomParams.gravity != targetGravity) {
+            mBottomParams.height = targetHeight;
+            mBottomParams.gravity = targetGravity;
+            try {
+                mWindowManager.updateViewLayout(mBottomContainer, mBottomParams);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void updateDockConfiguration(boolean isRight) {
+        if (mDockBar == null) return;
+        int targetOrientation = isRight ? ColorOSDockBar.ORIENTATION_VERTICAL : ColorOSDockBar.ORIENTATION_HORIZONTAL;
+        if (mDockBar.getOrientation() != targetOrientation) {
+            mDockBar.setOrientation(targetOrientation);
+        }
+        FrameLayout.LayoutParams dockParams;
+        ViewGroup.LayoutParams lp = mDockBar.getLayoutParams();
+        if (lp instanceof FrameLayout.LayoutParams) {
+            dockParams = (FrameLayout.LayoutParams) lp;
+        } else {
+            dockParams = new FrameLayout.LayoutParams(
+                    isRight ? dp(96) : FrameLayout.LayoutParams.MATCH_PARENT,
+                    isRight ? dp(480) : dp(153));
+        }
+        if (isRight) {
+            dockParams.width = dp(96);
+            dockParams.height = dp(480);
+            dockParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+            dockParams.rightMargin = dp(10);
+            dockParams.bottomMargin = 0;
+            dockParams.leftMargin = 0;
+            dockParams.topMargin = 0;
+        } else {
+            int navBarHeight = dp(24);
+            try {
+                int resId = getResources().getIdentifier("navigation_bar_height", "dimen", "android");
+                if (resId > 0) {
+                    navBarHeight = getResources().getDimensionPixelSize(resId);
+                }
+            } catch (Throwable ignored) {
+            }
+            dockParams.width = FrameLayout.LayoutParams.MATCH_PARENT;
+            dockParams.height = dp(153);
+            dockParams.gravity = Gravity.BOTTOM;
+            dockParams.bottomMargin = Math.max(0, navBarHeight + dp(20) - 50);
+            dockParams.rightMargin = 0;
+            dockParams.leftMargin = 0;
+            dockParams.topMargin = 0;
+        }
+        mDockBar.setLayoutParams(dockParams);
     }
 
     private void removeBottomPortal() {
@@ -1381,17 +1478,15 @@ public class PortalService extends Service {
     }
 
     /**
-     * ColorOS Aurora Bottom Glow View.
-     * Uses Android 13+ RuntimeShader with ColorOS extracted noise texture and SkSL shader,
-     * with an elegant RadialGradient fallback.
+     * ColorOS Aurora Bottom Glow / Honor AnyDoor Right Glow View.
      */
     private static final class GlowView extends View {
         private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mHonorPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private RuntimeShader mShader;
         private Bitmap mNoiseBmp;
-        private long mStartTime;
+        private Bitmap mHonorGlowBmp;
 
-        // Dynamic uniform values for smooth animation & state transitions
         private float mTargetCenterX = 0.5f;
         private float mCurrentCenterX = 0.5f;
         private float mTargetCenterY = -4.134f;
@@ -1404,12 +1499,31 @@ public class PortalService extends Service {
         private float mCurrentAlpha = 0.0f;
         private boolean mIsRight = false;
 
+        // Dynamic right-edge glow tracking finger Y position (decompiled from Honor AnyDoor CO.webp)
+        private float mTargetTouchY = -1f;
+        private float mCurrentTouchY = -1f;
+        private float mTargetScaleX = 0f;
+        private float mCurrentScaleX = 0f;
+
         public GlowView(Context context) {
             super(context);
             initShader(context);
         }
 
+        private int dp(float val) {
+            return (int) (val * getResources().getDisplayMetrics().density + 0.5f);
+        }
+
         private void initShader(Context context) {
+            // 1. Honor AnyDoor Right Edge Glow Texture
+            try {
+                InputStream is = context.getAssets().open("honor_edge_glow.webp");
+                mHonorGlowBmp = BitmapFactory.decodeStream(is);
+                is.close();
+            } catch (Throwable ignored) {
+            }
+
+            // 2. ColorOS Aurora Bottom Glow Shader
             if (Build.VERSION.SDK_INT >= 33) {
                 try {
                     InputStream is = context.getAssets().open("oppo_glow.png");
@@ -1500,7 +1614,6 @@ public class PortalService extends Service {
                         mShader.setFloatUniform("_HaloStart", 4.0f);
                         mShader.setFloatUniform("_HaloSpace", 0.18f);
                         mShader.setFloatUniform("_HaloAlpha", 0.0f);
-                        mStartTime = System.currentTimeMillis();
                         mPaint.setShader(mShader);
                     }
                 } catch (Throwable t) {
@@ -1510,49 +1623,86 @@ public class PortalService extends Service {
             }
         }
 
+        public void setTouchPosition(float rawX, float rawY) {
+            if (mIsRight && rawY > 0f) {
+                mTargetTouchY = rawY;
+                if (mCurrentTouchY < 0f) {
+                    mCurrentTouchY = rawY;
+                }
+                postInvalidateOnAnimation();
+            }
+        }
+
         public void setPhase1Progress(float progress) {
-            setPhase1Progress(progress, false);
+            setPhase1Progress(progress, false, -1f);
         }
 
         public void setPhase1Progress(float progress, boolean isRight) {
+            setPhase1Progress(progress, isRight, -1f);
+        }
+
+        public void setPhase1Progress(float progress, boolean isRight, float touchY) {
             mIsRight = isRight;
             float p = Math.max(0f, Math.min(1.0f, progress));
             if (isRight) {
-                int w = getWidth() > 0 ? getWidth() : 1080;
-                int h = getHeight() > 0 ? getHeight() : 2400;
-                float aspect = h / (float) w;
-                mTargetCenterX = 2.5f - 1.34f * p;
-                mTargetCenterY = aspect * 0.5f;
+                int h = getHeight() > 0 ? getHeight() : getResources().getDisplayMetrics().heightPixels;
+                if (touchY > 0f) {
+                    mTargetTouchY = touchY;
+                    if (mCurrentTouchY < 0f) {
+                        mCurrentTouchY = touchY;
+                    }
+                } else if (mCurrentTouchY < 0f) {
+                    mTargetTouchY = h * 0.5f;
+                    mCurrentTouchY = h * 0.5f;
+                }
+                mTargetScaleX = 0.35f + 0.65f * p;
+                mTargetAlpha = 0.30f + 0.65f * p;
             } else {
                 mTargetCenterX = 0.5f;
                 mTargetCenterY = -2.5f + 1.34f * p;
+                mTargetStart = 2.5f - 1.5f * p;
+                mTargetSpace = 0.30f + 0.46f * p;
+                mTargetAlpha = 0.50f + 0.45f * p;
             }
-            mTargetStart = 2.5f - 1.5f * p;
-            mTargetSpace = 0.30f + 0.46f * p;
-            mTargetAlpha = 0.50f + 0.45f * p;
-            invalidate();
+            postInvalidateOnAnimation();
         }
 
         public void setPhase2() {
-            setPhase2(false);
+            setPhase2(false, -1f);
         }
 
         public void setPhase2(boolean isRight) {
+            setPhase2(isRight, -1f);
+        }
+
+        public void setPhase2(boolean isRight, float touchY) {
             mIsRight = isRight;
             if (isRight) {
-                int w = getWidth() > 0 ? getWidth() : 1080;
-                int h = getHeight() > 0 ? getHeight() : 2400;
-                float aspect = h / (float) w;
-                mTargetCenterX = 1.16f;
-                mTargetCenterY = aspect * 0.5f;
+                if (touchY > 0f) {
+                    mTargetTouchY = touchY;
+                    if (mCurrentTouchY < 0f) {
+                        mCurrentTouchY = touchY;
+                    }
+                }
+                mTargetScaleX = 1.15f;
+                mTargetAlpha = 1.0f;
             } else {
                 mTargetCenterX = 0.5f;
                 mTargetCenterY = -1.16f;
+                mTargetStart = 1.0f;
+                mTargetSpace = 0.76f;
+                mTargetAlpha = 0.95f;
             }
-            mTargetStart = 1.0f;
-            mTargetSpace = 0.76f;
-            mTargetAlpha = 0.95f;
-            invalidate();
+            postInvalidateOnAnimation();
+        }
+
+        public void resetState() {
+            mTargetAlpha = 0f;
+            mCurrentAlpha = 0f;
+            mTargetScaleX = 0f;
+            mCurrentScaleX = 0f;
+            mTargetTouchY = -1f;
+            mCurrentTouchY = -1f;
         }
 
         @Override
@@ -1564,6 +1714,65 @@ public class PortalService extends Service {
                 return;
             }
 
+            if (mIsRight) {
+                if (mCurrentTouchY < 0f) {
+                    mCurrentTouchY = mTargetTouchY > 0f ? mTargetTouchY : h * 0.5f;
+                }
+                if (mTargetTouchY < 0f) {
+                    mTargetTouchY = mCurrentTouchY;
+                }
+
+                mCurrentTouchY += (mTargetTouchY - mCurrentTouchY) * 0.28f;
+                mCurrentScaleX += (mTargetScaleX - mCurrentScaleX) * 0.22f;
+                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * 0.22f;
+
+                if (mCurrentAlpha <= 0.01f) return;
+
+                // Breathing pulsation from Honor AnyDoor (period 1600ms)
+                float breath = 0.88f + 0.12f * (float) Math.sin((SystemClock.uptimeMillis() % 1600) / 1600.0f * 2.0 * Math.PI);
+                int alpha = Math.max(0, Math.min(255, (int) (255 * mCurrentAlpha * breath)));
+
+                if (mHonorGlowBmp != null && !mHonorGlowBmp.isRecycled()) {
+                    float glowWidth = dp(115) * mCurrentScaleX;
+                    float glowHeight = h;
+                    float top = mCurrentTouchY - (glowHeight * 0.5f);
+                    float bottom = mCurrentTouchY + (glowHeight * 0.5f);
+                    float right = w;
+                    float left = w - glowWidth;
+
+                    mHonorPaint.setAlpha(alpha);
+                    Rect srcRect = new Rect(0, 0, mHonorGlowBmp.getWidth(), mHonorGlowBmp.getHeight());
+                    RectF dstRect = new RectF(left, top, right, bottom);
+                    canvas.drawBitmap(mHonorGlowBmp, srcRect, dstRect, mHonorPaint);
+                } else {
+                    float cx = w;
+                    float cy = mCurrentTouchY;
+                    float rx = dp(115) * mCurrentScaleX;
+                    float ry = h * 0.45f;
+                    canvas.save();
+                    canvas.translate(cx, cy);
+                    canvas.scale(rx / dp(200), ry / dp(200));
+                    int[] colors = new int[]{
+                            Color.argb(alpha, 245, 252, 255),
+                            Color.argb((int) (alpha * 0.85f), 136, 212, 251),
+                            Color.argb((int) (alpha * 0.50f), 37, 142, 245),
+                            Color.argb((int) (alpha * 0.20f), 26, 51, 255),
+                            Color.argb(0, 0, 0, 0)
+                    };
+                    float[] stops = new float[]{0.0f, 0.25f, 0.55f, 0.80f, 1.0f};
+                    RadialGradient rg = new RadialGradient(0, 0, dp(200), colors, stops, Shader.TileMode.CLAMP);
+                    mPaint.setShader(rg);
+                    canvas.drawCircle(0, 0, dp(200), mPaint);
+                    canvas.restore();
+                }
+
+                if (mCurrentAlpha > 0.05f) {
+                    postInvalidateOnAnimation();
+                }
+                return;
+            }
+
+            // Bottom Mode (ColorOS Aurora AGSL / RadialGradient)
             float damping = 0.20f;
             mCurrentCenterX += (mTargetCenterX - mCurrentCenterX) * damping;
             mCurrentCenterY += (mTargetCenterY - mCurrentCenterY) * damping;
@@ -1584,8 +1793,8 @@ public class PortalService extends Service {
             } else {
                 int alpha = (int) (240 * mCurrentAlpha);
                 if (alpha > 0) {
-                    float cx = mIsRight ? (w * 0.95f) : (w * 0.5f);
-                    float cy = mIsRight ? (h * 0.5f) : (h * 1.05f);
+                    float cx = w * 0.5f;
+                    float cy = h * 1.05f;
                     RadialGradient gradient = new RadialGradient(
                             cx, cy, Math.max(w, h) * 0.85f,
                             new int[]{

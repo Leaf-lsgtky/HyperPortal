@@ -21,6 +21,7 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -66,6 +67,9 @@ public class ColorOSDockBar extends FrameLayout {
         }
     }
 
+    public static final int ORIENTATION_HORIZONTAL = 0;
+    public static final int ORIENTATION_VERTICAL = 1;
+
     private static final int ID_ICON = 0x7f09005d;
     private static final int ID_TEXT = 0x7f090061;
 
@@ -74,14 +78,16 @@ public class ColorOSDockBar extends FrameLayout {
             new PathInterpolator(0.3f, 0.0f, 0.7f, 1.0f);
 
     private final float mDensity;
+    private int mOrientation = ORIENTATION_HORIZONTAL;
     private HorizontalScrollView mScrollView;
+    private ScrollView mVerticalScrollView;
     private LinearLayout mRow;
     private final List<DockItem> mItems = new ArrayList<>();
     private OnDockItemDropListener mDropListener;
 
     // Auto-scroll state (from Lv5/m;->D and Lv5/e;)
     private int mZoomMarginDp = 86; // Default 86dp, configurable via settings
-    private int mScrollDirection = 0; // -1 for left, 1 for right, 0 for none
+    private int mScrollDirection = 0; // -1 for left/up, 1 for right/down, 0 for none
     private boolean mScrollFast = false;
     private long mHoverStartTime = 0L;
     private boolean mAutoScrollRunning = false;
@@ -95,41 +101,53 @@ public class ColorOSDockBar extends FrameLayout {
     private final Runnable mAutoScrollRunnable = new Runnable() {
         @Override
         public void run() {
-            if (!mAutoScrollRunning || mScrollDirection == 0 || mScrollView == null) {
+            if (!mAutoScrollRunning || mScrollDirection == 0) {
                 mAutoScrollRunning = false;
                 return;
             }
             long now = SystemClock.uptimeMillis();
             if (now - mHoverStartTime >= 60L) { // 60ms delay, smooth & responsive
-                int currentScroll = mScrollView.getScrollX();
-                int maxScroll = 0;
-                if (mRow != null) {
-                    maxScroll = Math.max(0, mRow.getWidth() - mScrollView.getWidth());
-                }
-                if (mScrollDirection < 0 && currentScroll <= 0) {
-                    stopAutoScroll();
-                    return;
-                }
-                if (mScrollDirection > 0 && currentScroll >= maxScroll) {
-                    stopAutoScroll();
-                    return;
-                }
-                // Step calculation: faster in quick margin
                 int step = mScrollFast ? dp(8) : dp(4);
-                if (mScrollDirection < 0) {
-                    if (currentScroll <= 0) {
-                        stopAutoScroll();
-                        return;
+                if (mOrientation == ORIENTATION_VERTICAL) {
+                    if (mVerticalScrollView != null && mRow != null) {
+                        int currentScroll = mVerticalScrollView.getScrollY();
+                        int maxScroll = Math.max(0, mRow.getHeight() - mVerticalScrollView.getHeight());
+                        if (mScrollDirection < 0) {
+                            if (currentScroll <= 0) {
+                                stopAutoScroll();
+                                return;
+                            }
+                            int actualStep = Math.min(step, currentScroll);
+                            mVerticalScrollView.smoothScrollBy(0, -actualStep);
+                        } else if (mScrollDirection > 0) {
+                            if (currentScroll >= maxScroll) {
+                                stopAutoScroll();
+                                return;
+                            }
+                            int actualStep = Math.min(step, maxScroll - currentScroll);
+                            mVerticalScrollView.smoothScrollBy(0, actualStep);
+                        }
                     }
-                    int actualStep = Math.min(step, currentScroll);
-                    mScrollView.smoothScrollBy(-actualStep, 0);
-                } else if (mScrollDirection > 0) {
-                    if (currentScroll >= maxScroll) {
-                        stopAutoScroll();
-                        return;
+                } else {
+                    if (mScrollView != null && mRow != null) {
+                        int currentScroll = mScrollView.getScrollX();
+                        int maxScroll = Math.max(0, mRow.getWidth() - mScrollView.getWidth());
+                        if (mScrollDirection < 0) {
+                            if (currentScroll <= 0) {
+                                stopAutoScroll();
+                                return;
+                            }
+                            int actualStep = Math.min(step, currentScroll);
+                            mScrollView.smoothScrollBy(-actualStep, 0);
+                        } else if (mScrollDirection > 0) {
+                            if (currentScroll >= maxScroll) {
+                                stopAutoScroll();
+                                return;
+                            }
+                            int actualStep = Math.min(step, maxScroll - currentScroll);
+                            mScrollView.smoothScrollBy(actualStep, 0);
+                        }
                     }
-                    int actualStep = Math.min(step, maxScroll - currentScroll);
-                    mScrollView.smoothScrollBy(actualStep, 0);
                 }
             }
             postOnAnimationDelayed(this, 16);
@@ -150,55 +168,119 @@ public class ColorOSDockBar extends FrameLayout {
         return (int) (dpValue * mDensity + 0.5f);
     }
 
+    public void setOrientation(int orientation) {
+        if (mOrientation != orientation) {
+            mOrientation = orientation;
+            removeAllViews();
+            initView();
+            setItems(new ArrayList<>(mItems));
+        }
+    }
+
+    public int getOrientation() {
+        return mOrientation;
+    }
+
     private void initView() {
         // Entire dock bar has transparent background (no card, no pill plate)
         setBackground(null);
         setClipChildren(false);
         setClipToPadding(false);
 
-        // Container height: 153dp (main_app_panel_max_height)
-        setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(153)));
+        ViewGroup.LayoutParams existingLp = getLayoutParams();
+        if (existingLp instanceof ViewGroup.MarginLayoutParams) {
+            existingLp.width = mOrientation == ORIENTATION_VERTICAL ? dp(96) : ViewGroup.LayoutParams.MATCH_PARENT;
+            existingLp.height = mOrientation == ORIENTATION_VERTICAL ? ViewGroup.LayoutParams.WRAP_CONTENT : dp(153);
+            setLayoutParams(existingLp);
+        } else {
+            setLayoutParams(new FrameLayout.LayoutParams(
+                    mOrientation == ORIENTATION_VERTICAL ? dp(96) : FrameLayout.LayoutParams.MATCH_PARENT,
+                    mOrientation == ORIENTATION_VERTICAL ? FrameLayout.LayoutParams.WRAP_CONTENT : dp(153)));
+        }
 
-        mScrollView = new HorizontalScrollView(getContext()) {
-            @Override
-            protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-                super.onMeasure(widthMeasureSpec, heightMeasureSpec);
-                if (mRow != null) {
-                    int scrollW = getMeasuredWidth();
-                    int rowW = mRow.getMeasuredWidth();
-                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mRow.getLayoutParams();
-                    int targetGravity = (rowW < scrollW)
-                            ? (Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM)
-                            : (Gravity.START | Gravity.BOTTOM);
-                    if (lp.gravity != targetGravity) {
-                        lp.gravity = targetGravity;
-                        mRow.setLayoutParams(lp);
-                        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        if (mOrientation == ORIENTATION_VERTICAL) {
+            mVerticalScrollView = new ScrollView(getContext()) {
+                @Override
+                protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                    if (mRow != null) {
+                        int scrollH = getMeasuredHeight();
+                        int rowH = mRow.getMeasuredHeight();
+                        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mRow.getLayoutParams();
+                        int targetGravity = (rowH < scrollH)
+                                ? (Gravity.CENTER_VERTICAL | Gravity.CENTER_HORIZONTAL)
+                                : (Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                        if (lp.gravity != targetGravity) {
+                            lp.gravity = targetGravity;
+                            mRow.setLayoutParams(lp);
+                            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                        }
                     }
                 }
-            }
-        };
-        mScrollView.setHorizontalScrollBarEnabled(false);
-        mScrollView.setOverScrollMode(OVER_SCROLL_NEVER);
-        mScrollView.setFillViewport(false); // CRITICAL: Do NOT force row to viewport width!
-        mScrollView.setClipChildren(false);
-        mScrollView.setClipToPadding(false);
+            };
+            mVerticalScrollView.setVerticalScrollBarEnabled(false);
+            mVerticalScrollView.setOverScrollMode(OVER_SCROLL_NEVER);
+            mVerticalScrollView.setFillViewport(false);
+            mVerticalScrollView.setClipChildren(false);
+            mVerticalScrollView.setClipToPadding(false);
 
-        FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, dp(153), Gravity.BOTTOM);
-        addView(mScrollView, scrollParams);
+            FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
+                    dp(96), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER);
+            addView(mVerticalScrollView, scrollParams);
 
-        mRow = new LinearLayout(getContext());
-        mRow.setOrientation(LinearLayout.HORIZONTAL);
-        mRow.setGravity(Gravity.BOTTOM);
-        mRow.setPadding(dp(10), 0, dp(10), 0); // paddingStart=10dp, paddingEnd=10dp
-        mRow.setClipChildren(false);
-        mRow.setClipToPadding(false);
+            mRow = new LinearLayout(getContext());
+            mRow.setOrientation(LinearLayout.VERTICAL);
+            mRow.setGravity(Gravity.CENTER_HORIZONTAL);
+            mRow.setPadding(0, dp(12), 0, dp(12));
+            mRow.setClipChildren(false);
+            mRow.setClipToPadding(false);
 
-        FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, dp(153), Gravity.START | Gravity.BOTTOM);
-        mScrollView.addView(mRow, rowParams);
+            FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
+                    dp(96), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+            mVerticalScrollView.addView(mRow, rowParams);
+            mScrollView = null;
+        } else {
+            mScrollView = new HorizontalScrollView(getContext()) {
+                @Override
+                protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                    if (mRow != null) {
+                        int scrollW = getMeasuredWidth();
+                        int rowW = mRow.getMeasuredWidth();
+                        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mRow.getLayoutParams();
+                        int targetGravity = (rowW < scrollW)
+                                ? (Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM)
+                                : (Gravity.START | Gravity.BOTTOM);
+                        if (lp.gravity != targetGravity) {
+                            lp.gravity = targetGravity;
+                            mRow.setLayoutParams(lp);
+                            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                        }
+                    }
+                }
+            };
+            mScrollView.setHorizontalScrollBarEnabled(false);
+            mScrollView.setOverScrollMode(OVER_SCROLL_NEVER);
+            mScrollView.setFillViewport(false); // CRITICAL: Do NOT force row to viewport width!
+            mScrollView.setClipChildren(false);
+            mScrollView.setClipToPadding(false);
+
+            FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, dp(153), Gravity.BOTTOM);
+            addView(mScrollView, scrollParams);
+
+            mRow = new LinearLayout(getContext());
+            mRow.setOrientation(LinearLayout.HORIZONTAL);
+            mRow.setGravity(Gravity.BOTTOM);
+            mRow.setPadding(dp(10), 0, dp(10), 0); // paddingStart=10dp, paddingEnd=10dp
+            mRow.setClipChildren(false);
+            mRow.setClipToPadding(false);
+
+            FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, dp(153), Gravity.START | Gravity.BOTTOM);
+            mScrollView.addView(mRow, rowParams);
+            mVerticalScrollView = null;
+        }
     }
 
     public void setOnDockItemDropListener(OnDockItemDropListener listener) {
@@ -223,11 +305,65 @@ public class ColorOSDockBar extends FrameLayout {
         if (mScrollView != null) {
             mScrollView.scrollTo(0, 0);
         }
+        if (mVerticalScrollView != null) {
+            mVerticalScrollView.scrollTo(0, 0);
+        }
         stopAutoScroll();
     }
 
     private View createItemView(DockItem item) {
-        // Item container: height = 138dp (main_app_layout_height), width = wrap_content
+        if (mOrientation == ORIENTATION_VERTICAL) {
+            // Vertical dock item: width = 88dp, height = 74dp
+            FrameLayout itemLayout = new FrameLayout(getContext());
+            itemLayout.setTag(item);
+            itemLayout.setClipChildren(false);
+            itemLayout.setClipToPadding(false);
+            itemLayout.setPadding(0, dp(6), 0, dp(6));
+
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
+                    dp(88), dp(72));
+            itemLayout.setLayoutParams(itemParams);
+
+            LinearLayout col = new LinearLayout(getContext());
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setGravity(Gravity.CENTER);
+            col.setClipChildren(false);
+            col.setClipToPadding(false);
+
+            FrameLayout.LayoutParams colParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER);
+            itemLayout.addView(col, colParams);
+
+            ImageView iconView = new ImageView(getContext());
+            iconView.setId(ID_ICON);
+            iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iconView.setImageDrawable(resolveIcon(item));
+
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+            iconParams.bottomMargin = dp(4);
+            iconParams.gravity = Gravity.CENTER_HORIZONTAL;
+            col.addView(iconView, iconParams);
+
+            TextView labelView = new TextView(getContext());
+            labelView.setId(ID_TEXT);
+            labelView.setText(item.label);
+            labelView.setTextColor(Color.parseColor("#FFF0F0F0"));
+            labelView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10);
+            labelView.setShadowLayer(dp(2), 0, dp(1), Color.parseColor("#80000000"));
+            labelView.setMaxLines(1);
+            labelView.setGravity(Gravity.CENTER_HORIZONTAL);
+            labelView.setEllipsize(TextUtils.TruncateAt.END);
+
+            LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
+                    dp(72), ViewGroup.LayoutParams.WRAP_CONTENT);
+            textParams.gravity = Gravity.CENTER_HORIZONTAL;
+            col.addView(labelView, textParams);
+
+            return itemLayout;
+        }
+
+        // Horizontal dock item: height = 138dp (main_app_layout_height), width = wrap_content
         FrameLayout itemLayout = new FrameLayout(getContext());
         itemLayout.setTag(item);
         itemLayout.setClipChildren(false);
@@ -254,26 +390,7 @@ public class ColorOSDockBar extends FrameLayout {
         ImageView iconView = new ImageView(getContext());
         iconView.setId(ID_ICON);
         iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        Drawable iconDrawable = item.icon;
-        if (iconDrawable == null) {
-            if (item.id != null) {
-                iconDrawable = BuiltInIconDrawable.create(item.id);
-            }
-            if (iconDrawable == null) {
-                if (item.label != null && (item.label.contains("存") || item.label.contains("保"))) {
-                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SAVE);
-                } else if (item.label != null && item.label.contains("分词")) {
-                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEGMENT);
-                } else if (item.label != null && item.label.contains("搜")) {
-                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEARCH);
-                } else if (item.label != null && item.label.contains("分享")) {
-                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SHARE);
-                } else {
-                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY);
-                }
-            }
-        }
-        iconView.setImageDrawable(iconDrawable);
+        iconView.setImageDrawable(resolveIcon(item));
 
         LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(44), dp(44));
         iconParams.bottomMargin = dp(8);
@@ -299,6 +416,29 @@ public class ColorOSDockBar extends FrameLayout {
         col.addView(labelView, textParams);
 
         return itemLayout;
+    }
+
+    private Drawable resolveIcon(DockItem item) {
+        Drawable iconDrawable = item.icon;
+        if (iconDrawable == null) {
+            if (item.id != null) {
+                iconDrawable = BuiltInIconDrawable.create(item.id);
+            }
+            if (iconDrawable == null) {
+                if (item.label != null && (item.label.contains("存") || item.label.contains("保"))) {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SAVE);
+                } else if (item.label != null && item.label.contains("分词")) {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEGMENT);
+                } else if (item.label != null && item.label.contains("搜")) {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEARCH);
+                } else if (item.label != null && item.label.contains("分享")) {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SHARE);
+                } else {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY);
+                }
+            }
+        }
+        return iconDrawable;
     }
 
     /**
@@ -350,47 +490,73 @@ public class ColorOSDockBar extends FrameLayout {
      * @param rawY Screen touch Y coordinate
      */
     public void onDragLocation(float rawX, float rawY) {
-        if (mRow == null || mRow.getChildCount() == 0 || mScrollView == null) {
+        if (mRow == null || mRow.getChildCount() == 0) {
             return;
         }
 
         // Measure finger coordinates directly in mRow's coordinate space!
-        // This completely eliminates any offset caused by horizontal centering or window margins.
         int[] rowScreenLoc = new int[2];
         mRow.getLocationOnScreen(rowScreenLoc);
         float rowTouchX = rawX - rowScreenLoc[0];
         float rowTouchY = rawY - rowScreenLoc[1];
 
-        // 1. Edge Auto-Scroll Handling (covering screen left and right edges, including lower corners)
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int zoomMargin = dp(mZoomMarginDp);
         int quickMargin = (int) (zoomMargin * 0.45f);
 
-        int[] dockScreenLoc = new int[2];
-        getLocationOnScreen(dockScreenLoc);
-        // Vertical active range: from slightly above the dock all the way to screen bottom
-        boolean inLowerZone = (rawY >= dockScreenLoc[1] - dp(60));
-        boolean canScroll = mRow != null && mScrollView != null && mRow.getWidth() > mScrollView.getWidth();
+        if (mOrientation == ORIENTATION_VERTICAL) {
+            int[] dockScreenLoc = new int[2];
+            getLocationOnScreen(dockScreenLoc);
+            int dockTop = dockScreenLoc[1];
+            int dockHeight = getHeight() > 0 ? getHeight() : dp(480);
+            boolean canScroll = mVerticalScrollView != null && mRow.getHeight() > mVerticalScrollView.getHeight();
 
-        if (canScroll && inLowerZone) {
-            if (rawX <= zoomMargin) {
-                boolean fast = (rawX <= quickMargin);
-                startAutoScroll(-1, fast);
-            } else if (rawX >= screenWidth - zoomMargin) {
-                boolean fast = (rawX >= screenWidth - quickMargin);
-                startAutoScroll(1, fast);
+            if (canScroll) {
+                if (rawY <= dockTop + zoomMargin) {
+                    boolean fast = (rawY <= dockTop + quickMargin);
+                    startAutoScroll(-1, fast);
+                } else if (rawY >= dockTop + dockHeight - zoomMargin) {
+                    boolean fast = (rawY >= dockTop + dockHeight - quickMargin);
+                    startAutoScroll(1, fast);
+                } else {
+                    stopAutoScroll();
+                }
             } else {
                 stopAutoScroll();
             }
-        } else {
-            stopAutoScroll();
-        }
 
-        // Vertical boundary check: only reset magnification if finger moves significantly ABOVE the dock!
-        // Downward movements (into navigation bar / lower corners) do NOT reset magnification.
-        if (rowTouchY < -dp(50)) {
-            resetMagnification(true);
-            return;
+            // Boundary check: if finger moves too far left of dock or far beyond top/bottom
+            if (rowTouchX < -dp(60) || rowTouchY < -dp(40) || rowTouchY > mRow.getHeight() + dp(40)) {
+                resetMagnification(true);
+                return;
+            }
+        } else {
+            // 1. Edge Auto-Scroll Handling (covering screen left and right edges, including lower corners)
+            int screenWidth = getResources().getDisplayMetrics().widthPixels;
+            int[] dockScreenLoc = new int[2];
+            getLocationOnScreen(dockScreenLoc);
+            // Vertical active range: from slightly above the dock all the way to screen bottom
+            boolean inLowerZone = (rawY >= dockScreenLoc[1] - dp(60));
+            boolean canScroll = mScrollView != null && mRow.getWidth() > mScrollView.getWidth();
+
+            if (canScroll && inLowerZone) {
+                if (rawX <= zoomMargin) {
+                    boolean fast = (rawX <= quickMargin);
+                    startAutoScroll(-1, fast);
+                } else if (rawX >= screenWidth - zoomMargin) {
+                    boolean fast = (rawX >= screenWidth - quickMargin);
+                    startAutoScroll(1, fast);
+                } else {
+                    stopAutoScroll();
+                }
+            } else {
+                stopAutoScroll();
+            }
+
+            // Vertical boundary check: only reset magnification if finger moves significantly ABOVE the dock!
+            if (rowTouchY < -dp(50)) {
+                resetMagnification(true);
+                return;
+            }
         }
 
         // 2. Fisheye Magnification within Dock
@@ -405,6 +571,79 @@ public class ColorOSDockBar extends FrameLayout {
 
     private void applyFisheye(float rowTouchX, float rowTouchY) {
         if (mRow == null || mRow.getChildCount() == 0) return;
+        if (mOrientation == ORIENTATION_VERTICAL) {
+            applyFisheyeVertical(rowTouchX, rowTouchY);
+        } else {
+            applyFisheyeHorizontal(rowTouchX, rowTouchY);
+        }
+    }
+
+    private void applyFisheyeVertical(float rowTouchX, float rowTouchY) {
+        View firstChild = mRow.getChildAt(0);
+        if (firstChild == null || firstChild.getHeight() == 0) {
+            return;
+        }
+        float itemStep = dp(72);
+        int closestIdx = -1;
+        float minDist = Float.MAX_VALUE;
+        int count = mRow.getChildCount();
+
+        for (int i = 0; i < count; i++) {
+            View child = mRow.getChildAt(i);
+            float childCenter = child.getTop() + child.getHeight() / 2.0f;
+            float dist = Math.abs(rowTouchY - childCenter);
+            if (dist < minDist) {
+                minDist = dist;
+                closestIdx = i;
+            }
+        }
+
+        if (closestIdx >= 0) {
+            View closestChild = mRow.getChildAt(closestIdx);
+            float closestCenter = closestChild.getTop() + closestChild.getHeight() / 2.0f;
+            float offset = (rowTouchY - closestCenter) / itemStep;
+            offset = Math.max(-0.5f, Math.min(0.5f, offset));
+
+            float v2 = offset * 0.13f;
+            float centerScale = 1.23f - Math.abs(v2);
+
+            for (int i = 0; i < count; i++) {
+                float targetScale;
+                if (i == closestIdx) {
+                    targetScale = centerScale;
+                } else if (i < closestIdx) {
+                    int delta = closestIdx - i;
+                    targetScale = 1.23f - delta * 0.13f - v2;
+                    targetScale = Math.max(1.0f, targetScale);
+                } else {
+                    int delta = i - closestIdx;
+                    targetScale = 1.23f - delta * 0.13f + v2;
+                    targetScale = Math.max(1.0f, targetScale);
+                }
+
+                float scale = 1.0f + (targetScale - 1.0f) * mExpansionProgress;
+
+                View child = mRow.getChildAt(i);
+                ImageView icon = child.findViewById(ID_ICON);
+                if (icon != null) {
+                    // Anchor right center: expands leftward into screen
+                    icon.setPivotX(icon.getWidth());
+                    icon.setPivotY(icon.getHeight() / 2.0f);
+                    icon.setScaleX(scale);
+                    icon.setScaleY(scale);
+                }
+
+                // Leftward lift translation (bulges toward screen center)
+                float progress = Math.max(0.0f, Math.min(1.0f, (scale - 1.0f) / 0.23f));
+                float interpolated = sPathInterpolator.getInterpolation(progress);
+                float liftDp = 11.987f * interpolated * mExpansionProgress;
+                child.setTranslationX(-liftDp * mDensity);
+                child.setTranslationY(0f);
+            }
+        }
+    }
+
+    private void applyFisheyeHorizontal(float rowTouchX, float rowTouchY) {
         View firstChild = mRow.getChildAt(0);
         if (firstChild == null || firstChild.getWidth() == 0) {
             return;
@@ -465,12 +704,11 @@ public class ColorOSDockBar extends FrameLayout {
                 }
 
                 // Upward lift translation (Lv5/k;->d):
-                // progress = (scale - 1.0f) / 0.23f
-                // liftDp = 11.987dp * PathInterpolator(0.3, 0, 0.7, 1).getInterpolation(progress)
                 float progress = Math.max(0.0f, Math.min(1.0f, (scale - 1.0f) / 0.23f));
                 float interpolated = sPathInterpolator.getInterpolation(progress);
                 float liftDp = 11.987f * interpolated * mExpansionProgress;
                 child.setTranslationY(-liftDp * mDensity);
+                child.setTranslationX(0f);
             }
         }
     }
@@ -517,20 +755,21 @@ public class ColorOSDockBar extends FrameLayout {
                     icon.animate().scaleX(1.0f).scaleY(1.0f)
                             .setDuration(160).setInterpolator(sPathInterpolator).start();
                 }
-                child.animate().translationY(0f)
+                child.animate().translationX(0f).translationY(0f)
                         .setDuration(160).setInterpolator(sPathInterpolator).start();
             } else {
                 if (icon != null) {
                     icon.setScaleX(1.0f);
                     icon.setScaleY(1.0f);
                 }
+                child.setTranslationX(0f);
                 child.setTranslationY(0f);
             }
         }
     }
 
     /**
-     * Finds the dropped target item under (rawX, rawY), taking into account child translationY.
+     * Finds the dropped target item under (rawX, rawY), taking into account child translation.
      */
     @Nullable
     public DockItem findHitTarget(float rawX, float rawY) {
@@ -540,6 +779,28 @@ public class ColorOSDockBar extends FrameLayout {
         mRow.getLocationOnScreen(rowScreenLoc);
         float rowTouchX = rawX - rowScreenLoc[0];
         float rowTouchY = rawY - rowScreenLoc[1];
+
+        if (mOrientation == ORIENTATION_VERTICAL) {
+            if (rowTouchX < -dp(40) || rowTouchX > mRow.getWidth() + dp(40)
+                    || rowTouchY < -dp(20) || rowTouchY > mRow.getHeight() + dp(20)) {
+                return null;
+            }
+            for (int i = 0; i < mRow.getChildCount(); i++) {
+                View child = mRow.getChildAt(i);
+                float childLeft = child.getLeft() + child.getTranslationX();
+                float childRight = child.getRight();
+                float childTop = child.getTop();
+                float childBottom = child.getBottom();
+                if (rowTouchY >= childTop && rowTouchY <= childBottom
+                        && rowTouchX >= childLeft - dp(25) && rowTouchX <= childRight + dp(35)) {
+                    Object tag = child.getTag();
+                    if (tag instanceof DockItem) {
+                        return (DockItem) tag;
+                    }
+                }
+            }
+            return null;
+        }
 
         if (rowTouchX < 0 || rowTouchX > mRow.getWidth()
                 || rowTouchY < -dp(30) || rowTouchY > mRow.getHeight() + dp(30)) {
