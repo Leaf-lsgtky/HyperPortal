@@ -187,11 +187,11 @@ public final class TargetRepository {
 
     public static List<ShareTargetEntry> builtInEntries(boolean image) {
         List<ShareTargetEntry> result = new ArrayList<>();
-        result.add(new ShareTargetEntry("builtin:copy", image ? "复制图片" : "复制文本",
+        result.add(new ShareTargetEntry("builtin:copy", image ? "复制" : "复制文本",
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY), null,
                 ShareTargetEntry.KIND_COPY, "action", 110, true, true));
         if (image) {
-            result.add(new ShareTargetEntry("builtin:save", "保存原图",
+            result.add(new ShareTargetEntry("builtin:save", "保存",
                     "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SAVE), null,
                     ShareTargetEntry.KIND_SAVE, "image", 105, false, true));
         } else {

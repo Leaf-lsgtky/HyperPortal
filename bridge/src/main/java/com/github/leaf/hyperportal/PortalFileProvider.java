@@ -194,9 +194,13 @@ public class PortalFileProvider extends ContentProvider {
     public String[] getStreamTypes(Uri uri, String mimeTypeFilter) {
         String mime = getType(uri);
         if (mime != null) {
-            return new String[]{mime, "image/*"};
+            if (mime.startsWith("image/")) {
+                return new String[]{mime, "image/*"};
+            } else {
+                return new String[]{mime, "*/*"};
+            }
         }
-        return new String[]{"image/png", "image/jpeg", "image/*"};
+        return new String[]{"*/*"};
     }
 
     @Override

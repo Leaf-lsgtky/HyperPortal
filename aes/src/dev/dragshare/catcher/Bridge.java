@@ -357,11 +357,11 @@ public final class Bridge {
                     int generation = sGestureGeneration + 1;
                     sGestureGeneration = generation;
                     sPendingGeneration = generation;
-                    // Schedule fallback at 500ms (after AES u/a's 450ms timer).
-                    // If u/a fires at 450ms, recordTouch() cancels this runnable so
-                    // it never duplicates work; if u/a was cancelled by 25-99px micro-tremor
-                    // or a non-DecorView window, this fallback catches it cleanly.
-                    sMainHandler.postDelayed(sCustomLongPressRunnable, sLongPressDurationMs > 0 ? sLongPressDurationMs : 800);
+                    // Schedule fallback at sLongPressDurationMs + 150ms (after AES u/a's timer).
+                    // If u/a fires, recordTouch() cancels this runnable so it never duplicates work;
+                    // if u/a was cancelled by micro-tremor or a non-DecorView window, this fallback catches it cleanly.
+                    int fallbackDelay = (sLongPressDurationMs > 0 ? sLongPressDurationMs : 800) + 150;
+                    sMainHandler.postDelayed(sCustomLongPressRunnable, fallbackDelay);
                 } else if (action == MotionEvent.ACTION_MOVE) {
                     sLastMoveRawX = rawX;
                     sLastMoveRawY = rawY;
@@ -461,6 +461,14 @@ public final class Bridge {
                 Log.i(TAG, "customLongPress pass-through: " + (nonComposeTarget == null ? "null" : nonComposeTarget.getClass().getName()));
                 if (nonComposeTarget != null && nonComposeTarget != touchTarget) {
                     touchTarget = nonComposeTarget;
+                    content = preExtract(touchTarget, 3, false);
+                }
+            }
+            if ((content == null || !isBundleMeaningful(content)) && isWeChat(root)) {
+                View wechatMsgView = findWeChatViewUnderTouch(root, sDownRawX, sDownRawY);
+                if (wechatMsgView != null) {
+                    Log.i(TAG, "customLongPress hit WeChat message view: " + wechatMsgView.getClass().getName());
+                    touchTarget = wechatMsgView;
                     content = preExtract(touchTarget, 3, false);
                 }
             }
@@ -1552,7 +1560,13 @@ public final class Bridge {
 
             // 2. Parse XML fields
             String title = extractXmlTag(xml, "title");
+            if (title != null) {
+                title = unescapeXml(title);
+            }
             String ext = extractXmlTag(xml, "fileext");
+            if (ext != null) {
+                ext = unescapeXml(ext);
+            }
             String totalLenStr = extractXmlTag(xml, "totallen");
             long totalLen = -1;
             if (!TextUtils.isEmpty(totalLenStr)) {
@@ -1650,6 +1664,37 @@ public final class Bridge {
             }
             ViewParent parent = current.getParent();
             current = (parent instanceof View) ? (View) parent : null;
+        }
+        if (view instanceof ViewGroup) {
+            String descendantXml = findWeChatMsgXmlInDescendants((ViewGroup) view, 0);
+            if (descendantXml != null) {
+                return descendantXml;
+            }
+        }
+        return null;
+    }
+
+    private static String findWeChatMsgXmlInDescendants(ViewGroup group, int depth) {
+        if (group == null || depth > 4) return null;
+        int count = group.getChildCount();
+        for (int i = 0; i < count; i++) {
+            View child = group.getChildAt(i);
+            if (child == null) continue;
+            Object tag = child.getTag();
+            if (tag != null) {
+                String xml = resolveWeChatXmlFromObject(tag);
+                if (xml != null && (xml.contains("<msg") || xml.contains("<appmsg"))) {
+                    return xml;
+                }
+            }
+            String xml = resolveWeChatXmlFromView(child);
+            if (xml != null && (xml.contains("<msg") || xml.contains("<appmsg"))) {
+                return xml;
+            }
+            if (child instanceof ViewGroup) {
+                String descendantXml = findWeChatMsgXmlInDescendants((ViewGroup) child, depth + 1);
+                if (descendantXml != null) return descendantXml;
+            }
         }
         return null;
     }
@@ -1756,6 +1801,37 @@ public final class Bridge {
         return null;
     }
 
+    private static String unescapeXml(String s) {
+        if (TextUtils.isEmpty(s) || !s.contains("&")) return s;
+        s = s.replace("&amp;", "&")
+             .replace("&lt;", "<")
+             .replace("&gt;", ">")
+             .replace("&quot;", "\"")
+             .replace("&apos;", "'")
+             .replace("&#39;", "'")
+             .replace("&#x20;", " ")
+             .replace("&#32;", " ")
+             .replace("&nbsp;", " ");
+        if (s.contains("&#")) {
+            try {
+                Pattern p = Pattern.compile("&#(?:x([0-9a-fA-F]+)|([0-9]+));");
+                Matcher m = p.matcher(s);
+                StringBuffer sb = new StringBuffer();
+                while (m.find()) {
+                    try {
+                        int code = m.group(1) != null ? Integer.parseInt(m.group(1), 16) : Integer.parseInt(m.group(2));
+                        m.appendReplacement(sb, Matcher.quoteReplacement(new String(Character.toChars(code))));
+                    } catch (Throwable t) {
+                        m.appendReplacement(sb, m.group(0));
+                    }
+                }
+                m.appendTail(sb);
+                s = sb.toString();
+            } catch (Throwable ignored) {}
+        }
+        return s;
+    }
+
     private static String extractXmlTag(String xml, String tag) {
         if (xml == null || tag == null) return null;
         Pattern p = Pattern.compile("<" + tag + ">(.*?)</" + tag + ">", Pattern.DOTALL);
@@ -1765,7 +1841,7 @@ public final class Bridge {
             if (val.startsWith("<![CDATA[") && val.endsWith("]]>")) {
                 val = val.substring(9, val.length() - 3).trim();
             }
-            return val;
+            return unescapeXml(val);
         }
         return null;
     }
@@ -1807,6 +1883,13 @@ public final class Bridge {
             if (files == null) continue;
             for (File f : files) {
                 if (!f.isFile() || f.length() <= 0) continue;
+                String name = f.getName();
+                String cleanName = name.endsWith("\u2316") ? name.substring(0, name.length() - 1) : name;
+                if (!TextUtils.isEmpty(title) && cleanName.equalsIgnoreCase(title)) {
+                    if (totalLen <= 0 || f.length() == totalLen) {
+                        return f;
+                    }
+                }
                 int score = scoreWeChatCandidate(f, title, ext, totalLen, md5);
                 if (score > bestScore) {
                     bestScore = score;
@@ -1827,12 +1910,6 @@ public final class Bridge {
     private static boolean isCandidateMatched(File f, long totalLen, String md5) {
         if (f == null || !f.isFile() || f.length() <= 0) return false;
         if (totalLen > 0 && f.length() != totalLen) return false;
-        if (!TextUtils.isEmpty(md5)) {
-            String fMd5 = calculateFileMd5(f);
-            if (!TextUtils.isEmpty(fMd5) && !md5.equalsIgnoreCase(fMd5)) {
-                return false;
-            }
-        }
         return true;
     }
 
@@ -1957,6 +2034,28 @@ public final class Bridge {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private static View findWeChatViewUnderTouch(View root, float rawX, float rawY) {
+        if (root == null || root.getVisibility() != View.VISIBLE) return null;
+        int[] loc = new int[2];
+        root.getLocationOnScreen(loc);
+        if (rawX < loc[0] - 10 || rawX > loc[0] + root.getWidth() + 10
+                || rawY < loc[1] - 10 || rawY > loc[1] + root.getHeight() + 10) {
+            return null;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = group.getChildCount() - 1; i >= 0; i--) {
+                View child = group.getChildAt(i);
+                View hit = findWeChatViewUnderTouch(child, rawX, rawY);
+                if (hit != null) return hit;
+            }
+        }
+        if (findWeChatMsgXml(root) != null) {
+            return root;
+        }
+        return null;
     }
 
     private static View findWeChatBubbleView(View view) {
@@ -2264,7 +2363,9 @@ public final class Bridge {
                 || lower.equals("点赞") || lower.equals("评论") || lower.equals("收藏")
                 || lower.equals("查看图片") || lower.equals("查看原图") || lower.equals("原图") || lower.equals("表情包")
                 || lower.equals("查看大图") || lower.equals("动图") || lower.equals("gif图") || lower.equals("语音")
-                || lower.equals("语音消息") || lower.equals("已发送") || lower.equals("发送中")) {
+                || lower.equals("语音消息") || lower.equals("已发送") || lower.equals("发送中")
+                || lower.equals("浮窗") || lower.equals("按住说话") || lower.equals("按住 说话")
+                || lower.equals("切换到键盘") || lower.equals("切换到语音") || lower.equals("聊天信息")) {
             return false;
         }
         // 3. Control suffix matches (e.g. 暂停视频按钮, 播放按钮, 发送按钮)
@@ -4954,6 +5055,15 @@ public final class Bridge {
         }
         name = name.replaceAll("[/\\\\\\x00-\\x1f]", "_");
         Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+        try {
+            if (pfd.getFileDescriptor() != null && pfd.getFileDescriptor().valid()) {
+                try {
+                    android.system.Os.lseek(pfd.getFileDescriptor(), 0, android.system.OsConstants.SEEK_SET);
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         try (OutputStream output = context.getContentResolver().openOutputStream(target, "w");
              InputStream input = new FileInputStream(pfd.getFileDescriptor())) {
             if (output == null) {
@@ -5259,7 +5369,6 @@ public final class Bridge {
             } catch (Throwable ignored) {
             }
         }
-        String imageCacheName = null;
         int previewHeight;
         int previewWidth;
         float density = context.getResources().getDisplayMetrics().density;
@@ -5290,7 +5399,15 @@ public final class Bridge {
         intent.putExtra("previewWidth", previewWidth);
         intent.putExtra("previewHeight", previewHeight);
         Uri imageContentUri = null;
-        String imageMimeType = payload.getString("mimeType");
+        String imageCacheName = payload.getString("stagedCacheName");
+        String stagedUriStr = payload.getString("stagedImageUri");
+        if (stagedUriStr != null) {
+            imageContentUri = Uri.parse(stagedUriStr);
+        }
+        String imageMimeType = payload.getString("stagedImageMime");
+        if (imageMimeType == null) {
+            imageMimeType = payload.getString("mimeType");
+        }
         String lowerSourceMime = imageMimeType == null
                 ? "" : imageMimeType.toLowerCase(Locale.US);
         String sourceName = payload.getString("fileName");
@@ -5307,7 +5424,7 @@ public final class Bridge {
         // the current extraction path exposes a static bitmap. Keep the original file
         // only when there is no bitmap to convert.
         boolean preferPngForGif = sourceIsGif && dragBitmap != null;
-        if (filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
+        if (imageCacheName == null && filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
             imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
         }
         if (imageCacheName == null && dragBitmap != null) {
@@ -5327,6 +5444,8 @@ public final class Bridge {
         }
         if (imageCacheName != null) {
             imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(imageCacheName));
+            payload.putString("stagedCacheName", imageCacheName);
+            payload.putString("stagedImageUri", imageContentUri.toString());
             intent.putExtra("imageCacheName", imageCacheName);
             intent.putExtra("imageUri", imageContentUri.toString());
             intent.putExtra("imageFileName", payload.getString("fileName", imageCacheName));
@@ -5334,7 +5453,8 @@ public final class Bridge {
             // .png even when the source was image/gif, and a .bin file must never be
             // advertised as image/*.
             String normalizedMime = mimeForStagedFile(imageCacheName, imageMimeType);
-            imageMimeType = TextUtils.isEmpty(normalizedMime) ? "image/png" : normalizedMime;
+            imageMimeType = TextUtils.isEmpty(normalizedMime) ? "application/octet-stream" : normalizedMime;
+            payload.putString("stagedImageMime", imageMimeType);
             intent.putExtra("imageMimeType", imageMimeType);
             Log.i(TAG, "staged image name=" + imageCacheName
                     + " mime=" + imageMimeType
@@ -5835,8 +5955,20 @@ public final class Bridge {
                 || name.contains("SlideBack")
                 || name.contains("TouchProxy")
                 || name.contains("GestureOverlay")
-                || name.contains("TouchInterceptor")) {
+                || name.contains("TouchInterceptor")
+                || name.contains("FloatBall")
+                || name.contains("FloatView")
+                || name.contains("FloatIndicator")
+                || name.contains("TalkRoom")
+                || name.contains("MultiTask")) {
             return true;
+        }
+        try {
+            CharSequence desc = v.getContentDescription();
+            if (desc != null && "浮窗".equals(desc.toString().trim())) {
+                return true;
+            }
+        } catch (Throwable ignored) {
         }
         if (!(v instanceof ViewGroup) && !isComposeView(v) && !isWebViewLike(v)
                 && !(v instanceof TextView) && !(v instanceof ImageView) && !isTextLikeView(v)) {

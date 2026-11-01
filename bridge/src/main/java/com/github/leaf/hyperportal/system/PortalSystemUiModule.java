@@ -32,6 +32,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.webkit.MimeTypeMap;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.util.Locale;
@@ -374,47 +375,57 @@ public final class PortalSystemUiModule {
                 if (targetUri == null && bmp != null) {
                     targetUri = saveBitmapToCache(ctx, bmp);
                 }
+                boolean isImage = TextUtils.isEmpty(mImageMime) || mImageMime.startsWith("image/");
                 if (targetUri != null) {
-                    ClipData clip = ClipData.newUri(ctx.getContentResolver(), "image", targetUri);
+                    ClipData clip = ClipData.newUri(ctx.getContentResolver(), isImage ? "image" : "file", targetUri);
                     cm.setPrimaryClip(clip);
-                    toast("图片已复制到剪贴板");
+                    toast((isImage ? "图片" : "文件") + "已复制到剪贴板");
                 } else {
-                    toast("复制图片失败");
+                    toast("复制失败");
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "copyImageToClipboard failed", t);
-                toast("复制图片失败");
+                toast("复制失败");
             }
         }
 
         private void saveImageToGallery(Context ctx, Bitmap bmp, Uri uri) {
             try {
                 String extension = "png";
-                String mimeType = "image/png";
+                String mimeType = !TextUtils.isEmpty(mImageMime) ? mImageMime : "image/png";
                 if (uri != null) {
                     String path = uri.getPath();
                     if (path != null) {
-                        String lower = path.toLowerCase(Locale.US);
-                        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-                            extension = "jpg";
-                            mimeType = "image/jpeg";
-                        } else if (lower.endsWith(".webp")) {
-                            extension = "webp";
-                            mimeType = "image/webp";
-                        } else if (lower.endsWith(".gif")) {
-                            extension = "gif";
-                            mimeType = "image/gif";
+                        int dot = path.lastIndexOf('.');
+                        if (dot >= 0) {
+                            extension = path.substring(dot + 1).toLowerCase(Locale.US);
+                            String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+                            if (!TextUtils.isEmpty(mime)) {
+                                mimeType = mime;
+                            }
                         }
                     }
                 }
+                boolean isImage = mimeType.startsWith("image/");
+                String displayName = !TextUtils.isEmpty(mText) && mText.contains(".")
+                        ? mText : "HyperPortal_" + System.currentTimeMillis() + "." + extension;
                 ContentValues values = new ContentValues();
-                values.put(MediaStore.Images.Media.DISPLAY_NAME, "HyperPortal_" + System.currentTimeMillis() + "." + extension);
-                values.put(MediaStore.Images.Media.MIME_TYPE, mimeType);
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
+                Uri baseUri;
                 if (Build.VERSION.SDK_INT >= 29) {
-                    values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HyperPortal");
-                    values.put(MediaStore.Images.Media.IS_PENDING, 1);
+                    if (isImage) {
+                        values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HyperPortal");
+                        baseUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                    } else {
+                        values.put(MediaStore.Downloads.RELATIVE_PATH, "Download/HyperPortal");
+                        baseUri = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                    }
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                } else {
+                    baseUri = isImage ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
                 }
-                Uri inserted = ctx.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                Uri inserted = ctx.getContentResolver().insert(baseUri, values);
                 if (inserted != null) {
                     long bytesWritten = 0;
                     try (OutputStream os = ctx.getContentResolver().openOutputStream(inserted)) {
@@ -448,19 +459,23 @@ public final class PortalSystemUiModule {
                             ctx.getContentResolver().delete(inserted, null, null);
                         } catch (Throwable ignored) {
                         }
-                        toast("保存图片失败");
+                        toast("保存失败");
                         return;
                     }
                     if (Build.VERSION.SDK_INT >= 29) {
                         values.clear();
-                        values.put(MediaStore.Images.Media.IS_PENDING, 0);
+                        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
                         ctx.getContentResolver().update(inserted, values, null, null);
                     }
-                    toast("原图已保存至相册 (Pictures/HyperPortal)");
+                    if (isImage) {
+                        toast("原图已保存至相册 (Pictures/HyperPortal)");
+                    } else {
+                        toast("文件已保存至下载目录 (Download/HyperPortal)");
+                    }
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "saveImageToGallery failed", t);
-                toast("保存图片失败");
+                toast("保存失败");
             }
         }
 
