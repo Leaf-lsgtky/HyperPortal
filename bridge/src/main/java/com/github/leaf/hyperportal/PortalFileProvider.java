@@ -19,6 +19,7 @@ import com.github.leaf.hyperportal.data.HyperPortalPreferences;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -143,8 +144,69 @@ public class PortalFileProvider extends ContentProvider {
         }
     }
 
+    public static final int MAX_CACHE_FILES = 5;
+    public static final long MAX_CACHE_AGE_MS = 12 * 3600 * 1000L; // 12 hours
+
+    public static void pruneCacheAsync(Context context, String excludeName) {
+        if (context == null) return;
+        new Thread(() -> {
+            try {
+                pruneCache(context, excludeName);
+            } catch (Throwable ignored) {}
+        }, "hyperportal-cache-prune").start();
+    }
+
+    public static void pruneCache(Context context, String excludeName) {
+        if (context == null) return;
+        File dir = new File(context.getCacheDir(), INCOMING);
+        if (!dir.isDirectory()) return;
+        File[] files = dir.listFiles();
+        if (files == null || files.length == 0) return;
+
+        long now = System.currentTimeMillis();
+        List<File> survivors = new ArrayList<>();
+
+        for (File f : files) {
+            if (!f.isFile()) continue;
+            if (excludeName != null && excludeName.equals(f.getName())) {
+                survivors.add(f);
+                continue;
+            }
+            long age = now - f.lastModified();
+            // 1. Delete files older than 12 hours (protect newly created files within 5 minutes)
+            if (age > MAX_CACHE_AGE_MS && (now - f.lastModified() > 5 * 60 * 1000L)) {
+                if (f.delete()) {
+                    Log.i("PortalFileProvider", "pruned expired cache file: " + f.getName() + " (age " + (age / 3600000L) + "h)");
+                }
+            } else {
+                survivors.add(f);
+            }
+        }
+
+        // 2. If surviving files exceed MAX_CACHE_FILES (5), sort by lastModified ascending (oldest first)
+        if (survivors.size() > MAX_CACHE_FILES) {
+            Collections.sort(survivors, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            int toDelete = survivors.size() - MAX_CACHE_FILES;
+            for (File f : survivors) {
+                if (toDelete <= 0) break;
+                if (excludeName != null && excludeName.equals(f.getName())) {
+                    continue;
+                }
+                // Never delete files modified within the last 3 minutes (protect in-flight drop transfers)
+                if (now - f.lastModified() < 3 * 60 * 1000L) {
+                    continue;
+                }
+                if (f.delete()) {
+                    toDelete--;
+                    Log.i("PortalFileProvider", "pruned LRU cache file: " + f.getName());
+                }
+            }
+        }
+    }
+
     @Override
     public boolean onCreate() {
+        pruneCacheAsync(getContext(), null);
         return true;
     }
 
@@ -166,6 +228,7 @@ public class PortalFileProvider extends ContentProvider {
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
         }
         if (mode.contains("w")) {
+            pruneCacheAsync(getContext(), name);
             return ParcelFileDescriptor.open(file,
                     ParcelFileDescriptor.MODE_CREATE
                             | ParcelFileDescriptor.MODE_WRITE_ONLY

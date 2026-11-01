@@ -155,6 +155,7 @@ public class PortalService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        PortalFileProvider.pruneCacheAsync(this, null);
         sInstance = this;
         mWindowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         createChannel();
@@ -1235,6 +1236,7 @@ public class PortalService extends Service {
         if (!dir.exists()) {
             dir.mkdirs();
         }
+        PortalFileProvider.pruneCacheAsync(this, null);
         return dir;
     }
 
