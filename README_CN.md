@@ -95,7 +95,7 @@ ohmyAES/
 │   ├── COLOROS_VIEWDRAG_SPEC.md       # ColorOS 拖拽交互与动效规范
 │   └── COLOROS_COMPOSE_EXTRACTION_SPEC.md # Compose 语义层深度提取规范
 │
-├── signing/                           # 签名密钥库 (poc.jks)
+├── .sign/                             # 本地签名密钥与口令（已 git 忽略）
 ├── dist/                              # 最终产物输出目录（已加入 .gitignore）
 ├── AGENTS.md                          # ⚠️ AI Agent 与开发者必须遵守的核心工程守则
 ├── README.md                          # 英文开源介绍

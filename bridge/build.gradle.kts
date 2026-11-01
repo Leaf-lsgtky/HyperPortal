@@ -29,16 +29,34 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = rootProject.file("signing/poc.jks")
-            storePassword = "pocpass"
-            keyAlias = "poc"
-            keyPassword = "pocpass"
+            val credentials = rootProject.file(".sign/qianming.txt")
+            if (!credentials.isFile) {
+                throw GradleException(
+                    "Missing .sign/qianming.txt. Put the release keystore and qianming.txt in .sign/ (git-ignored).",
+                )
+            }
+            val lines = credentials.readLines().map { it.trim() }
+            fun signingValue(key: String): String {
+                val index = lines.indexOf(key)
+                if (index < 0 || index + 1 >= lines.size || lines[index + 1].isEmpty()) {
+                    throw GradleException("Missing $key in ${credentials.path}")
+                }
+                return lines[index + 1]
+            }
+            storeFile = rootProject.file(".sign/my-release-key.jks")
+            storePassword = signingValue("KEYSTORE_PASSWORD")
+            keyAlias = signingValue("ALIAS")
+            keyPassword = signingValue("KEY_PASSWORD")
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Normal development/test builds stay unminified. Pass
+            // -Phyperportal.minify=true (python tools/build.py bridge --r8)
+            // only for a pre-release R8 verification build. AES is never R8'd.
+            isMinifyEnabled = (project.findProperty("hyperportal.minify") as String?)?.toBoolean() ?: false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

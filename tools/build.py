@@ -7,9 +7,10 @@ Builds both:
   2. DragShareBridge (HyperPortal.apk) - Companion Service & LSPosed 3D tilt module
 
 Usage:
-  python tools/build.py bridge [--clean]
-  python tools/build.py aes [--clean] [--version-code <N>]
-  python tools/build.py all [--clean]
+  python tools/build.py bridge [--clean]           # normal test build, R8 OFF
+  python tools/build.py bridge --r8                # pre-release R8 build -> dist/HyperPortal-r8.apk
+  python tools/build.py aes [--clean] [--version-code <N>]   # never R8-minified
+  python tools/build.py all [--clean] [--r8]
 """
 
 import argparse
@@ -42,11 +43,18 @@ def sign_and_verify(aligned_apk, output_apk):
     if output_apk.exists():
         output_apk.unlink()
     
+    alias, key_pass, keystore_pass = cfg.require_signing()
+
     # 1. Sign
+    common = (
+        f'sign --ks "{cfg.KEYSTORE}" --ks-key-alias {alias} '
+        f'--ks-pass pass:{keystore_pass} --key-pass pass:{key_pass} '
+        f'--out "{output_apk}" "{aligned_apk}"'
+    )
     if cfg.APKSIGNER_CMD.endswith(".jar\"") or "java -jar" in cfg.APKSIGNER_CMD:
-        sign_cmd = f'{cfg.APKSIGNER_CMD} sign --ks "{cfg.KEYSTORE}" --ks-key-alias {cfg.KEY_ALIAS} --ks-pass pass:{cfg.KEY_PASS} --key-pass pass:{cfg.KEY_PASS} --out "{output_apk}" "{aligned_apk}"'
+        sign_cmd = f'{cfg.APKSIGNER_CMD} {common}'
     else:
-        sign_cmd = f'"{cfg.APKSIGNER_CMD}" sign --ks "{cfg.KEYSTORE}" --ks-key-alias {cfg.KEY_ALIAS} --ks-pass pass:{cfg.KEY_PASS} --key-pass pass:{cfg.KEY_PASS} --out "{output_apk}" "{aligned_apk}"'
+        sign_cmd = f'"{cfg.APKSIGNER_CMD}" {common}'
     run_cmd(sign_cmd)
 
     # 2. Verify
@@ -58,7 +66,7 @@ def sign_and_verify(aligned_apk, output_apk):
     print(f"[OK] Built & Verified: {output_apk.name} ({output_apk.stat().st_size:,} bytes)")
 
 
-def build_bridge(clean=False):
+def build_bridge(clean=False, r8=False):
     print("=" * 60)
     print("Building HyperPortal (Miuix Compose App & LSPosed Module)...")
     print("=" * 60)
@@ -67,6 +75,9 @@ def build_bridge(clean=False):
     task = ":bridge:assembleRelease"
     if clean:
         task = ":bridge:clean " + task
+    if r8:
+        task += " -Phyperportal.minify=true"
+        print("[R8] Building a minified release APK (pre-release verification only)")
     cmd = f"{gradle_cmd} {task}"
     print(f"[1/2] Running Gradle: {cmd}...")
     run_cmd(cmd, shell=True)
@@ -75,7 +86,7 @@ def build_bridge(clean=False):
     if not built_apk.is_file():
         raise RuntimeError(f"Gradle failed to produce release APK at {built_apk}")
 
-    out_apk = cfg.DIST_DIR / "HyperPortal.apk"
+    out_apk = cfg.DIST_DIR / ("HyperPortal-r8.apk" if r8 else "HyperPortal.apk")
     shutil.copy2(built_apk, out_apk)
     print(f"[2/2] [OK] Built & Verified: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
     return out_apk
@@ -163,6 +174,11 @@ def main():
     parser.add_argument("target", choices=["bridge", "aes", "all", "clean"], help="Target component to build")
     parser.add_argument("--clean", action="store_true", help="Force clean build cache before building")
     parser.add_argument("--version-code", type=int, default=1000000045, help="versionCode for ContentCatcher APK")
+    parser.add_argument(
+        "--r8",
+        action="store_true",
+        help="Build the bridge with R8/minification (pre-release only; AES stays unminified)",
+    )
     args = parser.parse_args()
 
     if args.target == "clean":
@@ -175,7 +191,7 @@ def main():
         return
 
     if args.target in ("bridge", "all"):
-        build_bridge(clean=args.clean)
+        build_bridge(clean=args.clean, r8=args.r8)
     if args.target in ("aes", "all"):
         build_aes(clean=args.clean, version_code=args.version_code)
 

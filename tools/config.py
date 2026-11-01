@@ -87,10 +87,39 @@ if not APKTOOL_JAR:
     if which_apktool:
         APKTOOL_JAR = Path(which_apktool)
 
-# 5. Signing key
-KEYSTORE = ROOT_DIR / "signing" / "poc.jks"
-KEY_ALIAS = "poc"
-KEY_PASS = "pocpass"
+# 5. Signing key (local-only; .sign/ is git-ignored, never committed)
+SIGNING_DIR = ROOT_DIR / ".sign"
+KEYSTORE = SIGNING_DIR / "my-release-key.jks"
+SIGNING_PROPERTIES = SIGNING_DIR / "qianming.txt"
+
+
+def _read_signing_value(key):
+    if not SIGNING_PROPERTIES.is_file():
+        raise RuntimeError(
+            f"Signing credentials not found: {SIGNING_PROPERTIES}. "
+            "Place my-release-key.jks and qianming.txt in .sign/ (never commit them)."
+        )
+    lines = [line.strip() for line in SIGNING_PROPERTIES.read_text(encoding="utf-8").splitlines()]
+    try:
+        index = lines.index(key)
+    except ValueError:
+        raise RuntimeError(f"Missing {key} in {SIGNING_PROPERTIES}") from None
+    if index + 1 >= len(lines) or not lines[index + 1]:
+        raise RuntimeError(f"Empty {key} in {SIGNING_PROPERTIES}")
+    return lines[index + 1]
+
+
+def require_signing():
+    """Resolve the local release signing material, failing loudly when absent."""
+    if not KEYSTORE.is_file():
+        raise RuntimeError(f"Keystore not found: {KEYSTORE}")
+    return _read_signing_value("ALIAS"), _read_signing_value("KEY_PASSWORD"), _read_signing_value("KEYSTORE_PASSWORD")
+
+
+# Populated lazily by require_signing(); kept as module attributes for the build scripts.
+KEY_ALIAS = None
+KEY_PASS = None
+KEYSTORE_PASS = None
 
 # 6. Paths
 AES_DIR = ROOT_DIR / "aes"

@@ -95,7 +95,7 @@ ohmyAES/
 │   ├── COLOROS_VIEWDRAG_SPEC.md
 │   └── COLOROS_COMPOSE_EXTRACTION_SPEC.md
 │
-├── signing/                           # Signing keystore (poc.jks)
+├── .sign/                             # Local signing keystore/credentials (git-ignored)
 ├── dist/                              # Output directory for release APKs
 ├── AGENTS.md                          # ⚠️ Mandatory Engineering Rules for AI Agents & Developers
 ├── README.md                          # English documentation

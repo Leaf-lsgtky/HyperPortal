@@ -59,7 +59,7 @@ def main():
     run('git add "aes/base/Application Extension Service_5.1.7.apk"')
     run("git add aes/patches/patch_aes_smali.py")
     run("git add tools/repack.py")
-    run("git add signing/poc.jks")
+    # Signing keys live in the local-only .sign/ directory and are never committed.
     run("git add aes/src/dev/dragshare/catcher/Bridge.java")
     commit("2026-10-30 02:22:00 +0800", "feat(aes): initial Plan-B implementation of AES smali injection")
 

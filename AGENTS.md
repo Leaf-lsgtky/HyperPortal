@@ -101,6 +101,13 @@ To prevent flickering or oscillation when the user drags near the bottom of the 
 - **Requirement:** Whenever functional modifications, features, or bug fixes are verified (e.g. compiling successfully, tests passing, or logic confirmed), commit the changes promptly via Git (`git add` and a concise, meaningful conventional commit message).
 - **Reason:** Prevents loss of working context during multi-turn agent iterations, keeps uncommitted working-tree diffs focused and reviewable, and makes it trivial to isolate and roll back unexpected regressions.
 
+### ⚠️ Rule 9: Release Signing & R8 Boundary
+- **Local signing material:** `.sign/my-release-key.jks` (keystore) + `.sign/qianming.txt` (`ALIAS`, `KEY_PASSWORD`, `KEYSTORE_PASSWORD`). `.sign/` is **git-ignored**; never commit it, copy it into `dist/`, or print its passwords in logs/answers.
+- **No debug fallback:** both the bridge release and the AES `ContentCatcher-patched.apk` must be signed with this keystore. `tools/config.py` and `bridge/build.gradle.kts` read it automatically; if it is missing the build must fail loudly rather than silently use a debug key. The old `signing/poc.jks` (alias `poc` / `pocpass`) is deleted.
+- **Normal test builds run WITHOUT R8:** `python tools/build.py bridge` / `python tools/build.py all` produce unminified releases (only D8 dexing + signing). This keeps mapping-free logs and fast iteration.
+- **R8 is a pre-release gate only:** `python tools/build.py bridge --r8` enables `isMinifyEnabled` via `-Phyperportal.minify=true` and writes `dist/HyperPortal-r8.apk` (mapping in `bridge/build/outputs/mapping/release/mapping.txt`). **AES is never R8-minified** — it is a single-Java-file D8 build. If R8 breaks anything, extend `bridge/proguard-rules.pro` (entry points, manifest components, JNI `TextSegmenter`, Xposed `HyperPortalEntry`) instead of disabling R8.
+- **Release verification:** before shipping, confirm signatures with `apksigner verify --print-certs` and re-test the app + LSPosed scope.
+
 ---
 
 ## 3. Toolchain & Development Workflow
@@ -110,9 +117,10 @@ All build and deployment tasks are unified under `tools/`:
 
 | Task | Command |
 | :--- | :--- |
-| **Build Everything** | `python tools/build.py all` |
-| **Build Bridge & LSPosed** | `python tools/build.py bridge` |
-| **Build AES Hook** | `python tools/build.py aes` |
+| **Build Everything (no R8, default)** | `python tools/build.py all` |
+| **Build Bridge & LSPosed (no R8)** | `python tools/build.py bridge` |
+| **R8 Pre-release Build (bridge only)** | `python tools/build.py bridge --r8` → `dist/HyperPortal-r8.apk` |
+| **Build AES Hook (always unminified)** | `python tools/build.py aes` |
 | **Clean Build Cache** | `python tools/build.py clean` |
 | **Install Both APKs** | `python tools/deploy.py --install all --refresh-lsp` |
 | **Perform Soft Reboot** | `python tools/deploy.py --soft-reboot` |

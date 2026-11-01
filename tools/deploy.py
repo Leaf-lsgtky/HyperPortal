@@ -39,8 +39,23 @@ def install_apk(apk_path):
     if not p.is_file():
         raise RuntimeError(f"APK not found: {p}")
     print(f"[INSTALL] Installing {p.name}...")
-    res = adb(f'install -r -d "{p}"')
-    print(res.stdout.strip())
+    res = adb(f'install -r -d "{p}"', check=False)
+    out = res.stdout or ""
+    print(out.strip())
+    if res.returncode != 0:
+        if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in out or "signatures do not match" in out:
+            # The installed copy was signed with a different key (e.g. the old
+            # signing/poc.jks debug key). Package data must be cleared first.
+            print(
+                "[INSTALL] Signature mismatch: the on-device APK was signed with a different key.\n"
+                "          Uninstall that package first, then re-run the install, e.g.:\n"
+                "            adb uninstall <package>\n"
+                "            adb install -r -d \"<apk>\"\n"
+                "          For com.miui.contentcatcher (AES) also re-hide the stock system copy:\n"
+                "            adb shell pm uninstall --user 0 com.miui.contentcatcher\n"
+                "          then install the patched APK. Ask the user before wiping app data."
+            )
+        raise RuntimeError(f"ADB install failed: {p.name}")
 
 
 def refresh_lsposed():
