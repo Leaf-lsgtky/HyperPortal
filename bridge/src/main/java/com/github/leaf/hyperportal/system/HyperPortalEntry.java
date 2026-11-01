@@ -1,7 +1,10 @@
 package com.github.leaf.hyperportal.system;
 
 import android.util.Log;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
 
 /**
  * Modern LSPosed API 102 Module Entry Point for HyperPortal.
@@ -9,8 +12,9 @@ import io.github.libxposed.api.XposedModule;
  * Configured in module.prop with:
  *   minApiVersion=102
  *   targetApiVersion=102
- *   staticScope=false
+ *   staticScope=true
  *   autoHotReload=true
+ *   exceptionMode=protective
  *
  * Scopes:
  *   - system (system_server): 3D spatial tilt transformation (PortalSystemModule)
@@ -44,14 +48,20 @@ public final class HyperPortalEntry extends XposedModule {
     }
 
     @Override
-    public boolean onHotReloading(HotReloadingParam param) {
+    public boolean onHotReloading(@NonNull HotReloadingParam param) {
         log(Log.INFO, TAG, "onHotReloading: hot reload requested for HyperPortal");
         return true;
     }
 
     @Override
-    public void onHotReloaded(HotReloadedParam param) {
+    public void onHotReloaded(@NonNull HotReloadedParam param) {
         super.onHotReloaded(param);
-        log(Log.INFO, TAG, "onHotReloaded: hot reload complete");
+        log(Log.INFO, TAG, "onHotReloaded process=" + param.getProcessName()
+                + " isSystemServer=" + param.isSystemServer());
+        if (param.isSystemServer()) {
+            PortalSystemModule.initSystemServer(this, null);
+        } else if ("com.android.systemui".equals(param.getProcessName())) {
+            PortalSystemUiModule.initSystemUi(this, null);
+        }
     }
 }

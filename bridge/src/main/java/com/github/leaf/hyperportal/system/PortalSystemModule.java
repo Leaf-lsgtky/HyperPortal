@@ -1,9 +1,13 @@
 package com.github.leaf.hyperportal.system;
 
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.Uri;
+import android.os.Bundle;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -22,6 +26,8 @@ import android.view.SurfaceControl;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -43,25 +49,41 @@ import io.github.libxposed.api.XposedModule;
  * - Leaves bottom threshold: Smoothly un-tilts back to 0.
  * - Drag ended: Completely restored to normal 2D rendering.
  */
-public final class PortalSystemModule extends XposedModule {
+public final class PortalSystemModule {
 
     private static final String TAG = "DragShareSystem";
     private static final String DRAG_MIME = "application/x-dragshare";
     private static final ExecutorService sNotifyExecutor = Executors.newSingleThreadExecutor();
 
-    private static volatile PortalSystemModule sInstance;
     private static volatile XposedInterface sXposed;
+
+    private static void log(int priority, String tag, String msg) {
+        if (sXposed != null) {
+            try {
+                sXposed.log(priority, tag, msg);
+                return;
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.println(priority, tag, msg);
+    }
+
+    private static void log(int priority, String tag, String msg, Throwable tr) {
+        if (sXposed != null) {
+            try {
+                sXposed.log(priority, tag, msg + "\n" + Log.getStackTraceString(tr));
+                return;
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.println(priority, tag, msg);
+    }
 
     public static void initSystemServer(XposedInterface xposed, io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam param) {
         sXposed = xposed;
-        if (sInstance == null) {
-            sInstance = new PortalSystemModule();
-        }
         sSystemClassLoader = resolveSystemClassLoader();
-        if (xposed != null) {
-            xposed.log(Log.INFO, TAG, "onSystemServerStarting cl=" + sSystemClassLoader);
-        }
-        sInstance.installHooks(sSystemClassLoader);
+        log(Log.INFO, TAG, "onSystemServerStarting cl=" + sSystemClassLoader);
+        installHooks(sSystemClassLoader);
         preloadWallpaperBitmap();
     }
 
@@ -75,9 +97,12 @@ public final class PortalSystemModule extends XposedModule {
     private static volatile float sLastLogged = -1f;
     private static volatile float sLastNotifiedY = -1f;
     private static volatile int sCurrentState = 0; // 0 = closed, 1 = glow only, 2 = tilt + appbar
+    private static volatile float sDragStartY = -1f;
     private static volatile boolean sTickerRunning;
     private static volatile ClassLoader sSystemClassLoader;
     private static volatile Context sSystemContext;
+    private static volatile float sTriggerThreshold = 0.76f;
+    private static volatile boolean sReceiverRegistered = false;
 
     private static final Handler sHandler = new Handler(Looper.getMainLooper());
     private static final Runnable sTicker = new Runnable() {
@@ -96,47 +121,11 @@ public final class PortalSystemModule extends XposedModule {
         }
     };
 
-    public PortalSystemModule() {
-        sInstance = this;
-    }
-
     private static void startTicker() {
         if (!sTickerRunning) {
             sTickerRunning = true;
             sHandler.post(sTicker);
         }
-    }
-
-    @Override
-    public void onModuleLoaded(ModuleLoadedParam param) {
-        sInstance = this;
-        log(Log.INFO, TAG, "onModuleLoaded systemServer=" + param.isSystemServer()
-                + " process=" + param.getProcessName());
-    }
-
-    @Override
-    public void onSystemServerStarting(SystemServerStartingParam param) {
-        sInstance = this;
-        sSystemClassLoader = resolveSystemClassLoader();
-        log(Log.INFO, TAG, "onSystemServerStarting cl=" + sSystemClassLoader);
-        installHooks(sSystemClassLoader);
-        preloadWallpaperBitmap();
-    }
-
-    @Override
-    public boolean onHotReloading(HotReloadingParam param) {
-        log(Log.INFO, TAG, "onHotReloading, allow");
-        param.setSavedInstanceState(sSystemClassLoader);
-        return true;
-    }
-
-    @Override
-    public void onHotReloaded(HotReloadedParam param) {
-        sInstance = this;
-        ClassLoader classLoader = resolveSystemClassLoader();
-        log(Log.INFO, TAG, "onHotReloaded cl=" + classLoader);
-        super.onHotReloaded(param);
-        installHooks(classLoader);
     }
 
     private static ClassLoader resolveSystemClassLoader() {
@@ -172,7 +161,7 @@ public final class PortalSystemModule extends XposedModule {
         return null;
     }
 
-    private void installHooks(ClassLoader classLoader) {
+    private static void installHooks(ClassLoader classLoader) {
         try {
             if (classLoader == null) {
                 classLoader = resolveSystemClassLoader();
@@ -182,68 +171,293 @@ public final class PortalSystemModule extends XposedModule {
             for (Method method : controller.getDeclaredMethods()) {
                 String name = method.getName();
                 if ("performDrag".equals(name)) {
-                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-performDrag").intercept(this::onPerformDrag);
+                    sXposed.hook(method).setId("ddc-performDrag").intercept(PortalSystemModule::onPerformDrag);
                     log(Log.INFO, TAG, "hooked performDrag " + method);
                 } else if ("handleMotionEvent".equals(name)) {
-                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-handleMotionEvent").intercept(this::onHandleMotion);
+                    sXposed.hook(method).setId("ddc-handleMotionEvent").intercept(PortalSystemModule::onHandleMotion);
                     log(Log.INFO, TAG, "hooked handleMotionEvent " + method);
                 } else if ("onDragStateClosedLocked".equals(name)) {
-                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("ddc-onDragStateClosed").intercept(this::onDragClosed);
+                    sXposed.hook(method).setId("ddc-onDragStateClosed").intercept(PortalSystemModule::onDragClosed);
                     log(Log.INFO, TAG, "hooked onDragStateClosedLocked " + method);
                 }
             }
             Class<?> dragState = Class.forName("com.android.server.wm.DragState", false, classLoader);
             for (Method method : dragState.getDeclaredMethods()) {
                 if ("updateDragSurfaceLocked".equals(method.getName())) {
-                    (sXposed != null ? sXposed.hook(method) : hook(method)).setId("drag-updateSurface").intercept(this::onHandleMotion);
+                    sXposed.hook(method).setId("drag-updateSurface").intercept(PortalSystemModule::onHandleMotion);
                     log(Log.INFO, TAG, "hooked updateDragSurfaceLocked " + method);
                 }
             }
+
+            // SELinux context fixes for re-signed UID 1000 packages (ContentCatcher / AES)
+            installSELinuxHooks(classLoader);
+            installAppsFilterHooks(classLoader);
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "installHooks failed", throwable);
         }
     }
 
-    private Object onPerformDrag(XposedInterface.Chain chain) throws Throwable {
+    private static void installSELinuxHooks(ClassLoader classLoader) {
         try {
-            Object clipObject = chain.getArg(chain.getArgs().size() - 1);
-            if (clipObject instanceof ClipData) {
-                ClipData clip = (ClipData) clipObject;
-                if (clip.getDescription().hasMimeType(DRAG_MIME)) {
-                    sDragActive = true;
-                    sProgress = 0f;
-                    sTargetProgress = 0f;
-                    sCurrentState = 1; // Drag started: Phase 1 (Glow mode)
-                    sLastLogged = -1f;
-                    sLastNotifiedY = -1f;
+            Class<?> zygoteProcessClass = Class.forName("android.os.ZygoteProcess", false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+            for (Method method : zygoteProcessClass.getDeclaredMethods()) {
+                String name = method.getName();
+                if ("zygoteSendArgsAndGetResult".equals(name)) {
+                    sXposed.hook(method)
+                            .setId("zygote-sendArgs")
+                            .intercept(PortalSystemModule::onZygoteSendArgs);
+                    log(Log.INFO, TAG, "hooked ZygoteProcess.zygoteSendArgsAndGetResult: " + method);
+                } else if ("attemptZygoteSendArgsAndGetResult".equals(name)) {
+                    sXposed.hook(method)
+                            .setId("zygote-attemptSendArgs")
+                            .intercept(PortalSystemModule::onAttemptZygoteSendArgs);
+                    log(Log.INFO, TAG, "hooked ZygoteProcess.attemptZygoteSendArgsAndGetResult: " + method);
+                } else if ("startViaZygote".equals(name)) {
+                    sXposed.hook(method)
+                            .setId("zygote-startViaZygote")
+                            .intercept(PortalSystemModule::onStartViaZygote);
+                    log(Log.INFO, TAG, "hooked ZygoteProcess.startViaZygote: " + method);
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "hook ZygoteProcess failed", t);
+        }
 
-                    Object controller = chain.getThisObject();
-                    Object wms = getField(controller, "mService");
+        try {
+            Class<?> mmacClass = Class.forName("com.android.server.pm.SELinuxMMAC", false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+            for (Method method : mmacClass.getDeclaredMethods()) {
+                if ("getSeInfo".equals(method.getName())) {
+                    sXposed.hook(method)
+                            .setId("mmac-getSeInfo")
+                            .intercept(PortalSystemModule::onGetSeInfo);
+                    log(Log.INFO, TAG, "hooked SELinuxMMAC.getSeInfo: " + method);
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "hook SELinuxMMAC failed", t);
+        }
+    }
+
+    private static Object onAttemptZygoteSendArgs(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null && args.size() > 1 && args.get(1) instanceof String) {
+                String msgStr = (String) args.get(1);
+                if (msgStr.contains("com.miui.contentcatcher") || (msgStr.contains("--setuid=1000\n") && msgStr.contains("--seinfo=default"))) {
+                    String fixed = msgStr.replaceAll("--seinfo=[^\r\n]+", "--seinfo=platform");
+                    if (!fixed.equals(msgStr)) {
+                        log(Log.INFO, TAG, "onAttemptZygoteSendArgs: replaced seinfo with --seinfo=platform");
+                        Object[] newArgs = args.toArray();
+                        newArgs[1] = fixed;
+                        return chain.proceed(newArgs);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "onAttemptZygoteSendArgs inspect error", t);
+        }
+        return chain.proceed();
+    }
+
+    private static Object onZygoteSendArgs(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null) {
+                for (Object arg : args) {
+                    if (arg instanceof List) {
+                        @SuppressWarnings("unchecked")
+                        List<String> list = (List<String>) arg;
+                        boolean isTarget = false;
+                        for (String s : list) {
+                            if (s != null && (s.contains("com.miui.contentcatcher") || s.contains("--setuid=1000"))) {
+                                isTarget = true;
+                                break;
+                            }
+                        } 
+                        if (isTarget) {
+                            for (int i = 0; i < list.size(); i++) {
+                                String s = list.get(i);
+                                if (s != null && s.startsWith("--seinfo=") && !s.equals("--seinfo=platform")) {
+                                    log(Log.INFO, TAG, "onZygoteSendArgs: replacing " + s + " with --seinfo=platform");
+                                    list.set(i, "--seinfo=platform");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "onZygoteSendArgs inspect error", t);
+        }
+        return chain.proceed();
+    }
+
+    private static Object onStartViaZygote(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null) {
+                boolean isTarget = false;
+                for (Object arg : args) {
+                    if (arg != null && (arg.toString().contains("com.miui.contentcatcher") || Integer.valueOf(1000).equals(arg))) {
+                        isTarget = true;
+                        break;
+                    }
+                }
+                if (isTarget) {
+                    Object[] newArgs = args.toArray();
+                    boolean modified = false;
+                    for (int i = 0; i < newArgs.length; i++) {
+                        Object a = newArgs[i];
+                        if (a instanceof String) {
+                            String s = (String) a;
+                            if (s.startsWith("default:") || s.equals("default")) {
+                                log(Log.INFO, TAG, "onStartViaZygote: replacing arg[" + i + "] " + s + " -> platform");
+                                newArgs[i] = "platform";
+                                modified = true;
+                            }
+                        }
+                    }
+                    if (modified) {
+                        return chain.proceed(newArgs);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "onStartViaZygote inspect error", t);
+        }
+        return chain.proceed();
+    }
+
+    private static Object onGetSeInfo(XposedInterface.Chain chain) throws Throwable {
+        Object orig = chain.proceed();
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null) {
+                for (Object arg : args) {
+                    if (arg == null) continue;
+                    String s = arg.toString();
+                    if (s != null && s.contains("com.miui.contentcatcher")) {
+                        log(Log.INFO, TAG, "SELinuxMMAC.getSeInfo: overriding " + orig + " -> platform for " + s);
+                        return "platform";
+                    }
                     try {
-                        Object ctx = getField(wms, "mContext");
-                        if (ctx instanceof Context) {
-                            sSystemContext = (Context) ctx;
+                        Method getPkg = arg.getClass().getMethod("getPackageName");
+                        Object pkg = getPkg.invoke(arg);
+                        if ("com.miui.contentcatcher".equals(pkg)) {
+                            log(Log.INFO, TAG, "SELinuxMMAC.getSeInfo: overriding " + orig + " -> platform for " + pkg);
+                            return "platform";
                         }
                     } catch (Throwable ignored) {
                     }
-                    Object root = getField(wms, "mRoot");
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "onGetSeInfo inspect error", t);
+        }
+        return orig;
+    }
 
-                    // Third argument of performDrag is IWindow window
-                    Object windowArg = chain.getArgs().size() > 2 ? chain.getArg(2) : null;
-                    Object task = resolveTargetTask(wms, root, windowArg);
-
-                    sTask = task;
-                    if (task != null) {
-                        sTaskSurface = (SurfaceControl) getField(task, "mSurfaceControl");
-                        log(Log.INFO, TAG, "our drag started target task=" + task
-                                + " surface=" + sTaskSurface);
-                        prepareWallpaperSurface(task);
-                    } else {
-                        sTaskSurface = null;
-                        log(Log.WARN, TAG, "our drag started but no valid fullscreen task found");
+    private static void installAppsFilterHooks(ClassLoader classLoader) {
+        try {
+            Class<?> appsFilterBase = null;
+            try {
+                appsFilterBase = Class.forName("com.android.server.pm.AppsFilterBase", false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+            } catch (Throwable ignored) {
+            }
+            if (appsFilterBase == null) {
+                try {
+                    appsFilterBase = Class.forName("com.android.server.pm.AppsFilterImpl", false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+                } catch (Throwable ignored) {
+                }
+            }
+            if (appsFilterBase != null) {
+                for (Method method : appsFilterBase.getDeclaredMethods()) {
+                    if ("shouldFilterApplication".equals(method.getName())) {
+                        sXposed.hook(method)
+                                .setId("appsfilter-shouldFilterApplication-" + method.getParameterCount())
+                                .intercept(PortalSystemModule::onShouldFilterApplication);
+                        log(Log.INFO, TAG, "hooked AppsFilter.shouldFilterApplication: " + method);
                     }
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "installAppsFilterHooks failed", t);
+        }
+    }
 
-                    notifyPortalState(1, 0f);
+    private static Object onShouldFilterApplication(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null) {
+                for (Object arg : args) {
+                    if (arg != null) {
+                        String clsName = arg.getClass().getName();
+                        if (clsName.contains("PackageState") || clsName.contains("PackageSetting")) {
+                            try {
+                                Method getPkg = arg.getClass().getMethod("getPackageName");
+                                Object pkg = getPkg.invoke(arg);
+                                if ("com.github.leaf.hyperportal".equals(pkg)) {
+                                    return false;
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "onShouldFilterApplication error", t);
+        }
+        return chain.proceed();
+    }
+
+    private static Object onPerformDrag(XposedInterface.Chain chain) throws Throwable {
+        try {
+            ClipData clip = null;
+            Object windowArg = null;
+            for (Object arg : chain.getArgs()) {
+                if (arg instanceof ClipData) {
+                    clip = (ClipData) arg;
+                } else if (arg != null && arg.getClass().getName().contains("IWindow")) {
+                    windowArg = arg;
+                }
+            }
+            if (clip != null && clip.getDescription().hasMimeType(DRAG_MIME)) {
+                sDragActive = true;
+                sDragStartY = -1f;
+                sProgress = 0f;
+                sTargetProgress = 0f;
+                sCurrentState = 1; // Drag started: Phase 1 (Glow mode)
+                sLastLogged = -1f;
+                sLastNotifiedY = -1f;
+
+                Object controller = chain.getThisObject();
+                Object wms = getField(controller, "mService");
+                try {
+                    Object ctx = getField(wms, "mContext");
+                    if (ctx instanceof Context) {
+                        sSystemContext = (Context) ctx;
+                    }
+                } catch (Throwable ignored) {
+                }
+                Object root = getField(wms, "mRoot");
+
+                Object task = resolveTargetTask(wms, root, windowArg);
+                sTask = task;
+                if (task != null) {
+                    sTaskSurface = (SurfaceControl) getField(task, "mSurfaceControl");
+                    log(Log.INFO, TAG, "our drag started target task=" + task
+                            + " surface=" + sTaskSurface);
+                    prepareWallpaperSurface(task);
+                } else {
+                    sTaskSurface = null;
+                    log(Log.WARN, TAG, "our drag started but no valid fullscreen task found");
+                }
+
+                notifyPortalState(1, 0f);
+                if (sSystemContext != null) {
+                    ensureConfigReceiver(sSystemContext);
+                    queryConfigAsync(sSystemContext);
                 }
             }
         } catch (Throwable throwable) {
@@ -274,16 +488,16 @@ public final class PortalSystemModule extends XposedModule {
                         int actType = (Integer) invoke(task, "getActivityType");
                         // Mode 1 = FULLSCREEN, ActType 1 = STANDARD
                         if (mode == 1 && actType == 1) {
-                            if (sInstance != null) {
-                                sInstance.log(Log.INFO, TAG, "resolved calling window task: " + task);
+                            if (true) {
+                                log(Log.INFO, TAG, "resolved calling window task: " + task);
                             }
                             return task;
                         }
                     }
                 }
             } catch (Throwable t) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "resolve calling task failed: " + t);
+                if (true) {
+                    log(Log.WARN, TAG, "resolve calling task failed: " + t);
                 }
             }
         }
@@ -299,16 +513,16 @@ public final class PortalSystemModule extends XposedModule {
                     if (fsTask != null) {
                         int actType = (Integer) invoke(fsTask, "getActivityType");
                         if (actType == 1) {
-                            if (sInstance != null) {
-                                sInstance.log(Log.INFO, TAG, "resolved top fullscreen root task: " + fsTask);
+                            if (true) {
+                                log(Log.INFO, TAG, "resolved top fullscreen root task: " + fsTask);
                             }
                             return fsTask;
                         }
                     }
                 }
             } catch (Throwable t) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "resolve top fullscreen task failed: " + t);
+                if (true) {
+                    log(Log.WARN, TAG, "resolve top fullscreen task failed: " + t);
                 }
             }
         }
@@ -323,16 +537,16 @@ public final class PortalSystemModule extends XposedModule {
                         int mode = (Integer) invoke(task, "getWindowingMode");
                         int actType = (Integer) invoke(task, "getActivityType");
                         if (mode == 1 && actType == 1) {
-                            if (sInstance != null) {
-                                sInstance.log(Log.INFO, TAG, "resolved resumed task: " + task);
+                            if (true) {
+                                log(Log.INFO, TAG, "resolved resumed task: " + task);
                             }
                             return task;
                         }
                     }
                 }
             } catch (Throwable t) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "resolve resumed task failed: " + t);
+                if (true) {
+                    log(Log.WARN, TAG, "resolve resumed task failed: " + t);
                 }
             }
         }
@@ -340,7 +554,7 @@ public final class PortalSystemModule extends XposedModule {
         return null;
     }
 
-    private Object onHandleMotion(XposedInterface.Chain chain) throws Throwable {
+    private static Object onHandleMotion(XposedInterface.Chain chain) throws Throwable {
         if (sDragActive && sTaskSurface != null) {
             try {
                 Object yArg = chain.getArg(3);
@@ -350,16 +564,37 @@ public final class PortalSystemModule extends XposedModule {
                 // Thresholds based on ColorOS reverse engineering:
                 // Upper/middle screen: only bottom glow effect, tilt remains 0.
                 // Bottom threshold (bottom ~18% of screen): page tilts and app bar expands!
-                float bottomThreshold = height * 0.76f;
-                float exitThreshold = height * 0.70f; // 5% hysteresis to prevent flutter
+                if (sDragStartY < 0f) {
+                    sDragStartY = y;
+                }
+
+                float enterFactor = sTriggerThreshold > 0f ? sTriggerThreshold : 0.76f;
+                float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
+                float bottomThreshold = height * enterFactor;
+                float exitThreshold = height * exitFactor; // Hysteresis to prevent flutter
+
+                boolean enterCondition;
+                if (sDragStartY >= bottomThreshold) {
+                    float downwardRequired = dp(35);
+                    enterCondition = (y >= sDragStartY + downwardRequired) && (y >= bottomThreshold);
+                } else {
+                    enterCondition = (y >= bottomThreshold);
+                }
+
+                boolean exitCondition;
+                if (sDragStartY >= bottomThreshold) {
+                    exitCondition = (y < sDragStartY + dp(10)) || (y < exitThreshold);
+                } else {
+                    exitCondition = (y < exitThreshold);
+                }
 
                 int newState;
                 float target;
-                if (y >= bottomThreshold) {
+                if (sCurrentState == 2 ? !exitCondition : enterCondition) {
                     // Phase 2: Bottom threshold reached -> 3D tilt & expand app bar
                     target = 1.0f;
                     newState = 2;
-                } else if (y < exitThreshold) {
+                } else if (exitCondition) {
                     // Phase 1: Above threshold -> flat page, only glow
                     target = 0.0f;
                     newState = 1;
@@ -383,17 +618,18 @@ public final class PortalSystemModule extends XposedModule {
                     notifyPortalState(1, y);
                 }
             } catch (Throwable throwable) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "onHandleMotion failed: " + throwable);
+                if (true) {
+                    log(Log.WARN, TAG, "onHandleMotion failed: " + throwable);
                 }
             }
         }
         return chain.proceed();
     }
 
-    private Object onDragClosed(XposedInterface.Chain chain) throws Throwable {
+    private static Object onDragClosed(XposedInterface.Chain chain) throws Throwable {
         if (sDragActive) {
             sDragActive = false;
+            sDragStartY = -1f;
             sCurrentState = 0;
             sTargetProgress = 0f;
             startTicker();
@@ -423,16 +659,33 @@ public final class PortalSystemModule extends XposedModule {
         final Context context = sSystemContext;
         sNotifyExecutor.execute(() -> {
             try {
-                // Foreground broadcast: bypasses HyperOS Greezer Denial
-                Intent broadcast = new Intent("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
-                broadcast.setPackage("com.github.leaf.hyperportal");
-                broadcast.putExtra("state", state);
-                broadcast.putExtra("y", y);
-                broadcast.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-                if (Build.VERSION.SDK_INT >= 29) {
-                    broadcast.addFlags(0x01000000); // Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
+                // Send both action names to both Portal Companion App and SystemUI Overlay
+                String[] actions = new String[] {
+                        "com.github.leaf.hyperportal.ACTION_DRAG_STATE",
+                        "com.github.leaf.hyperportal.DRAG_STATE_CHANGED"
+                };
+                String[] packages = new String[] {
+                        "com.github.leaf.hyperportal",
+                        "com.android.systemui"
+                };
+
+                for (String act : actions) {
+                    for (String pkg : packages) {
+                        try {
+                            Intent b = new Intent(act);
+                            b.setPackage(pkg);
+                            b.putExtra("state", state);
+                            b.putExtra("y", y);
+                            b.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+                            if (Build.VERSION.SDK_INT >= 29) {
+                                b.addFlags(0x01000000); // Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
+                            }
+                            context.sendBroadcast(b);
+                        } catch (Throwable t) {
+                            // ignore per-target send failure
+                        }
+                    }
                 }
-                context.sendBroadcast(broadcast);
 
                 // The drag shadow lives in the source app process. Send the
                 // same state globally so its Bridge receiver can morph the
@@ -446,9 +699,56 @@ public final class PortalSystemModule extends XposedModule {
                 }
                 context.sendBroadcast(shadowBroadcast);
             } catch (Throwable throwable) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "notifyPortalState failed: " + throwable);
+                if (true) {
+                    log(Log.WARN, TAG, "notifyPortalState failed: " + throwable);
                 }
+            }
+        });
+    }
+
+    private static void ensureConfigReceiver(Context ctx) {
+        if (sReceiverRegistered || ctx == null) return;
+        try {
+            IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+            BroadcastReceiver receiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (intent != null) {
+                        int pct = intent.getIntExtra("trigger_threshold", -1);
+                        if (pct >= 50 && pct <= 95) {
+                            sTriggerThreshold = pct / 100.0f;
+                            log(Log.INFO, TAG, "trigger threshold updated: " + sTriggerThreshold);
+                        } else {
+                            queryConfigAsync(context);
+                        }
+                    }
+                }
+            };
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                ctx.registerReceiver(receiver, filter);
+            }
+            sReceiverRegistered = true;
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "ensureConfigReceiver failed: " + t);
+        }
+    }
+
+    private static void queryConfigAsync(Context ctx) {
+        if (ctx == null) return;
+        sNotifyExecutor.execute(() -> {
+            try {
+                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                Bundle res = ctx.getContentResolver().call(uri, "getConfig", null, null);
+                if (res != null) {
+                    int pct = res.getInt("trigger_threshold", 76);
+                    if (pct >= 50 && pct <= 95) {
+                        sTriggerThreshold = pct / 100.0f;
+                        log(Log.INFO, TAG, "trigger threshold queried: " + sTriggerThreshold);
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         });
     }
@@ -519,8 +819,8 @@ public final class PortalSystemModule extends XposedModule {
                 }
             }
             transaction.apply();
-            if (logNow && sInstance != null) {
-                sInstance.log(Log.INFO, TAG, "restored normal task 2D progress=0");
+            if (logNow) {
+                log(Log.INFO, TAG, "restored normal task 2D progress=0");
             }
             return;
         }
@@ -572,8 +872,8 @@ public final class PortalSystemModule extends XposedModule {
             Throwable cause = throwable instanceof java.lang.reflect.InvocationTargetException
                 ? ((java.lang.reflect.InvocationTargetException) throwable).getTargetException()
                 : throwable;
-            if (sInstance != null) {
-                sInstance.log(Log.WARN, TAG, "setSurfaceRotation failed: " + cause);
+            if (true) {
+                log(Log.WARN, TAG, "setSurfaceRotation failed: " + cause);
             }
         }
 
@@ -623,8 +923,8 @@ public final class PortalSystemModule extends XposedModule {
         }
 
         transaction.apply();
-        if (logNow && sInstance != null) {
-            sInstance.log(Log.INFO, TAG, "task progress=" + progress + " rotOk=" + rotationApplied
+        if (logNow) {
+            log(Log.INFO, TAG, "task progress=" + progress + " rotOk=" + rotationApplied
                     + " cornerRadius=" + screenCornerRadius);
         }
     }
@@ -668,15 +968,15 @@ public final class PortalSystemModule extends XposedModule {
                 Bitmap bmp = BitmapFactory.decodeFile(file.getAbsolutePath(), opts);
                 if (bmp != null) {
                     sWallpaperBitmap = bmp;
-                    if (sInstance != null) {
-                        sInstance.log(Log.INFO, TAG, "preloaded blurwallpaper: " + bmp.getWidth() + "x" + bmp.getHeight());
+                    if (true) {
+                        log(Log.INFO, TAG, "preloaded blurwallpaper: " + bmp.getWidth() + "x" + bmp.getHeight());
                     }
                     return;
                 }
             }
         } catch (Throwable t) {
-            if (sInstance != null) {
-                sInstance.log(Log.WARN, TAG, "preload blurwallpaper failed: " + t);
+            if (true) {
+                log(Log.WARN, TAG, "preload blurwallpaper failed: " + t);
             }
         }
         try {
@@ -685,8 +985,8 @@ public final class PortalSystemModule extends XposedModule {
                 BitmapFactory.Options opts = new BitmapFactory.Options();
                 opts.inSampleSize = 8;
                 sWallpaperBitmap = BitmapFactory.decodeFile(wp.getAbsolutePath(), opts);
-                if (sInstance != null) {
-                    sInstance.log(Log.INFO, TAG, "preloaded wallpaper fallback: "
+                if (true) {
+                    log(Log.INFO, TAG, "preloaded wallpaper fallback: "
                             + (sWallpaperBitmap != null ? sWallpaperBitmap.getWidth() + "x" + sWallpaperBitmap.getHeight() : "null"));
                 }
             }
@@ -725,16 +1025,16 @@ public final class PortalSystemModule extends XposedModule {
 
             SurfaceControl bgSurface = createWallpaperSurface(width, height, parentSurface);
             if (bgSurface == null || !bgSurface.isValid()) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "prepareWallpaperSurface: bgSurface is null or invalid");
+                if (true) {
+                    log(Log.WARN, TAG, "prepareWallpaperSurface: bgSurface is null or invalid");
                 }
                 return;
             }
 
             boolean rendered = renderBitmapToSurface(bgSurface, sWallpaperBitmap, width, height);
             if (!rendered) {
-                if (sInstance != null) {
-                    sInstance.log(Log.WARN, TAG, "prepareWallpaperSurface: failed to render bitmap");
+                if (true) {
+                    log(Log.WARN, TAG, "prepareWallpaperSurface: failed to render bitmap");
                 }
                 return;
             }
@@ -750,12 +1050,12 @@ public final class PortalSystemModule extends XposedModule {
             t.apply();
 
             sWallpaperSurface = bgSurface;
-            if (sInstance != null) {
-                sInstance.log(Log.INFO, TAG, "prepared wallpaper SurfaceControl successfully parent=" + parentSurface);
+            if (true) {
+                log(Log.INFO, TAG, "prepared wallpaper SurfaceControl successfully parent=" + parentSurface);
             }
         } catch (Throwable throwable) {
-            if (sInstance != null) {
-                sInstance.log(Log.WARN, TAG, "prepareWallpaperSurface failed: " + throwable);
+            if (true) {
+                log(Log.WARN, TAG, "prepareWallpaperSurface failed: " + throwable);
             }
         }
     }
@@ -779,8 +1079,8 @@ public final class PortalSystemModule extends XposedModule {
             }
             return (SurfaceControl) invoke(builder, "build");
         } catch (Throwable t) {
-            if (sInstance != null) {
-                sInstance.log(Log.WARN, TAG, "createWallpaperSurface failed: " + t);
+            if (true) {
+                log(Log.WARN, TAG, "createWallpaperSurface failed: " + t);
             }
             return null;
         }
@@ -803,8 +1103,8 @@ public final class PortalSystemModule extends XposedModule {
                 return true;
             }
         } catch (Throwable t) {
-            if (sInstance != null) {
-                sInstance.log(Log.WARN, TAG, "renderBitmapToSurface failed: " + t);
+            if (true) {
+                log(Log.WARN, TAG, "renderBitmapToSurface failed: " + t);
             }
         } finally {
             if (surface != null) {

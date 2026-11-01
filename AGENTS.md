@@ -92,6 +92,15 @@ To prevent flickering or oscillation when the user drags near the bottom of the 
 - Compose Semantics inspection only reveals empty containers for these nodes.
 - **Invariant:** When encountering a `ViewGroup` (even inside `ComposeView`), recursively call `findDeepChildInGroup()` and bypass transparent touch-intercepting overlays (like `CanvasProxyView` / `Slidr` / `SwipeBack`).
 
+### ⚠️ Rule 7: NEVER Reboot the Device or Soft Reboot Automatically
+- **DO NOT** run `adb shell "su -c killall system_server"`, `python tools/deploy.py --soft-reboot`, `adb reboot`, or restart device processes on your own (`不要重启`).
+- **Reason:** Rebooting disconnects ADB wireless debugging, drops dynamic wireless debugging ports, interrupts the user's active device usage, and clears testing state. 
+- **Required Workflow:** After building and installing APKs (`python tools/deploy.py --install all --refresh-lsp`), only notify the user and monitor logs passively (`python tools/deploy.py --logs`). Never initiate any soft or hard reboot unless the user explicitly tells you to do so in that exact turn.
+
+### ⚠️ Rule 8: Commit Code Changes Promptly to Git
+- **Requirement:** Whenever functional modifications, features, or bug fixes are verified (e.g. compiling successfully, tests passing, or logic confirmed), commit the changes promptly via Git (`git add` and a concise, meaningful conventional commit message).
+- **Reason:** Prevents loss of working context during multi-turn agent iterations, keeps uncommitted working-tree diffs focused and reviewable, and makes it trivial to isolate and roll back unexpected regressions.
+
 ---
 
 ## 3. Toolchain & Development Workflow
@@ -125,7 +134,7 @@ All build and deployment tasks are unified under `tools/`:
 1. When `adb install -r` is executed on Android 12+, PackageManager assigns a new randomized directory hash (`/data/app/~~<random_hash>/.../base.apk`).
 2. `system_server` is forked only **once** during device boot. It does not dynamically reload modified APKs.
 3. Therefore:
-   - **During development (after pushing new APK via ADB):** You must refresh LSPosed (`python tools/deploy.py --refresh-lsp`) and perform a soft reboot (`python tools/deploy.py --soft-reboot` or `su -c killall system_server`).
+   - **During development (after pushing new APK via ADB):** Run `python tools/deploy.py --refresh-lsp`. Wait for user instructions before any reboot (DO NOT auto-reboot, per Rule 7).
    - **In everyday usage (hard reboots / cold boots):** LSPosed retains the established valid path. `system_server` automatically loads the hook on boot. **No soft reboot is needed during normal daily use.**
 
 ---
@@ -146,3 +155,18 @@ All build and deployment tasks are unified under `tools/`:
 - **`PortalSystemModule.java`**:
   - `hookDragState(XC_LoadPackage.LoadPackageParam lpparam)`: Attaches to `com.android.server.wm.DragState`.
   - `SurfaceControl.Transaction.setMatrix(...)`: Applies 3D rotation matrix to `mSurfaceControl`.
+- **`TextSegmentationActivity.kt`**:
+  - Compose BigBang overlay shell; launched from the SystemUI dock's “文本分词” target.
+  - Word-chip selection/copy/search/share live in `BoomChipPage` / `BoomActionHandler`.
+- **`TextSegmenter.kt`**:
+  - `cppjieba` JNI wrapper; copies `assets/dict/*.utf8` into `filesDir/dragshare_jieba` on first use.
+  - JNI class path must stay `com/github/leaf/hyperportal/bigbang/TextSegmenter` in `text_segmenter_jni.cpp`.
+- **`PortalSystemUiModule.java`**:
+  - `buildTargets(...)`: Text branch adds the built-in “文本分词” target before “搜索”.
+  - `ACTION_DROP`: stores the drop coordinates so the BigBang chips animate from the drop point.
+  - Image targets never build `file://` URIs; they stage a bitmap through `PortalFileProvider` and ask `PortalService` to dispatch the share as the HyperPortal UID.
+- **`PortalShareContract.java` / `PortalService.dispatchImageShare(...)`**:
+  - Cross-process contract for image shares from the SystemUI module.
+  - `PortalService` owns `PortalFileProvider`, so it is the only place that grants the target URI and starts the target's `ACTION_SEND` activity.
+- **`PortalFileProvider.java`**:
+  - `grantToCommonTargets(...)` grants staged image URIs to common share targets and `com.android.systemui`; keep the provider writable only through the incoming namespace.

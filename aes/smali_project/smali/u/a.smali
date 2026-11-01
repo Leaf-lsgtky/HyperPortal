@@ -137,11 +137,9 @@
 
     move-result-object p1
 
-    invoke-static {}, Landroid/view/ViewConfiguration;->getLongPressTimeout()I
+    invoke-static {}, Ldev/dragshare/catcher/Bridge;->getLongPressDuration()I
 
     move-result p2
-
-    add-int/lit8 p2, p2, 0x32
 
     const-string p3, "support_long_press_time_out"
 
@@ -578,7 +576,11 @@
 
     iput v1, v0, Landroid/os/Message;->what:I
 
-    int-to-long v1, v5
+    invoke-static {}, Ldev/dragshare/catcher/Bridge;->getLongPressDuration()I
+
+    move-result v1
+
+    int-to-long v1, v1
 
     invoke-virtual {v4, v0, v1, v2}, Landroid/os/Handler;->sendMessageDelayed(Landroid/os/Message;J)Z
 
@@ -1076,7 +1078,11 @@
 
     iput v1, v0, Landroid/os/Message;->what:I
 
-    int-to-long v1, v5
+    invoke-static {}, Ldev/dragshare/catcher/Bridge;->getLongPressDuration()I
+
+    move-result v1
+
+    int-to-long v1, v1
 
     invoke-virtual {v4, v0, v1, v2}, Landroid/os/Handler;->sendMessageDelayed(Landroid/os/Message;J)Z
 

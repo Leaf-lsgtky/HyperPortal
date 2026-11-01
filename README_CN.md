@@ -16,6 +16,7 @@
 | 📱 **重排与变形动画** | WMS 动态阴影变形 (Shadow Morph) | 拖拽至底部 76% 热区时，系统拖拽浮层平滑形变为圆角矩形卡片并微缩，底部应用抽屉带触感震动升起。 |
 | ↩️ **原生取消回飞动画** | WMS Native Fly-back Restoration | 任意非目标区域松手时，完全还原 Android 底层 WindowManager 物理抛物线飞回原文字/原图位置。 |
 | 📐 **3D 空间倾斜动画** | LSPosed `system_server` 挂载 | Hook 底层 `com.android.server.wm.DragState`，通过 `SurfaceControl.Transaction.setMatrix` 直接在 SurfaceFlinger 层面施加真实 3D 倾斜投影。 |
+| ✂️ **文本分词** | cppjieba + BigBang 词块 | 文字拖入底部托盘后可进入“文本分词”：本地词典将正文拆成可选词块，支持点选/滑动选词、复制、网页/词典搜索、系统分享与拆字，不上传原文。 |
 
 ---
 

@@ -1,0 +1,355 @@
+{
+  "version": 1,
+  "defaultLimit": 15,
+  "defaultPinned": [
+    "builtin:copy",
+    "builtin:save",
+    "builtin:segment",
+    "builtin:share",
+    "builtin:search"
+  ],
+  "categoryScores": {
+    "address": {
+      "map": 100,
+      "taxi": 80,
+      "travel": 55,
+      "browser": 30,
+      "chat": 15,
+      "notes": 10
+    },
+    "url": {
+      "browser": 100,
+      "readlater": 75,
+      "chat": 30,
+      "notes": 20,
+      "mail": 15
+    },
+    "phone": {
+      "dialer": 100,
+      "contacts": 95,
+      "sms": 90,
+      "chat": 40
+    },
+    "email": {
+      "mail": 100,
+      "chat": 10,
+      "notes": 10
+    },
+    "image": {
+      "gallery": 100,
+      "notes": 90,
+      "chat": 80,
+      "social": 70,
+      "file": 60,
+      "browser": 20
+    },
+    "text": {
+      "chat": 90,
+      "notes": 80,
+      "social": 70,
+      "mail": 40,
+      "browser": 30,
+      "readlater": 35,
+      "file": 20
+    }
+  },
+  "rules": [
+    {
+      "package": "com.autonavi.minimap",
+      "category": "map",
+      "priority": 120
+    },
+    {
+      "package": "com.baidu.BaiduMap",
+      "category": "map",
+      "priority": 118
+    },
+    {
+      "package": "com.tencent.map",
+      "category": "map",
+      "priority": 116
+    },
+    {
+      "package": "com.google.android.apps.maps",
+      "category": "map",
+      "priority": 110
+    },
+    {
+      "package": "com.sdu.didi.psnger",
+      "category": "taxi",
+      "priority": 100
+    },
+    {
+      "package": "com.sankuai.meituan",
+      "category": "taxi",
+      "priority": 92
+    },
+    {
+      "package": "com.MobileTicket",
+      "category": "travel",
+      "priority": 90
+    },
+    {
+      "package": "ctrip.android.view",
+      "category": "travel",
+      "priority": 88
+    },
+    {
+      "package": "com.Qunar",
+      "category": "travel",
+      "priority": 86
+    },
+    {
+      "package": "com.tencent.mm",
+      "activityContains": "timeline",
+      "category": "social",
+      "priority": 105
+    },
+    {
+      "package": "com.tencent.mm",
+      "category": "chat",
+      "priority": 100
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "sharetoqq",
+      "category": "chat",
+      "priority": 108
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "sharemsg",
+      "category": "chat",
+      "priority": 107
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "qzone",
+      "category": "social",
+      "priority": 106
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "qfile",
+      "category": "file",
+      "priority": 105
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "fav",
+      "category": "notes",
+      "priority": 95
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "activityContains": "qlink",
+      "category": "file",
+      "priority": 90
+    },
+    {
+      "package": "com.tencent.mobileqq",
+      "category": "chat",
+      "priority": 98
+    },
+    {
+      "package": "com.tencent.tim",
+      "category": "chat",
+      "priority": 94
+    },
+    {
+      "package": "com.sina.weibo",
+      "category": "social",
+      "priority": 90
+    },
+    {
+      "package": "com.xingin.xhs",
+      "category": "social",
+      "priority": 88
+    },
+    {
+      "package": "com.ss.android.ugc.aweme",
+      "category": "social",
+      "priority": 86
+    },
+    {
+      "package": "com.smile.gifmaker",
+      "category": "social",
+      "priority": 82
+    },
+    {
+      "package": "tv.danmaku.bili",
+      "category": "social",
+      "priority": 78
+    },
+    {
+      "package": "com.zhihu.android",
+      "category": "social",
+      "priority": 76
+    },
+    {
+      "package": "com.coolapk.market",
+      "category": "social",
+      "priority": 74
+    },
+    {
+      "package": "com.baidu.tieba",
+      "category": "social",
+      "priority": 72
+    },
+    {
+      "package": "org.telegram.messenger",
+      "category": "chat",
+      "priority": 84
+    },
+    {
+      "package": "com.whatsapp",
+      "category": "chat",
+      "priority": 84
+    },
+    {
+      "package": "com.google.android.apps.messaging",
+      "category": "sms",
+      "priority": 100
+    },
+    {
+      "package": "com.android.mms",
+      "category": "sms",
+      "priority": 98
+    },
+    {
+      "package": "com.google.android.dialer",
+      "category": "dialer",
+      "priority": 100
+    },
+    {
+      "package": "com.android.contacts",
+      "category": "contacts",
+      "priority": 96
+    },
+    {
+      "package": "com.google.android.contacts",
+      "category": "contacts",
+      "priority": 96
+    },
+    {
+      "package": "com.android.chrome",
+      "category": "browser",
+      "priority": 100
+    },
+    {
+      "package": "com.microsoft.emmx",
+      "category": "browser",
+      "priority": 98
+    },
+    {
+      "package": "org.mozilla.firefox",
+      "category": "browser",
+      "priority": 96
+    },
+    {
+      "package": "com.quark.browser",
+      "category": "browser",
+      "priority": 100
+    },
+    {
+      "package": "com.UCMobile",
+      "category": "browser",
+      "priority": 96
+    },
+    {
+      "package": "com.baidu.searchbox",
+      "category": "browser",
+      "priority": 92
+    },
+    {
+      "package": "com.tencent.mtt",
+      "category": "browser",
+      "priority": 90
+    },
+    {
+      "package": "com.android.browser",
+      "category": "browser",
+      "priority": 88
+    },
+    {
+      "package": "com.miui.gallery",
+      "category": "gallery",
+      "priority": 100
+    },
+    {
+      "package": "com.google.android.apps.photos",
+      "category": "gallery",
+      "priority": 96
+    },
+    {
+      "package": "com.miui.notes",
+      "category": "notes",
+      "priority": 100
+    },
+    {
+      "package": "com.coloros.note",
+      "category": "notes",
+      "priority": 98
+    },
+    {
+      "package": "com.hihonor.notepad",
+      "category": "notes",
+      "priority": 96
+    },
+    {
+      "package": "com.google.android.keep",
+      "category": "notes",
+      "priority": 94
+    },
+    {
+      "package": "com.google.android.gm",
+      "category": "mail",
+      "priority": 100
+    },
+    {
+      "package": "com.microsoft.office.outlook",
+      "category": "mail",
+      "priority": 98
+    },
+    {
+      "package": "com.tencent.androidqqmail",
+      "category": "mail",
+      "priority": 96
+    },
+    {
+      "package": "com.netease.mail",
+      "category": "mail",
+      "priority": 94
+    },
+    {
+      "package": "com.android.email",
+      "category": "mail",
+      "priority": 92
+    },
+    {
+      "package": "com.taobao.taobao",
+      "category": "shopping",
+      "priority": 80
+    },
+    {
+      "package": "com.jingdong.app.mall",
+      "category": "shopping",
+      "priority": 78
+    },
+    {
+      "package": "com.xunmeng.pinduoduo",
+      "category": "shopping",
+      "priority": 76
+    },
+    {
+      "package": "com.android.fileexplorer",
+      "category": "file",
+      "priority": 70
+    },
+    {
+      "package": "com.miui.player",
+      "category": "music",
+      "priority": 60
+    }
+  ]
+}

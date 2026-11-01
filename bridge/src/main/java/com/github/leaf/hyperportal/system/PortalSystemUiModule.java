@@ -1,12 +1,16 @@
 package com.github.leaf.hyperportal.system;
 
 import android.app.Application;
+import android.app.SearchManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -27,6 +31,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.MediaStore;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.util.Locale;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
@@ -44,11 +52,25 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.github.leaf.hyperportal.PortalShareContract;
+import com.github.leaf.hyperportal.bigbang.BigBangContract;
+import com.github.leaf.hyperportal.target.ShareTargetEntry;
+import com.github.leaf.hyperportal.target.TargetConfig;
+import com.github.leaf.hyperportal.target.TargetRanker;
+import com.github.leaf.hyperportal.target.BuiltInIconDrawable;
+import com.github.leaf.hyperportal.target.TargetRepository;
+import com.github.leaf.hyperportal.target.TargetRuleStore;
+import com.github.leaf.hyperportal.util.QrCodeScanner;
+import com.github.leaf.hyperportal.view.ColorOSDockBar;
+
 import java.io.File;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import android.util.Patterns;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -79,7 +101,31 @@ public final class PortalSystemUiModule {
     public static void initSystemUi(XposedInterface xposed, XposedModuleInterface.PackageLoadedParam param) {
         sXposed = xposed;
         try {
-            ClassLoader cl = param.getDefaultClassLoader();
+            if (xposed.getModuleApplicationInfo() != null) {
+                TargetRuleStore.setModuleApkPath(xposed.getModuleApplicationInfo().sourceDir);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            try {
+                Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+                Object currentApp = activityThreadClass.getMethod("currentApplication").invoke(null);
+                if (currentApp instanceof Application) {
+                    sSysUiContext = ((Application) currentApp).getApplicationContext();
+                    sHandler.post(() -> initOverlay(sSysUiContext));
+                    xposed.log(Log.INFO, TAG, "SystemUI already running, overlay initialized immediately!");
+                }
+            } catch (Throwable t) {
+                xposed.log(Log.WARN, TAG, "currentApplication check skipped: " + t.getMessage());
+            }
+
+            ClassLoader cl = param != null ? param.getDefaultClassLoader() : null;
+            if (cl == null && sSysUiContext != null) {
+                cl = sSysUiContext.getClassLoader();
+            }
+            if (cl == null) {
+                cl = ClassLoader.getSystemClassLoader();
+            }
             Class<?> appClass = null;
             try {
                 appClass = Class.forName("com.android.systemui.SystemUIApplication", false, cl);
@@ -116,6 +162,24 @@ public final class PortalSystemUiModule {
         try {
             sOverlay = new SystemUiOverlay(context);
             sOverlay.registerReceivers();
+            try {
+                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                context.getContentResolver().call(uri, "reportSystemUiActive", null, null);
+            } catch (Throwable ignored) {
+            }
+            // Keep the HyperPortal process alive so QQ can stage images into
+            // PortalFileProvider without relying on HyperOS AutoStart permission.
+            try {
+                Intent keepAlive = new Intent();
+                keepAlive.setClassName(
+                        PortalShareContract.PORTAL_PACKAGE,
+                        PortalShareContract.PORTAL_SERVICE);
+                keepAlive.putExtra("keepAlive", true);
+                context.startForegroundService(keepAlive);
+                Log.i(TAG, "started portal keepAlive service");
+            } catch (Throwable throwable) {
+                Log.w(TAG, "start portal keepAlive service failed", throwable);
+            }
             Log.i(TAG, "SystemUiOverlay attached and listening for drag events!");
         } catch (Throwable t) {
             Log.e(TAG, "Failed to instantiate SystemUiOverlay", t);
@@ -128,15 +192,23 @@ public final class PortalSystemUiModule {
         private FrameLayout mContainer;
         private WindowManager.LayoutParams mParams;
         private GlowView mGlowView;
-        private TextView mPromptText;
-        private HorizontalScrollView mAppRow;
+        private ColorOSDockBar mDockBar;
         private final List<AppTarget> mTargets = new ArrayList<>();
         private boolean mShowing = false;
+        private long mLastHapticTime = 0L;
+        private float mTriggerThreshold = 0.76f;
 
         // Current dragged content payload
         private String mText;
         private Bitmap mBitmap;
         private Uri mImageUri;
+        private String mImageMime;
+        private float mLastDropX = -1f;
+        private float mLastDropY = -1f;
+
+        private final ExecutorService mQrExecutor = Executors.newSingleThreadExecutor();
+        private int mQrSessionId = 0;
+        private String mDetectedQrContent = null;
 
         public SystemUiOverlay(Context context) {
             this.mContext = context;
@@ -150,59 +222,347 @@ public final class PortalSystemUiModule {
                     mContext.getResources().getDisplayMetrics());
         }
 
+        private boolean mAppTargetsResolved = false;
+        private List<ShareTargetEntry> mCachedShareTargets = null;
+        private long mLastShareTargetsQueryTime = 0;
+
         private void buildTargets() {
+            buildTargets(mBitmap != null || mImageUri != null);
+        }
+
+        private void buildTargets(boolean isImage) {
             mTargets.clear();
-            PackageManager pm = mContext.getPackageManager();
+            TargetConfig config = TargetConfig.fromProvider(mContext);
+            String contentKind = TargetRepository.contentKind(mText, isImage);
+            List<ShareTargetEntry> candidates = new ArrayList<>();
+            candidates.addAll(TargetRepository.builtInEntries(isImage));
+            long now = SystemClock.uptimeMillis();
+            if (mCachedShareTargets == null || (now - mLastShareTargetsQueryTime) > 30000) {
+                mCachedShareTargets = TargetRepository.queryShareTargets(mContext);
+                mLastShareTargetsQueryTime = now;
+            }
+            candidates.addAll(mCachedShareTargets);
+            List<ShareTargetEntry> ordered = TargetRanker.rank(
+                    mContext, candidates, contentKind, config);
+            for (ShareTargetEntry entry : ordered) {
+                mTargets.add(new AppTarget(entry, createTargetAction(entry)));
+            }
+            mAppTargetsResolved = !ordered.isEmpty();
+            Log.i(TAG, "targets rebuilt kind=" + contentKind
+                    + " candidates=" + candidates.size()
+                    + " shown=" + ordered.size()
+                    + " limit=" + config.limit);
+        }
 
-            // Default quick target: Clipboard
-            mTargets.add(new AppTarget("复制文本", null, (ctx, text, bmp, uri) -> {
-                if (!TextUtils.isEmpty(text)) {
-                    ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
-                    cm.setPrimaryClip(ClipData.newPlainText("HyperPortal", text));
-                    toast("已复制到剪贴板");
-                }
-            }));
-
-            // Common apps
-            String[] candidatePkgs = {
-                    "com.tencent.mm",              // WeChat
-                    "com.tencent.mobileqq",         // QQ
-                    "com.sina.weibo",               // Weibo
-                    "com.coolapk.market",           // Coolapk
-                    "org.telegram.messenger",       // Telegram
-                    "com.miui.gallery",             // Xiaomi Album
-                    "com.miui.notes",               // Xiaomi Notes
-                    "com.android.fileexplorer"      // Xiaomi File Manager
-            };
-
-            for (String pkg : candidatePkgs) {
-                try {
-                    Intent launchIntent = pm.getLaunchIntentForPackage(pkg);
-                    if (launchIntent != null) {
-                        CharSequence label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0));
-                        Drawable icon = pm.getApplicationIcon(pkg);
-                        mTargets.add(new AppTarget(label.toString(), icon, (ctx, text, bmp, uri) -> {
-                            Intent share = new Intent(Intent.ACTION_SEND);
-                            share.setPackage(pkg);
-                            share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            if (uri != null) {
-                                share.setType("image/*");
-                                share.putExtra(Intent.EXTRA_STREAM, uri);
-                                share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            } else if (!TextUtils.isEmpty(text)) {
-                                share.setType("text/plain");
-                                share.putExtra(Intent.EXTRA_TEXT, text);
-                            }
-                            try {
-                                ctx.startActivity(share);
-                                toast("已发送至 " + label);
-                            } catch (Throwable t) {
-                                ctx.startActivity(launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                            }
-                        }));
+        private DropAction createTargetAction(final ShareTargetEntry entry) {
+            return (ctx, text, bmp, uri) -> {
+                if (entry.kind == ShareTargetEntry.KIND_COPY) {
+                    if (bmp != null || uri != null) {
+                        copyImageToClipboard(ctx, bmp, uri);
+                    } else if (!TextUtils.isEmpty(text)) {
+                        ClipboardManager cm = (ClipboardManager) ctx.getSystemService(
+                                Context.CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(ClipData.newPlainText("HyperPortal", text));
+                        toast("已复制到剪贴板");
                     }
-                } catch (Throwable ignored) {
+                    return;
                 }
+                if (entry.kind == ShareTargetEntry.KIND_SAVE) {
+                    saveImageToGallery(ctx, bmp, uri);
+                    return;
+                }
+                if (entry.kind == ShareTargetEntry.KIND_SEGMENT) {
+                    if (!TextUtils.isEmpty(text)) {
+                        try {
+                            ctx.startActivity(BigBangContract.createIntent(
+                                    ctx, text, Math.round(mLastDropX), Math.round(mLastDropY)));
+                        } catch (Throwable t) {
+                            Log.w(TAG, "open text segmentation failed", t);
+                            toast("无法打开文本分词");
+                        }
+                    }
+                    return;
+                }
+                if (entry.kind == ShareTargetEntry.KIND_SEARCH) {
+                    if (!TextUtils.isEmpty(text)) {
+                        try {
+                            Intent search = new Intent(Intent.ACTION_WEB_SEARCH);
+                            search.putExtra(SearchManager.QUERY, text);
+                            search.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            ctx.startActivity(search);
+                        } catch (Throwable t) {
+                            try {
+                                Intent view = new Intent(Intent.ACTION_VIEW,
+                                        Uri.parse("https://www.bing.com/search?q="
+                                                + Uri.encode(text)));
+                                view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                ctx.startActivity(view);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                    return;
+                }
+                if (entry.kind == ShareTargetEntry.KIND_SYSTEM_SHARE) {
+                    Uri shareUri = uri;
+                    if (shareUri == null && bmp != null) {
+                        shareUri = stageBitmapInPortal(ctx, bmp, "shared_");
+                    }
+                    dispatchSystemShare(ctx, shareUri, text);
+                    return;
+                }
+
+                if (uri != null || bmp != null) {
+                    Uri shareUri = uri;
+                    if (shareUri == null) {
+                        shareUri = stageBitmapInPortal(ctx, bmp, "shared_");
+                    }
+                    if (shareUri == null) {
+                        Log.w(TAG, "image staging failed target=" + entry.packageName);
+                        toast("图片准备失败");
+                        return;
+                    }
+                    dispatchImageShare(ctx, entry.packageName, entry.activityName, shareUri, text);
+                    toast("已发送至 " + entry.label);
+                    return;
+                }
+                if (!TextUtils.isEmpty(text)) {
+                    Intent share = new Intent(Intent.ACTION_SEND);
+                    share.setPackage(entry.packageName);
+                    if (entry.component() != null) {
+                        share.setComponent(entry.component());
+                    }
+                    share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    share.setType("text/plain");
+                    share.putExtra(Intent.EXTRA_TEXT, text);
+                    try {
+                        ctx.startActivity(share);
+                        toast("已发送至 " + entry.label);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "text share failed target=" + entry.packageName, t);
+                        try {
+                            Intent launchIntent = ctx.getPackageManager()
+                                    .getLaunchIntentForPackage(entry.packageName);
+                            if (launchIntent != null) {
+                                ctx.startActivity(launchIntent.addFlags(
+                                        Intent.FLAG_ACTIVITY_NEW_TASK));
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            };
+        }
+
+        private void updateDockTargets() {
+            boolean isImage = (mBitmap != null || mImageUri != null);
+            buildTargets(isImage);
+            if (mDockBar != null) {
+                List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+                for (AppTarget target : mTargets) {
+                    dockItems.add(new ColorOSDockBar.DockItem(
+                            target.key, target.name, target.icon, target));
+                }
+                mDockBar.setItems(dockItems);
+            }
+        }
+
+        private void copyImageToClipboard(Context ctx, Bitmap bmp, Uri uri) {
+            try {
+                ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                Uri targetUri = uri;
+                if (targetUri == null && bmp != null) {
+                    targetUri = saveBitmapToCache(ctx, bmp);
+                }
+                if (targetUri != null) {
+                    ClipData clip = ClipData.newUri(ctx.getContentResolver(), "image", targetUri);
+                    cm.setPrimaryClip(clip);
+                    toast("图片已复制到剪贴板");
+                } else {
+                    toast("复制图片失败");
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "copyImageToClipboard failed", t);
+                toast("复制图片失败");
+            }
+        }
+
+        private void saveImageToGallery(Context ctx, Bitmap bmp, Uri uri) {
+            try {
+                String extension = "png";
+                String mimeType = "image/png";
+                if (uri != null) {
+                    String path = uri.getPath();
+                    if (path != null) {
+                        String lower = path.toLowerCase(Locale.US);
+                        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+                            extension = "jpg";
+                            mimeType = "image/jpeg";
+                        } else if (lower.endsWith(".webp")) {
+                            extension = "webp";
+                            mimeType = "image/webp";
+                        } else if (lower.endsWith(".gif")) {
+                            extension = "gif";
+                            mimeType = "image/gif";
+                        }
+                    }
+                }
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Images.Media.DISPLAY_NAME, "HyperPortal_" + System.currentTimeMillis() + "." + extension);
+                values.put(MediaStore.Images.Media.MIME_TYPE, mimeType);
+                if (Build.VERSION.SDK_INT >= 29) {
+                    values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HyperPortal");
+                    values.put(MediaStore.Images.Media.IS_PENDING, 1);
+                }
+                Uri inserted = ctx.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                if (inserted != null) {
+                    long bytesWritten = 0;
+                    try (OutputStream os = ctx.getContentResolver().openOutputStream(inserted)) {
+                        if (os != null) {
+                            if (uri != null) {
+                                // 1. Stream the original file directly with zero recompression!
+                                try (java.io.InputStream is = ctx.getContentResolver().openInputStream(uri)) {
+                                    if (is != null) {
+                                        byte[] buf = new byte[65536];
+                                        int len;
+                                        while ((len = is.read(buf)) > 0) {
+                                            os.write(buf, 0, len);
+                                            bytesWritten += len;
+                                        }
+                                    }
+                                } catch (Throwable t) {
+                                    Log.w(TAG, "saveImageToGallery failed reading uri", t);
+                                }
+                            }
+                            if (bytesWritten == 0 && bmp != null) {
+                                // 2. Fallback to lossless decoded bitmap if URI had 0 bytes
+                                if (bmp.compress(Bitmap.CompressFormat.PNG, 100, os)) {
+                                    bytesWritten = 1;
+                                }
+                            }
+                            os.flush();
+                        }
+                    }
+                    if (bytesWritten <= 0) {
+                        try {
+                            ctx.getContentResolver().delete(inserted, null, null);
+                        } catch (Throwable ignored) {
+                        }
+                        toast("保存图片失败");
+                        return;
+                    }
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        values.clear();
+                        values.put(MediaStore.Images.Media.IS_PENDING, 0);
+                        ctx.getContentResolver().update(inserted, values, null, null);
+                    }
+                    toast("原图已保存至相册 (Pictures/HyperPortal)");
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "saveImageToGallery failed", t);
+                toast("保存图片失败");
+            }
+        }
+
+        private Uri saveBitmapToCache(Context ctx, Bitmap bmp) {
+            return stageBitmapInPortal(ctx, bmp, "shared_");
+        }
+
+        /**
+         * Writes a bitmap into HyperPortal's exportable PortalFileProvider instead of
+         * returning a file:// URI. SystemUI's own cache directory is not readable by
+         * the target app, and targetSdk 24+ rejects file:// URIs in cross-app Intents.
+         */
+        private Uri stageBitmapInPortal(Context ctx, Bitmap bmp, String prefix) {
+            if (bmp == null || bmp.isRecycled()) {
+                Log.w(TAG, "stageBitmapInPortal skipped: bitmap unavailable");
+                return null;
+            }
+            String name = prefix + SystemClock.uptimeMillis() + ".png";
+            Uri target = Uri.parse(
+                    "content://com.github.leaf.hyperportal.files/incoming/"
+                            + Uri.encode(name));
+            try (OutputStream output = ctx.getContentResolver().openOutputStream(target, "w")) {
+                if (output == null) {
+                    Log.w(TAG, "stageBitmapInPortal: provider returned null for " + target);
+                    return null;
+                }
+                if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    Log.w(TAG, "stageBitmapInPortal: PNG compression failed");
+                    return null;
+                }
+                output.flush();
+                Log.i(TAG, "stageBitmapInPortal " + name + " "
+                        + bmp.getWidth() + "x" + bmp.getHeight());
+                return target;
+            } catch (Throwable t) {
+                Log.w(TAG, "stageBitmapInPortal failed for " + target, t);
+                return null;
+            }
+        }
+
+        /**
+         * Image shares are performed by PortalService under the HyperPortal UID, which
+         * owns PortalFileProvider and can grant its content URI to the target app.
+         */
+        private void dispatchImageShare(Context ctx, String targetPkg,
+                                        String targetActivity, Uri uri, String text) {
+            try {
+                Intent proxy = new Intent();
+                proxy.setClassName(
+                        PortalShareContract.PORTAL_PACKAGE,
+                        PortalShareContract.SHARE_PROXY_ACTIVITY);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                proxy.putExtra(PortalShareContract.EXTRA_TARGET_PACKAGE, targetPkg);
+                if (!TextUtils.isEmpty(targetActivity)) {
+                    proxy.putExtra(PortalShareContract.EXTRA_TARGET_ACTIVITY, targetActivity);
+                }
+                proxy.putExtra(PortalShareContract.EXTRA_IMAGE_URI, uri.toString());
+                if (!TextUtils.isEmpty(mImageMime)) {
+                    proxy.putExtra(PortalShareContract.EXTRA_IMAGE_MIME, mImageMime);
+                }
+                if (!TextUtils.isEmpty(text)) {
+                    proxy.putExtra(PortalShareContract.EXTRA_SHARE_TEXT, text);
+                }
+                ctx.startActivity(proxy);
+                Log.i(TAG, "dispatchImageShare proxy target=" + targetPkg
+                        + " uri=" + uri + " mime=" + mImageMime);
+            } catch (Throwable t) {
+                Log.w(TAG, "dispatchImageShare failed target=" + targetPkg
+                        + " uri=" + uri, t);
+                toast("无法分享图片");
+            }
+        }
+
+        private void dispatchSystemShare(Context ctx, Uri uri, String text) {
+            try {
+                Intent proxy = new Intent();
+                proxy.setClassName(
+                        PortalShareContract.PORTAL_PACKAGE,
+                        PortalShareContract.SHARE_PROXY_ACTIVITY);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                proxy.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                proxy.putExtra(PortalShareContract.EXTRA_TARGET_PACKAGE, "system:chooser");
+                proxy.putExtra("isChooser", true);
+                if (uri != null) {
+                    proxy.putExtra(PortalShareContract.EXTRA_IMAGE_URI, uri.toString());
+                }
+                if (!TextUtils.isEmpty(mImageMime)) {
+                    proxy.putExtra(PortalShareContract.EXTRA_IMAGE_MIME, mImageMime);
+                }
+                if (!TextUtils.isEmpty(text)) {
+                    proxy.putExtra(PortalShareContract.EXTRA_SHARE_TEXT, text);
+                }
+                ctx.startActivity(proxy);
+                Log.i(TAG, "dispatchSystemShare chooser started uri=" + uri);
+            } catch (Throwable t) {
+                Log.w(TAG, "dispatchSystemShare failed", t);
+                toast("无法打开系统分享");
             }
         }
 
@@ -225,51 +585,61 @@ public final class PortalSystemUiModule {
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.BOTTOM);
             mContainer.addView(mGlowView, glowParams);
 
-            // 2. Prompt Text ("拖拽至此处触发内容传送门")
-            TextView prompt = new TextView(mContext);
-            prompt.setText("拖拽至此处触发内容传送门");
-            prompt.setTextColor(Color.parseColor("#CCFFFFFF"));
-            prompt.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
-            prompt.setGravity(Gravity.CENTER);
-            prompt.setShadowLayer(dp(4), 0, dp(1), Color.parseColor("#80000000"));
-            GradientDrawable pillBg = new GradientDrawable();
-            pillBg.setColor(Color.parseColor("#26000000"));
-            pillBg.setCornerRadius(dp(16));
-            prompt.setBackground(pillBg);
-            prompt.setPadding(dp(16), dp(8), dp(16), dp(8));
-            FrameLayout.LayoutParams promptParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            promptParams.bottomMargin = navBarHeight + dp(24);
-            mContainer.addView(prompt, promptParams);
-            mPromptText = prompt;
+            // 2. ColorOS Dock Bar (initially hidden in Phase 1)
+            mDockBar = new ColorOSDockBar(mContext);
+            mDockBar.setVisibility(View.GONE);
+            mDockBar.setTranslationY(dp(60));
+            mDockBar.setAlpha(0f);
+            List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+            for (AppTarget target : mTargets) {
+                dockItems.add(new ColorOSDockBar.DockItem(
+                        target.key, target.name, target.icon, target));
+            }
+            mDockBar.setItems(dockItems);
+            FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, dp(153), Gravity.BOTTOM);
+            dockParams.bottomMargin = Math.max(0, navBarHeight + dp(20) - 50);
+            mContainer.addView(mDockBar, dockParams);
 
-            // 3. Application Bar (initially hidden in Phase 1)
-            HorizontalScrollView scroll = buildAppRow();
-            scroll.setVisibility(View.GONE);
-            scroll.setTranslationY(dp(60));
-            scroll.setAlpha(0f);
-            FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-            scrollParams.bottomMargin = navBarHeight + dp(20);
-            scrollParams.leftMargin = dp(16);
-            scrollParams.rightMargin = dp(16);
-            mContainer.addView(scroll, scrollParams);
-            mAppRow = scroll;
-
-            // 4. Drag and Drop Listener on Container
+            // 4. Drag and Drop Listener on Container (ColorOS Dock Interaction & Fly-back)
             mContainer.setOnDragListener((v, event) -> {
                 int action = event.getAction();
                 if (action == DragEvent.ACTION_DRAG_STARTED) {
                     return isMasterEnabled();
+                } else if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                    if (event.getX() == 0f && event.getY() == 0f) {
+                        return true;
+                    }
+                    int[] loc = new int[2];
+                    mContainer.getLocationOnScreen(loc);
+                    float rawX = loc[0] + event.getX();
+                    float rawY = loc[1] + event.getY();
+                    if (mShowing && mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
+                        mDockBar.onDragLocation(rawX, rawY);
+                    }
+                    return true;
+                } else if (action == DragEvent.ACTION_DRAG_EXITED) {
+                    if (mDockBar != null) {
+                        mDockBar.onDragExited();
+                    }
+                    return true;
                 } else if (action == DragEvent.ACTION_DROP) {
-                    // Check if dropped onto one of our AppTargets
-                    float dropX = event.getX();
-                    float dropY = event.getY();
-                    AppTarget hit = findHitTarget(dropX, dropY);
-                    if (hit != null) {
+                    int[] loc = new int[2];
+                    mContainer.getLocationOnScreen(loc);
+                    float rawX = loc[0] + event.getX();
+                    float rawY = loc[1] + event.getY();
+                    mLastDropX = rawX;
+                    mLastDropY = rawY;
+                    ColorOSDockBar.DockItem hit = mDockBar != null ? mDockBar.findHitTarget(rawX, rawY) : null;
+                    Log.i(TAG, "ACTION_DROP hit=" + (hit == null ? "null" : hit.label)
+                            + " text=" + (mText == null ? "null" : mText.length())
+                            + " bmp=" + (mBitmap == null ? "null" : mBitmap.getWidth() + "x" + mBitmap.getHeight())
+                            + " uri=" + mImageUri + " mime=" + mImageMime);
+                    if (hit != null && hit.tag instanceof AppTarget) {
+                        AppTarget target = (AppTarget) hit.tag;
                         try {
-                            hit.action.onDrop(mContext, mText, mBitmap, mImageUri);
+                            recordTargetUse(target.key);
+                            target.action.onDrop(mContext, mText, mBitmap, mImageUri);
                         } catch (Throwable t) {
                             Log.w(TAG, "drop action failed", t);
                         }
@@ -281,6 +651,9 @@ public final class PortalSystemUiModule {
                     handleDragStateChanged(0, 0f);
                     return false;
                 } else if (action == DragEvent.ACTION_DRAG_ENDED) {
+                    if (mDockBar != null) {
+                        mDockBar.resetMagnification(false);
+                    }
                     handleDragStateChanged(0, 0f);
                     return true;
                 }
@@ -300,94 +673,18 @@ public final class PortalSystemUiModule {
             mParams.gravity = Gravity.BOTTOM;
         }
 
-        private HorizontalScrollView buildAppRow() {
-            HorizontalScrollView scroll = new HorizontalScrollView(mContext);
-            scroll.setHorizontalScrollBarEnabled(false);
-            scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        
 
-            LinearLayout row = new LinearLayout(mContext);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(8), dp(8), dp(8), dp(8));
 
-            GradientDrawable cardBg = new GradientDrawable();
-            cardBg.setColor(Color.parseColor("#E6202024"));
-            cardBg.setCornerRadius(dp(28));
-            cardBg.setStroke(dp(1), Color.parseColor("#26FFFFFF"));
-            row.setBackground(cardBg);
+            
 
-            for (AppTarget target : mTargets) {
-                LinearLayout item = new LinearLayout(mContext);
-                item.setOrientation(LinearLayout.VERTICAL);
-                item.setGravity(Gravity.CENTER);
-                item.setPadding(dp(12), dp(8), dp(12), dp(8));
-                item.setTag(target);
 
-                ImageView iconView = new ImageView(mContext);
-                if (target.icon != null) {
-                    iconView.setImageDrawable(target.icon);
-                } else {
-                    GradientDrawable iconBg = new GradientDrawable();
-                    iconBg.setColor(Color.parseColor("#33FFFFFF"));
-                    iconBg.setCornerRadius(dp(16));
-                    iconView.setBackground(iconBg);
-                }
-                LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(44), dp(44));
-                item.addView(iconView, iconParams);
-
-                TextView nameView = new TextView(mContext);
-                nameView.setText(target.name);
-                nameView.setTextColor(Color.WHITE);
-                nameView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11);
-                nameView.setGravity(Gravity.CENTER);
-                nameView.setSingleLine(true);
-                nameView.setEllipsize(TextUtils.TruncateAt.END);
-                LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-                textParams.topMargin = dp(4);
-                item.addView(nameView, textParams);
-
-                row.addView(item);
+        private void recordTargetUse(String key) {
+            try {
+                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                mContext.getContentResolver().call(uri, "recordTargetUse", key, null);
+            } catch (Throwable ignored) {
             }
-            scroll.addView(row);
-            return scroll;
-        }
-
-        private AppTarget findHitTarget(float dropX, float dropY) {
-            if (mAppRow == null || mAppRow.getVisibility() != View.VISIBLE) {
-                return null;
-            }
-            int[] rowLoc = new int[2];
-            mAppRow.getLocationOnScreen(rowLoc);
-            int[] containerLoc = new int[2];
-            mContainer.getLocationOnScreen(containerLoc);
-
-            float rowX = dropX - (rowLoc[0] - containerLoc[0]);
-            float rowY = dropY - (rowLoc[1] - containerLoc[1]);
-
-            if (rowX < 0 || rowX > mAppRow.getWidth() || rowY < 0 || rowY > mAppRow.getHeight()) {
-                return null;
-            }
-
-            ViewGroup row = (ViewGroup) mAppRow.getChildAt(0);
-            if (row == null) {
-                return null;
-            }
-
-            float scrollX = mAppRow.getScrollX();
-            float contentX = rowX + scrollX;
-
-            for (int i = 0; i < row.getChildCount(); i++) {
-                View child = row.getChildAt(i);
-                if (contentX >= child.getLeft() && contentX <= child.getRight()
-                        && rowY >= child.getTop() && rowY <= child.getBottom()) {
-                    Object tag = child.getTag();
-                    if (tag instanceof AppTarget) {
-                        return (AppTarget) tag;
-                    }
-                }
-            }
-            return null;
         }
 
         private void toast(String msg) {
@@ -397,21 +694,40 @@ public final class PortalSystemUiModule {
         public void registerReceivers() {
             IntentFilter filter = new IntentFilter();
             filter.addAction(ACTION_DRAG_STATE);
+            filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
+            filter.addAction(Intent.ACTION_USER_UNLOCKED);
+            filter.addAction(Intent.ACTION_BOOT_COMPLETED);
             if (Build.VERSION.SDK_INT >= 33) {
                 mContext.registerReceiver(new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context context, Intent intent) {
-                        handleIntent(intent);
+                        try {
+                            handleIntent(intent);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "handleIntent failed in SystemUI", t);
+                        }
                     }
                 }, filter, Context.RECEIVER_EXPORTED);
             } else {
                 mContext.registerReceiver(new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context context, Intent intent) {
-                        handleIntent(intent);
+                        try {
+                            handleIntent(intent);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "handleIntent failed in SystemUI", t);
+                        }
                     }
                 }, filter);
+            }
+        }
+
+        private boolean isLandscape() {
+            try {
+                return mContext.getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+            } catch (Throwable t) {
+                return false;
             }
         }
 
@@ -420,9 +736,23 @@ public final class PortalSystemUiModule {
                 Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
                 Bundle res = mContext.getContentResolver().call(uri, "getConfig", null, null);
                 if (res != null) {
+                    if (mDockBar != null) {
+                        mDockBar.setEdgeScrollMarginDp(res.getInt("edge_scroll_margin", 86));
+                    }
+                    int thresholdPct = res.getInt("trigger_threshold", 76);
+                    if (thresholdPct >= 50 && thresholdPct <= 95) {
+                        mTriggerThreshold = thresholdPct / 100.0f;
+                    }
+                    boolean landscapeAllowed = res.getBoolean("landscape_trigger", false);
+                    if (!landscapeAllowed && isLandscape()) {
+                        return false;
+                    }
                     return res.getBoolean("master_switch", true);
                 }
             } catch (Throwable ignored) {
+            }
+            if (isLandscape()) {
+                return false;
             }
             return true;
         }
@@ -430,8 +760,15 @@ public final class PortalSystemUiModule {
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            if (Intent.ACTION_USER_UNLOCKED.equals(action) || Intent.ACTION_BOOT_COMPLETED.equals(action)) {
+                updateDockTargets();
+                return;
+            }
             if (ACTION_SHOW.equals(action)) {
                 mText = intent.getStringExtra("viewContent");
+                mBitmap = null;
+                mImageUri = null;
+                mImageMime = null;
                 Object bmp = intent.getParcelableExtra("viewBitmap");
                 if (bmp instanceof Bitmap) {
                     mBitmap = (Bitmap) bmp;
@@ -440,14 +777,21 @@ public final class PortalSystemUiModule {
                 if (uriStr != null) {
                     mImageUri = Uri.parse(uriStr);
                 }
-            } else if (ACTION_DRAG_STATE.equals(action)) {
+                mImageMime = intent.getStringExtra("imageMimeType");
+                Log.i(TAG, "ACTION_SHOW text=" + (mText == null ? "null" : mText.length())
+                        + " bitmap=" + (mBitmap == null ? "null" : mBitmap.getWidth() + "x" + mBitmap.getHeight())
+                        + " uri=" + mImageUri + " mime=" + mImageMime);
+                updateDockTargets();
+                triggerQrScanAsync();
+            } else if (ACTION_DRAG_STATE.equals(action) || "com.github.leaf.hyperportal.DRAG_STATE_CHANGED".equals(action)) {
                 int state = intent.getIntExtra("state", 0);
+                float x = intent.getFloatExtra("x", -1f);
                 float y = intent.getFloatExtra("y", 0f);
                 if (state > 0 && !isMasterEnabled()) {
-                    handleDragStateChanged(0, 0f);
+                    handleDragStateChanged(0, -1f, 0f);
                     return;
                 }
-                handleDragStateChanged(state, y);
+                handleDragStateChanged(state, x, y);
             }
         }
 
@@ -490,50 +834,59 @@ public final class PortalSystemUiModule {
         }
 
         public void handleDragStateChanged(int state, float y) {
+            handleDragStateChanged(state, -1f, y);
+        }
+
+        public void handleDragStateChanged(int state, float x, float y) {
             if (Looper.myLooper() != Looper.getMainLooper()) {
-                sHandler.post(() -> handleDragStateChanged(state, y));
+                sHandler.post(() -> handleDragStateChanged(state, x, y));
                 return;
             }
 
             if (state == 0) {
                 // Drag ended / cancelled
+                mQrSessionId++;
+                mDetectedQrContent = null;
                 if (mGlowView != null) {
                     mGlowView.setVisibility(View.GONE);
                 }
-                if (mPromptText != null) {
-                    mPromptText.setVisibility(View.GONE);
-                }
-                if (mAppRow != null) {
-                    mAppRow.setVisibility(View.GONE);
+                if (mDockBar != null) {
+                    mDockBar.stopAutoScroll();
+                    mDockBar.resetMagnification(false);
+                    mDockBar.setVisibility(View.GONE);
                 }
                 hideOverlay();
                 mText = null;
                 mBitmap = null;
                 mImageUri = null;
+                mImageMime = null;
                 return;
             }
 
+            if (!mAppTargetsResolved || mTargets.isEmpty()) {
+                updateDockTargets();
+            }
+
             if (state == 1) {
-                // Phase 1: Glow view active, prompt text shown
+                // Phase 1: Glow view active, shelf collapsed
                 showOverlay();
                 setTouchable(false);
                 int screenHeight = mContext.getResources().getDisplayMetrics().heightPixels;
-                float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * 0.67f)));
+                float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
+                float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
+                float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * glowSpan)));
                 if (mGlowView != null) {
                     mGlowView.setPhase1Progress(progress);
                     mGlowView.setVisibility(View.VISIBLE);
                 }
-                if (mPromptText != null) {
-                    mPromptText.setVisibility(View.VISIBLE);
-                    mPromptText.setAlpha(1.0f);
-                }
-                if (mAppRow != null && mAppRow.getVisibility() == View.VISIBLE) {
-                    mAppRow.animate()
+                if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
+                    mDockBar.stopAutoScroll();
+                    mDockBar.animate()
                             .translationY(dp(60))
                             .alpha(0f)
                             .setDuration(160)
                             .withEndAction(() -> {
-                                if (mAppRow != null) mAppRow.setVisibility(View.GONE);
+                                if (mDockBar != null) mDockBar.setVisibility(View.GONE);
                             })
                             .start();
                 }
@@ -545,26 +898,26 @@ public final class PortalSystemUiModule {
                     mGlowView.setPhase2();
                     mGlowView.setVisibility(View.VISIBLE);
                 }
-                if (mPromptText != null && mPromptText.getVisibility() == View.VISIBLE) {
-                    mPromptText.animate()
-                            .alpha(0f)
-                            .setDuration(150)
-                            .withEndAction(() -> {
-                                if (mPromptText != null) mPromptText.setVisibility(View.GONE);
-                            })
-                            .start();
-                }
-                if (mAppRow != null) {
-                    if (mAppRow.getVisibility() != View.VISIBLE) {
-                        mAppRow.setVisibility(View.VISIBLE);
-                        mAppRow.setTranslationY(dp(60));
-                        mAppRow.setAlpha(0f);
-                        try {
-                            mAppRow.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK);
-                        } catch (Throwable ignored) {
+                if (mDockBar != null) {
+                    if (mDockBar.getVisibility() != View.VISIBLE) {
+                        mDockBar.setVisibility(View.VISIBLE);
+                        mDockBar.setTranslationY(dp(60));
+                        mDockBar.setAlpha(0f);
+                        if (x >= 0) {
+                            mDockBar.startEnterAnimation(x, y);
+                        } else {
+                            mDockBar.startEnterAnimation();
+                        }
+                        long now = SystemClock.uptimeMillis();
+                        if (now - mLastHapticTime > 500L) {
+                            mLastHapticTime = now;
+                            try {
+                                mDockBar.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK);
+                            } catch (Throwable ignored) {
+                            }
                         }
                     }
-                    mAppRow.animate()
+                    mDockBar.animate()
                             .translationY(0f)
                             .alpha(1.0f)
                             .setDuration(220)
@@ -573,16 +926,127 @@ public final class PortalSystemUiModule {
                 }
             }
         }
+
+        private void triggerQrScanAsync() {
+            mQrSessionId++;
+            final int currentSession = mQrSessionId;
+            mDetectedQrContent = null;
+            if (mBitmap == null && mImageUri == null) {
+                return;
+            }
+            TargetConfig config = TargetConfig.fromProvider(mContext);
+            if (!config.enableQrScan || config.hiddenKeys.contains("builtin:qr")) {
+                Log.i(TAG, "QR scan skipped: disabled in config");
+                return;
+            }
+            final Bitmap bmpToScan = mBitmap;
+            final Uri uriToScan = mImageUri;
+            mQrExecutor.execute(() -> {
+                try {
+                    String qrResult = null;
+                    if (bmpToScan != null && !bmpToScan.isRecycled()) {
+                        qrResult = QrCodeScanner.scan(bmpToScan);
+                    }
+                    if (qrResult == null && uriToScan != null) {
+                        qrResult = QrCodeScanner.scan(mContext, uriToScan);
+                    }
+                    if (qrResult != null && !qrResult.trim().isEmpty()) {
+                        final String finalQr = qrResult.trim();
+                        sHandler.post(() -> onQrCodeDetected(finalQr, currentSession));
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "QR scan async error", t);
+                }
+            });
+        }
+
+        private void onQrCodeDetected(String qrContent, int sessionId) {
+            if (sessionId != mQrSessionId || (mBitmap == null && mImageUri == null)) {
+                return;
+            }
+            mDetectedQrContent = qrContent;
+            Log.i(TAG, "onQrCodeDetected: " + qrContent);
+
+            for (AppTarget t : mTargets) {
+                if ("builtin:qr".equals(t.key)) {
+                    return;
+                }
+            }
+
+            final boolean isUrl = isWebUrl(qrContent);
+            String label = isUrl ? "打开链接" : "识别二维码";
+
+            DropAction action = (ctx, text, bmp, uri) -> {
+                if (isUrl) {
+                    try {
+                        String url = qrContent;
+                        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                            url = "https://" + url;
+                        }
+                        Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                        view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        ctx.startActivity(view);
+                        toast("正在打开: " + qrContent);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "open url failed", t);
+                        ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(ClipData.newPlainText("HyperPortal QR", qrContent));
+                        toast("已复制二维码内容");
+                    }
+                } else {
+                    ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("HyperPortal QR", qrContent));
+                    toast("已复制二维码内容: " + qrContent);
+                }
+            };
+
+            Drawable icon = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_QR);
+            AppTarget qrTarget = new AppTarget("builtin:qr", label, icon, action);
+
+            TargetConfig config = TargetConfig.fromProvider(mContext);
+            int insertIndex = 0;
+            if (config.pinnedOrder.contains("builtin:qr")) {
+                insertIndex = Math.min(mTargets.size(), Math.max(0, config.pinnedOrder.indexOf("builtin:qr")));
+            }
+            mTargets.add(insertIndex, qrTarget);
+
+            if (mDockBar != null) {
+                List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+                for (AppTarget target : mTargets) {
+                    dockItems.add(new ColorOSDockBar.DockItem(
+                            target.key, target.name, target.icon, target));
+                }
+                mDockBar.setItems(dockItems);
+            }
+        }
+
+        private static boolean isWebUrl(String text) {
+            if (TextUtils.isEmpty(text)) return false;
+            String lower = text.trim().toLowerCase(Locale.US);
+            if (lower.startsWith("http://") || lower.startsWith("https://")) {
+                return true;
+            }
+            return Patterns.WEB_URL.matcher(text.trim()).matches();
+        }
     }
 
     private static final class AppTarget {
+        final String key;
         final String name;
         final Drawable icon;
         final DropAction action;
 
-        AppTarget(String name, Drawable icon, DropAction action) {
+        AppTarget(String key, String name, Drawable icon, DropAction action) {
+            this.key = key;
             this.name = name;
             this.icon = icon;
+            this.action = action;
+        }
+
+        AppTarget(ShareTargetEntry entry, DropAction action) {
+            this.key = entry.key;
+            this.name = entry.label;
+            this.icon = entry.displayIcon();
             this.action = action;
         }
     }

@@ -27,7 +27,7 @@ import build
 
 def adb(cmd, shell=True, check=True):
     full_cmd = f"adb {cmd}"
-    res = subprocess.run(full_cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    res = subprocess.run(full_cmd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
     if res.returncode != 0 and check:
         print(f"[ERROR] adb command failed: {full_cmd}\n{res.stdout}", file=sys.stderr)
         raise RuntimeError(f"ADB failed: {full_cmd}")
@@ -59,12 +59,15 @@ def soft_reboot():
 
 def start_portal_service():
     print("[PORTAL] Starting DragShareBridge service...")
-    adb("shell am start -n com.github.leaf.hyperportal/.MainActivity")
+    adb("shell am start -n com.github.leaf.hyperportal/.ui.MainActivity")
 
 
 def monitor_logs():
     print("[LOGS] Starting live logcat monitor (Ctrl+C to exit)...")
     tags = [
+        "DragSharePoC:V",
+        "PortalSystemUi:V",
+        "HyperPortal:V",
         "DragShareBridge:V",
         "DragBridge:V",
         "ContentCatcher:V",

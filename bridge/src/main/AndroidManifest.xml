@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
+        android:name=".HyperPortalApplication"
         android:allowBackup="false"
         android:label="HyperPortal"
         android:supportsRtl="true"
@@ -51,6 +52,33 @@
         <activity
             android:name=".ui.BlacklistActivity"
             android:exported="false" />
+
+        <activity
+            android:name=".ui.TargetSettingsActivity"
+            android:exported="false" />
+
+        <!--
+          BigBang text segmentation. Exported because the LSPosed SystemUI module
+          runs under com.android.systemui's UID and must be able to launch it.
+          It only displays caller-supplied text.
+        -->
+        <activity
+            android:name=".bigbang.TextSegmentationActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.github.leaf.hyperportal.overlay"
+            android:label="@string/bigbang_overlay_title"
+            android:theme="@style/Theme.HyperPortal.BigBangOverlay" />
+
+        <!-- Transparent BAL trampoline for image shares launched from SystemUI. -->
+        <activity
+            android:name=".ShareProxyActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.github.leaf.hyperportal.overlay"
+            android:theme="@style/Theme.HyperPortal.ShareProxy" />
 
         <meta-data
             android:name="xposedmodule"

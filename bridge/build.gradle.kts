@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.github.leaf.hyperportal"
     compileSdk = 37
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.github.leaf.hyperportal"
@@ -13,6 +14,17 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     signingConfigs {
@@ -27,6 +39,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
@@ -39,6 +55,9 @@ android {
     }
 
     packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
         resources {
             merges += "META-INF/xposed/*"
         }
@@ -49,6 +68,7 @@ dependencies {
     compileOnly(libs.libxposed.api)
     implementation(libs.libxposed.service)
     implementation(libs.activity.compose)
+    implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
     implementation(libs.kotlinx.coroutines.android)
 
@@ -56,4 +76,7 @@ dependencies {
     implementation(libs.miuix.preference.android)
     implementation(libs.miuix.icons.android)
     implementation(libs.miuix.blur.android)
+    implementation(libs.zxing.core)
+
+    testImplementation(libs.junit)
 }

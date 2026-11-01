@@ -16,6 +16,7 @@
 | 📱 **Rearrangement & Card Morphing** | Dynamic WMS Drag Shadow Morphing | Morphs into a rounded-corner card and slightly scales down upon crossing the 76% bottom threshold, smoothly raising the app shelf with haptics. |
 | ↩️ **Native Cancel Fly-Back** | WMS Return Trajectory Restoration | Strictly returns `false` on non-target drops, seamlessly triggering Android's native WindowManager cancel fly-back animation to the original text/image position. |
 | 📐 **3D Spatial Tilt Transformation** | LSPosed `system_server` Hook | Directly hooks `com.android.server.wm.DragState`, manipulating the SurfaceFlinger layer via `SurfaceControl.Transaction.setMatrix` to create real-time 3D perspective tilt. |
+| ✂️ **Text Segmentation** | cppjieba + BigBang chips | Drop text onto the bottom shelf and open “Text Segmentation”: a local dictionary splits the text into selectable word chips with copy, web/dictionary search, system share and character-level re-segmentation. The captured text never leaves the device. |
 
 ---
 

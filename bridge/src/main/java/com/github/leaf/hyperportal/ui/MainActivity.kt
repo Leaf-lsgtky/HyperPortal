@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.github.leaf.hyperportal.bigbang.TextSegmenter
 import com.github.leaf.hyperportal.data.HyperPortalPreferences
 import com.github.leaf.hyperportal.util.miuixBlurEffect
 import com.github.leaf.hyperportal.util.rememberMiuixBlurBackdrop
@@ -65,14 +66,26 @@ private fun HyperPortalMainScreen() {
     var masterSwitch by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).masterSwitch)
     }
+    var landscapeTrigger by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).landscapeTrigger)
+    }
+    var edgeScrollMargin by remember {
+        mutableIntStateOf(HyperPortalPreferences.getConfig(context).edgeScrollMargin)
+    }
     var longPressDuration by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).longPressDuration)
     }
     var touchSlop by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).touchSlop)
     }
+    var triggerThreshold by remember {
+        mutableIntStateOf(HyperPortalPreferences.getConfig(context).triggerThreshold)
+    }
     var blacklist by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).blacklist)
+    }
+    var preloadTextSegmenter by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).preloadTextSegmenter)
     }
 
     // Refresh state when resuming from BlacklistActivity
@@ -82,9 +95,13 @@ private fun HyperPortalMainScreen() {
             if (event == Lifecycle.Event.ON_RESUME) {
                 val config = HyperPortalPreferences.getConfig(context)
                 masterSwitch = config.masterSwitch
+                landscapeTrigger = config.landscapeTrigger
+                edgeScrollMargin = config.edgeScrollMargin
                 longPressDuration = config.longPressDuration
                 touchSlop = config.touchSlop
+                triggerThreshold = config.triggerThreshold
                 blacklist = config.blacklist
+                preloadTextSegmenter = config.preloadTextSegmenter
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -138,6 +155,41 @@ private fun HyperPortalMainScreen() {
                             HyperPortalPreferences.setMasterSwitch(context, checked)
                         },
                     )
+                    ArrowPreference(
+                        title = "拖拽目标与置顶",
+                        summary = "管理分享入口、置顶功能、显示数量和排序",
+                        enabled = masterSwitch,
+                        onClick = {
+                            context.startActivity(Intent(context, TargetSettingsActivity::class.java))
+                        },
+                    )
+                    SwitchPreference(
+                        title = "允许横屏触发",
+                        summary = if (landscapeTrigger) "横屏模式下允许长按触发传送门" else "横屏模式下禁止长按触发（推荐）",
+                        checked = landscapeTrigger,
+                        enabled = masterSwitch,
+                        onCheckedChange = { checked ->
+                            landscapeTrigger = checked
+                            HyperPortalPreferences.setLandscapeTrigger(context, checked)
+                        },
+                    )
+                    SwitchPreference(
+                        title = "预加载分词库",
+                        summary = if (preloadTextSegmenter) {
+                            "启动时后台加载词典，缩短首次打开文本分词的等待"
+                        } else {
+                            "首次打开文本分词时再加载词典"
+                        },
+                        checked = preloadTextSegmenter,
+                        enabled = masterSwitch,
+                        onCheckedChange = { checked ->
+                            preloadTextSegmenter = checked
+                            HyperPortalPreferences.setPreloadTextSegmenter(context, checked)
+                            if (checked) {
+                                TextSegmenter.preload(context)
+                            }
+                        },
+                    )
                 }
             }
 
@@ -155,11 +207,11 @@ private fun HyperPortalMainScreen() {
                         title = "长按触发时间",
                         summary = "$longPressDuration 毫秒",
                         value = longPressDuration.toFloat(),
-                        valueRange = 200f..800f,
-                        steps = 11, // 200..800 step 50
+                        valueRange = 200f..1500f,
+                        steps = 25, // 200..1500 step 50
                         enabled = masterSwitch,
                         onValueChange = { raw ->
-                            val rounded = (Math.round(raw / 50f) * 50).coerceIn(200, 800)
+                            val rounded = (Math.round(raw / 50f) * 50).coerceIn(200, 1500)
                             longPressDuration = rounded
                             HyperPortalPreferences.setLongPressDuration(context, rounded)
                         },
@@ -175,6 +227,32 @@ private fun HyperPortalMainScreen() {
                             val rounded = (Math.round(raw / 2f) * 2).coerceIn(8, 48)
                             touchSlop = rounded
                             HyperPortalPreferences.setTouchSlop(context, rounded)
+                        },
+                    )
+                    SliderPreference(
+                        title = "边缘滚动触发区域",
+                        summary = "$edgeScrollMargin dp (手指拖至屏幕左右两侧此宽度内触发应用列表滚动)",
+                        value = edgeScrollMargin.toFloat(),
+                        valueRange = 40f..140f,
+                        steps = 19, // 40..140 step 5
+                        enabled = masterSwitch,
+                        onValueChange = { raw ->
+                            val rounded = (Math.round(raw / 5f) * 5).coerceIn(40, 140)
+                            edgeScrollMargin = rounded
+                            HyperPortalPreferences.setEdgeScrollMargin(context, rounded)
+                        },
+                    )
+                    SliderPreference(
+                        title = "倾斜与应用列表触发位置",
+                        summary = "$triggerThreshold% 屏幕高度 (手指拖至屏幕下方 $triggerThreshold% 时触发倾斜与应用列表)",
+                        value = triggerThreshold.toFloat(),
+                        valueRange = 50f..95f,
+                        steps = 44, // 50%..95% step 1%
+                        enabled = masterSwitch,
+                        onValueChange = { raw ->
+                            val rounded = Math.round(raw).coerceIn(50, 95)
+                            triggerThreshold = rounded
+                            HyperPortalPreferences.setTriggerThreshold(context, rounded)
                         },
                     )
                 }

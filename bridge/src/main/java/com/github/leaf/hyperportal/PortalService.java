@@ -1,6 +1,8 @@
 package com.github.leaf.hyperportal;
 
-import com.github.leaf.hyperportal.ui.MainActivity;
+import com.github.leaf.hyperportal.data.HyperPortalPreferences;
+import android.content.res.Configuration;
+import android.content.res.Resources;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -9,6 +11,7 @@ import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
@@ -38,14 +41,17 @@ import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.TextUtils;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -53,6 +59,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import com.github.leaf.hyperportal.view.ColorOSDockBar;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -97,8 +104,7 @@ public class PortalService extends Service {
     // Bottom container: holds GlowView and mAppRow
     private FrameLayout mBottomContainer;
     private GlowView mGlowView;
-    private HorizontalScrollView mAppRow;
-    private TextView mPromptText;
+    private ColorOSDockBar mDockBar;
     private WindowManager.LayoutParams mBottomParams;
 
 
@@ -122,6 +128,7 @@ public class PortalService extends Service {
     private boolean mDragPreviewRaised;
     private int mCurrentDragState = 0;
     private int mLastNotifiedShadowState = -1;
+    private float mStartDragY = -1f;
 
     private ParcelFileDescriptor mFilePfd;
     private String mFileName;
@@ -131,6 +138,7 @@ public class PortalService extends Service {
     private volatile String mImageUrl;
 
     private final List<AppTarget> mTargets = new ArrayList<>();
+    private float mTriggerThreshold = 0.76f;
 
     private final BroadcastReceiver mStateReceiver = new BroadcastReceiver() {
         @Override
@@ -159,6 +167,7 @@ public class PortalService extends Service {
         buildTargets();
 
         IntentFilter filter = new IntentFilter(ACTION_DRAG_STATE);
+        filter.addAction("com.github.leaf.hyperportal.ACTION_DRAG_STATE");
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(mStateReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
@@ -188,6 +197,10 @@ public class PortalService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
+            return START_NOT_STICKY;
+        }
+        if (PortalShareContract.ACTION_DISPATCH_IMAGE_SHARE.equals(intent.getAction())) {
+            dispatchImageShare(intent);
             return START_NOT_STICKY;
         }
         if (intent.hasExtra("state")) {
@@ -237,6 +250,21 @@ public class PortalService extends Service {
                 if (cached.isFile() && cached.length() > 0) {
                     mLocalFile = cached;
                     mFileSize = cached.length();
+                    try {
+                        Uri incomingUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(imageCacheName));
+                        String[] targets = new String[]{
+                                "com.miui.notes", "com.tencent.mm", "com.tencent.mobileqq",
+                                "com.sina.weibo", "org.telegram.messenger", "com.coolapk.market",
+                                "com.android.fileexplorer", "com.zhihu.android", "com.xingin.xhs"
+                        };
+                        for (String t : targets) {
+                            try {
+                                grantUriPermission(t, incomingUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
             } catch (Throwable throwable) {
                 Log.w(TAG, "read imageCacheName failed", throwable);
@@ -293,6 +321,12 @@ public class PortalService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (PortalFileProvider.isSystemUiActive()) {
+            // SystemUI module is handling the portal overlay directly.
+            // PortalService is only keeping state/staged files, do not show duplicate overlay.
+            return START_NOT_STICKY;
+        }
+
         if (Settings.canDrawOverlays(this)) {
             if (mDragActive) {
                 // Direct drag: show the bottom glow & app row. The old
@@ -300,7 +334,7 @@ public class PortalService extends Service {
                 showBottomPortal();
             }
         } else {
-            launchMain(intent);
+            Log.w(TAG, "overlay permission not granted and SystemUI inactive; skip showing local overlay");
         }
         return START_NOT_STICKY;
     }
@@ -388,14 +422,65 @@ public class PortalService extends Service {
         }
     }
 
+    private boolean isLandscape() {
+        try {
+            return getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    public static int getPhysicalScreenHeight(Context context) {
+        if (context != null) {
+            try {
+                WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowMetrics metrics = wm.getMaximumWindowMetrics();
+                        int h = metrics.getBounds().height();
+                        if (h > 0) return h;
+                    }
+                    Display display = wm.getDefaultDisplay();
+                    if (display != null) {
+                        DisplayMetrics dm = new DisplayMetrics();
+                        display.getRealMetrics(dm);
+                        if (dm.heightPixels > 0) return dm.heightPixels;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            return Resources.getSystem().getDisplayMetrics().heightPixels;
+        } catch (Throwable ignored) {
+            return 2656;
+        }
+    }
+
     private void handleDragStateChanged(int state, float y) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mMainHandler.post(() -> handleDragStateChanged(state, y));
             return;
         }
+        if (PortalFileProvider.isSystemUiActive()) {
+            // SystemUI module is handling the portal overlay directly at 120Hz VSYNC.
+            // Avoid duplicate overlays and duplicate haptics.
+            return;
+        }
         if (state == 1 && mCurrentDragState == 2 && y <= 0f) {
             // Ignore late/synthetic y=0 state=1 broadcasts while already in hot zone
             return;
+        }
+        HyperPortalPreferences.Config cfg = HyperPortalPreferences.INSTANCE.getConfig(this);
+        mTriggerThreshold = cfg.getTriggerThreshold() / 100.0f;
+        if (!cfg.getMasterSwitch() || (!cfg.getLandscapeTrigger() && isLandscape())) {
+            removeBottomPortal();
+            notifyBridgeShadowState(0, 0f);
+            mCurrentDragState = 0;
+            return;
+        }
+        if (mDockBar != null) {
+            mDockBar.setEdgeScrollMarginDp(cfg.getEdgeScrollMargin());
         }
         Log.i(TAG, "handleDragStateChanged state=" + state + " y=" + y);
         mCurrentDragState = state;
@@ -411,25 +496,24 @@ public class PortalService extends Service {
             showBottomPortal();
             setBottomPortalTouchable(false);
             notifyBridgeShadowState(1, y);
-            int screenHeight = getResources().getDisplayMetrics().heightPixels;
-            // Phase 1 progress (0.0 to 1.0 as finger moves from 15% to 80% screen height)
-            float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * 0.67f)));
+            int screenHeight = getPhysicalScreenHeight(this);
+            // Phase 1 progress (0.0 to 1.0 as finger moves from 15% to trigger threshold)
+            float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
+            float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
+            float progress = Math.max(0f, Math.min(1.0f, (y - screenHeight * 0.15f) / (screenHeight * glowSpan)));
             if (mGlowView != null) {
                 mGlowView.setPhase1Progress(progress);
                 mGlowView.setVisibility(View.VISIBLE);
             }
-            if (mPromptText != null) {
-                mPromptText.setVisibility(View.VISIBLE);
-                mPromptText.animate().alpha(1.0f).setDuration(120).start();
-            }
-            if (mAppRow != null && mAppRow.getVisibility() == View.VISIBLE) {
-                mAppRow.animate()
+            if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
+                mDockBar.stopAutoScroll();
+                mDockBar.animate()
                         .translationY(dp(60))
                         .alpha(0f)
                         .setDuration(160)
                         .withEndAction(() -> {
-                            if (mAppRow != null) {
-                                mAppRow.setVisibility(View.GONE);
+                            if (mDockBar != null) {
+                                mDockBar.setVisibility(View.GONE);
                             }
                         })
                         .start();
@@ -443,28 +527,14 @@ public class PortalService extends Service {
                 mGlowView.setPhase2();
                 mGlowView.setVisibility(View.VISIBLE);
             }
-            if (mPromptText != null && mPromptText.getVisibility() == View.VISIBLE) {
-                mPromptText.animate()
-                        .alpha(0f)
-                        .setDuration(150)
-                        .withEndAction(() -> {
-                            if (mPromptText != null) {
-                                mPromptText.setVisibility(View.GONE);
-                            }
-                        })
-                        .start();
-            }
-            if (mAppRow != null) {
-                if (mAppRow.getVisibility() != View.VISIBLE) {
-                    mAppRow.setVisibility(View.VISIBLE);
-                    mAppRow.setTranslationY(dp(60));
-                    mAppRow.setAlpha(0f);
-                    try {
-                        mAppRow.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK);
-                    } catch (Throwable ignored) {
-                    }
+            if (mDockBar != null) {
+                if (mDockBar.getVisibility() != View.VISIBLE) {
+                    mDockBar.setVisibility(View.VISIBLE);
+                    mDockBar.setTranslationY(dp(60));
+                    mDockBar.setAlpha(0f);
+                    mDockBar.startEnterAnimation();
                 }
-                mAppRow.animate()
+                mDockBar.animate()
                         .translationY(0f)
                         .alpha(1.0f)
                         .setDuration(220)
@@ -672,62 +742,61 @@ public class PortalService extends Service {
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.BOTTOM);
             container.addView(mGlowView, glowParams);
 
-            // 2. Prompt Text ("拖拽至此处触发内容传送门")
-            TextView prompt = new TextView(this);
-            prompt.setText("拖拽至此处触发内容传送门");
-            prompt.setTextColor(Color.parseColor("#CCFFFFFF"));
-            prompt.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
-            prompt.setGravity(Gravity.CENTER);
-            prompt.setShadowLayer(dp(4), 0, dp(1), Color.parseColor("#80000000"));
-            GradientDrawable pillBg = new GradientDrawable();
-            pillBg.setColor(Color.parseColor("#26000000"));
-            pillBg.setCornerRadius(dp(16));
-            prompt.setBackground(pillBg);
-            prompt.setPadding(dp(16), dp(8), dp(16), dp(8));
-            FrameLayout.LayoutParams promptParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            promptParams.bottomMargin = navBarHeight + dp(24);
-            container.addView(prompt, promptParams);
-            mPromptText = prompt;
-
-            // 3. Application Bar (initially hidden in Phase 1)
-            HorizontalScrollView scroll = buildAppRow();
-            scroll.setVisibility(View.GONE);
-            scroll.setTranslationY(dp(60));
-            scroll.setAlpha(0f);
-            FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-            scrollParams.bottomMargin = navBarHeight + dp(20);
-            scrollParams.leftMargin = dp(16);
-            scrollParams.rightMargin = dp(16);
-            container.addView(scroll, scrollParams);
-            mAppRow = scroll;
+            // 2. ColorOS Dock Bar (initially hidden in Phase 1)
+            mDockBar = new ColorOSDockBar(this);
+            mDockBar.setVisibility(View.GONE);
+            mDockBar.setTranslationY(dp(60));
+            mDockBar.setAlpha(0f);
+            List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+            for (AppTarget target : mTargets) {
+                dockItems.add(new ColorOSDockBar.DockItem(target.packageName, target.label, target.icon, target));
+            }
+            mDockBar.setItems(dockItems);
+            FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, dp(153), Gravity.BOTTOM);
+            dockParams.bottomMargin = Math.max(0, navBarHeight + dp(20) - 50);
+            container.addView(mDockBar, dockParams);
 
             container.setOnDragListener((v, event) -> {
                 int[] location = new int[2];
                 container.getLocationOnScreen(location);
                 float rawX = location[0] + event.getX();
                 float rawY = location[1] + event.getY();
-                int screenH = getResources().getDisplayMetrics().heightPixels;
+                int screenH = getPhysicalScreenHeight(this);
                 switch (event.getAction()) {
                     case DragEvent.ACTION_DRAG_STARTED:
+                        mStartDragY = -1f;
+                        return true;
                     case DragEvent.ACTION_DRAG_ENTERED:
-                        // IMPORTANT: event.getX()/getY() are ALWAYS 0.0f on ACTION_DRAG_ENTERED!
-                        // Never use rawY on ACTION_DRAG_ENTERED, otherwise rawY == location[1] (1421.0)
-                        // which is < 0.77 * screenH and immediately collapses the app bar after 40ms!
                         return true;
                     case DragEvent.ACTION_DRAG_LOCATION:
                         if (event.getX() == 0f && event.getY() == 0f) {
                             return true;
                         }
-                        float enterThreshold = screenH * 0.76f;
-                        float exitThreshold = screenH * 0.70f;
-                        boolean inHotZone = (mCurrentDragState == 2)
-                                ? (rawY >= exitThreshold)
-                                : (rawY >= enterThreshold);
+                        if (mStartDragY < 0f) {
+                            mStartDragY = rawY;
+                        }
+                        float enterFactor = mTriggerThreshold > 0f ? mTriggerThreshold : 0.76f;
+                        float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
+                        float enterThreshold = screenH * enterFactor;
+                        float exitThreshold = screenH * exitFactor;
+                        boolean inHotZone;
+                        if (mStartDragY >= enterThreshold) {
+                            float downwardRequired = dp(35);
+                            if (mCurrentDragState == 2) {
+                                inHotZone = (rawY >= mStartDragY + dp(10)) && (rawY >= exitThreshold);
+                            } else {
+                                inHotZone = (rawY >= mStartDragY + downwardRequired) && (rawY >= enterThreshold);
+                            }
+                        } else {
+                            inHotZone = (mCurrentDragState == 2)
+                                    ? (rawY >= exitThreshold)
+                                    : (rawY >= enterThreshold);
+                        }
                         if (inHotZone) {
-                            updateTargetHighlight(rawX, rawY);
+                            if (mDockBar != null) {
+                                mDockBar.onDragLocation(rawX, rawY);
+                            }
                             notifyBridgeShadowState(2, rawY);
                             mCurrentDragState = 2;
                         } else {
@@ -735,9 +804,12 @@ public class PortalService extends Service {
                         }
                         return true;
                     case DragEvent.ACTION_DRAG_EXITED:
-                        updateTargetHighlight(-1f, -1f);
+                        if (mDockBar != null) {
+                            mDockBar.onDragExited();
+                        }
                         return true;
                     case DragEvent.ACTION_DROP:
+                        mStartDragY = -1f;
                         String dropped = null;
                         ClipData clip = event.getClipData();
                         if (clip != null && clip.getItemCount() > 0) {
@@ -746,7 +818,8 @@ public class PortalService extends Service {
                         if (!TextUtils.isEmpty(dropped)) {
                             mText = dropped;
                         }
-                        AppTarget target = findTargetAt(rawX, rawY);
+                        ColorOSDockBar.DockItem hit = mDockBar != null ? mDockBar.findHitTarget(rawX, rawY) : null;
+                        AppTarget target = (hit != null && hit.tag instanceof AppTarget) ? (AppTarget) hit.tag : null;
                         notifyBridgeShadowState(0, 0f);
                         mCurrentDragState = 0;
                         mLastNotifiedShadowState = -1;
@@ -757,6 +830,10 @@ public class PortalService extends Service {
                         }
                         return false;
                     case DragEvent.ACTION_DRAG_ENDED:
+                        mStartDragY = -1f;
+                        if (mDockBar != null) {
+                            mDockBar.resetMagnification(false);
+                        }
                         notifyBridgeShadowState(0, 0f);
                         mCurrentDragState = 0;
                         mLastNotifiedShadowState = -1;
@@ -802,99 +879,15 @@ public class PortalService extends Service {
                 mWindowManager.removeView(mBottomContainer);
             } catch (Throwable ignored) {
             }
+            if (mDockBar != null) {
+                mDockBar.stopAutoScroll();
+                mDockBar.resetMagnification(false);
+            }
             mBottomContainer = null;
             mBottomParams = null;
             mGlowView = null;
-            mAppRow = null;
-            mPromptText = null;
+            mDockBar = null;
         }
-    }
-
-    private HorizontalScrollView buildAppRow() {
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setBackground(rounded(Color.argb(220, 28, 29, 32), 22));
-        scroll.setPadding(dp(10), dp(8), dp(10), dp(8));
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        for (AppTarget target : mTargets) {
-            row.addView(buildAppItem(target), new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        }
-        scroll.addView(row, new HorizontalScrollView.LayoutParams(
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT));
-        return scroll;
-    }
-
-    private View buildAppItem(AppTarget target) {
-        LinearLayout item = new LinearLayout(this);
-        item.setOrientation(LinearLayout.VERTICAL);
-        item.setGravity(Gravity.CENTER);
-        item.setPadding(dp(8), dp(4), dp(8), dp(4));
-        item.setTag(target);
-
-        FrameLayout iconBox = new FrameLayout(this);
-        iconBox.setBackground(rounded(Color.rgb(245, 246, 248), 22));
-        ImageView icon = new ImageView(this);
-        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        icon.setImageDrawable(target.icon);
-        iconBox.addView(icon, new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER));
-        item.addView(iconBox, new LinearLayout.LayoutParams(dp(44), dp(44)));
-
-        TextView label = new TextView(this);
-        label.setText(target.label);
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-        label.setGravity(Gravity.CENTER);
-        label.setMaxLines(1);
-        label.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(dp(56), LinearLayout.LayoutParams.WRAP_CONTENT);
-        labelParams.topMargin = dp(3);
-        item.addView(label, labelParams);
-        return item;
-    }
-
-    private void updateTargetHighlight(float rawX, float rawY) {
-        if (mAppRow == null) {
-            return;
-        }
-        try {
-            ViewGroup row = (ViewGroup) mAppRow.getChildAt(0);
-            for (int i = 0; i < row.getChildCount(); i++) {
-                View child = row.getChildAt(i);
-                int[] location = new int[2];
-                child.getLocationOnScreen(location);
-                boolean hit = rawX >= location[0] && rawX <= location[0] + child.getWidth()
-                        && rawY >= location[1] && rawY <= location[1] + child.getHeight();
-                child.setAlpha(hit ? 1f : 0.75f);
-                child.setScaleX(hit ? 1.15f : 1f);
-                child.setScaleY(hit ? 1.15f : 1f);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private AppTarget findTargetAt(float rawX, float rawY) {
-        if (mAppRow == null) {
-            return null;
-        }
-        try {
-            ViewGroup row = (ViewGroup) mAppRow.getChildAt(0);
-            for (int i = 0; i < row.getChildCount(); i++) {
-                View child = row.getChildAt(i);
-                int[] location = new int[2];
-                child.getLocationOnScreen(location);
-                if (rawX >= location[0] && rawX <= location[0] + child.getWidth()
-                        && rawY >= location[1] && rawY <= location[1] + child.getHeight()) {
-                    return (AppTarget) child.getTag();
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return null;
     }
 
     private void performTarget(AppTarget target) {
@@ -907,11 +900,28 @@ public class PortalService extends Service {
             saveToPortal();
             return;
         }
+        if (target.kind == AppTarget.KIND_COPY) {
+            if (mLocalFile != null || mBitmap != null) {
+                Uri uri = ensureImageUri();
+                if (uri == null) uri = ensureFileUri();
+                if (uri != null) {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
+                    toast("图片已复制到剪贴板");
+                }
+            } else if (!TextUtils.isEmpty(mText)) {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("HyperPortal", mText));
+                toast("文本已复制到剪贴板");
+            }
+            removeBottomPortal();
+            return;
+        }
         if (target.kind == AppTarget.KIND_SEARCH) {
             searchText();
             return;
         }
-        Intent intent = buildShareIntent(target.packageName);
+        Intent intent = buildShareIntent(target.packageName, target.activityName);
         if (intent == null) {
             // A blank image drag used to leave the bottom portal and the
             // system task-zoom state alive forever. Always tear both down.
@@ -929,6 +939,10 @@ public class PortalService extends Service {
     }
 
     private Intent buildShareIntent(String packageName) {
+        return buildShareIntent(packageName, "");
+    }
+
+    private Intent buildShareIntent(String packageName, String activityName) {
         Intent intent;
         if (mLocalFile != null) {
             Uri uri = ensureFileUri();
@@ -936,7 +950,7 @@ public class PortalService extends Service {
                 return null;
             }
             intent = new Intent(Intent.ACTION_SEND);
-            intent.setType(TextUtils.isEmpty(mMimeType) ? "*/*" : mMimeType);
+            intent.setType(resolveMimeType(uri, mMimeType));
             intent.putExtra(Intent.EXTRA_STREAM, uri);
             intent.setClipData(ClipData.newUri(getContentResolver(), "file", uri));
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -959,48 +973,147 @@ public class PortalService extends Service {
         }
         if (!TextUtils.isEmpty(packageName)) {
             intent.setPackage(packageName);
+            if (!TextUtils.isEmpty(activityName)) {
+                intent.setComponent(new ComponentName(packageName, activityName));
+            }
+            Uri stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (stream != null) {
+                try {
+                    grantUriPermission(packageName, stream, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Throwable throwable) {
+                    Log.w(TAG, "grant share uri failed target=" + packageName
+                            + " uri=" + stream, throwable);
+                }
+            }
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         return intent;
     }
 
+    /**
+     * Dispatches an image share from the HyperPortal UID. The SystemUI module cannot
+     * reliably grant a PortalFileProvider URI to a third-party app, so it asks this
+     * service to perform the ACTION_SEND instead.
+     */
+    private void dispatchImageShare(Intent intent) {
+        String target = intent.getStringExtra(PortalShareContract.EXTRA_TARGET_PACKAGE);
+        String targetActivity = intent.getStringExtra(PortalShareContract.EXTRA_TARGET_ACTIVITY);
+        String uriString = intent.getStringExtra(PortalShareContract.EXTRA_IMAGE_URI);
+        String mime = intent.getStringExtra(PortalShareContract.EXTRA_IMAGE_MIME);
+        String text = intent.getStringExtra(PortalShareContract.EXTRA_SHARE_TEXT);
+        if (TextUtils.isEmpty(target)) {
+            Log.w(TAG, "dispatchImageShare missing target");
+            return;
+        }
+        try {
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setPackage(target);
+            if (!TextUtils.isEmpty(targetActivity)) {
+                share.setComponent(new ComponentName(target, targetActivity));
+            }
+            share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (!TextUtils.isEmpty(uriString)) {
+                Uri uri = Uri.parse(uriString);
+                String resolved = resolveMimeType(uri, mime);
+                share.setType(resolved);
+                share.putExtra(Intent.EXTRA_STREAM, uri);
+                share.setClipData(ClipData.newUri(getContentResolver(), "image", uri));
+                share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                try {
+                    grantUriPermission(target, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Throwable throwable) {
+                    Log.w(TAG, "dispatchImageShare grant failed target=" + target
+                            + " uri=" + uri, throwable);
+                }
+                Log.i(TAG, "dispatchImageShare target=" + target
+                        + " uri=" + uri + " mime=" + resolved);
+            } else if (!TextUtils.isEmpty(text)) {
+                share.setType("text/plain");
+                share.putExtra(Intent.EXTRA_TEXT, text);
+                Log.i(TAG, "dispatchTextShare target=" + target
+                        + " chars=" + text.length());
+            } else {
+                Log.w(TAG, "dispatchImageShare empty payload target=" + target);
+                return;
+            }
+            startActivity(share);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "dispatchImageShare failed target=" + target
+                    + " uri=" + uriString, throwable);
+            toast("无法分享图片");
+        }
+    }
+
+    private String resolveMimeType(Uri uri, String fallback) {
+        try {
+            String type = getContentResolver().getType(uri);
+            if (!TextUtils.isEmpty(type)) {
+                return type;
+            }
+        } catch (Throwable ignored) {
+        }
+        return TextUtils.isEmpty(fallback) ? "image/png" : fallback;
+    }
+
+    private void refreshTargets() {
+        buildTargets();
+        if (mDockBar != null) {
+            List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+            for (AppTarget target : mTargets) {
+                dockItems.add(new ColorOSDockBar.DockItem(target.packageName, target.label, target.icon, target));
+            }
+            mDockBar.setItems(dockItems);
+        }
+    }
+
     private void buildTargets() {
         mTargets.clear();
+        boolean isImage = (mBitmap != null || mLocalFile != null || mFilePfd != null);
         try {
-            mTargets.add(new AppTarget("中转站", getPackageManager().getApplicationIcon(getPackageName()),
+            mTargets.add(new AppTarget(isImage ? "存入中转站" : "中转站",
+                    getPackageManager().getApplicationIcon(getPackageName()),
                     getPackageName(), AppTarget.KIND_SAVE));
         } catch (Throwable ignored) {
         }
 
+        mTargets.add(new AppTarget(isImage ? "复制图片" : "复制文本", null, "copy", AppTarget.KIND_COPY));
+
         PackageManager pm = getPackageManager();
         Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("text/plain");
+        send.setType(isImage ? "image/*" : "text/plain");
         List<ResolveInfo> resolved = pm.queryIntentActivities(send, 0);
         Set<String> seen = new HashSet<>();
         seen.add(getPackageName());
+        int maxTargets = HyperPortalPreferences.INSTANCE.getConfig(this).getTargetLimit();
         int added = 0;
         for (ResolveInfo info : resolved) {
             if (info.activityInfo == null) {
                 continue;
             }
             String pkg = info.activityInfo.packageName;
-            if (TextUtils.isEmpty(pkg) || !seen.add(pkg)) {
+            String activity = info.activityInfo.name;
+            String key = pkg + "/" + activity;
+            if (TextUtils.isEmpty(pkg) || TextUtils.isEmpty(activity)
+                    || pkg.equals(getPackageName()) || !seen.add(key)) {
                 continue;
             }
             try {
                 Drawable icon = info.loadIcon(pm);
                 CharSequence label = info.loadLabel(pm);
-                mTargets.add(new AppTarget(label == null ? pkg : label.toString(), icon, pkg, AppTarget.KIND_SHARE));
+                mTargets.add(new AppTarget(label == null ? pkg : label.toString(),
+                        icon, pkg, activity, AppTarget.KIND_SHARE));
                 added++;
             } catch (Throwable ignored) {
             }
-            if (added >= 6) {
+            if (added >= maxTargets) {
                 break;
             }
         }
 
-        mTargets.add(new AppTarget("搜索", getDrawable(android.R.drawable.ic_menu_search),
-                "", AppTarget.KIND_SEARCH));
+        if (!isImage) {
+            mTargets.add(new AppTarget("搜索", getDrawable(android.R.drawable.ic_menu_search),
+                    "", AppTarget.KIND_SEARCH));
+        }
     }
 
     private void saveToPortal() {
@@ -1068,13 +1181,6 @@ public class PortalService extends Service {
         }
     }
 
-    private void launchMain(Intent source) {
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        intent.putExtras(source);
-        startActivity(intent);
-        stopSelf();
-    }
 
     private void downloadImageAsync(String url) {
         if (TextUtils.isEmpty(url)) {
@@ -1426,16 +1532,24 @@ public class PortalService extends Service {
         static final int KIND_SHARE = 0;
         static final int KIND_SAVE = 1;
         static final int KIND_SEARCH = 2;
+        static final int KIND_COPY = 3;
 
         final String label;
         final Drawable icon;
         final String packageName;
+        final String activityName;
         final int kind;
 
         AppTarget(String label, Drawable icon, String packageName, int kind) {
+            this(label, icon, packageName, "", kind);
+        }
+
+        AppTarget(String label, Drawable icon, String packageName,
+                  String activityName, int kind) {
             this.label = label;
             this.icon = icon;
             this.packageName = packageName;
+            this.activityName = activityName;
             this.kind = kind;
         }
     }

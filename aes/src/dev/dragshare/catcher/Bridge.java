@@ -1,10 +1,16 @@
 package dev.dragshare.catcher;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.graphics.PixelFormat;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -23,19 +29,29 @@ import android.graphics.RectF;
 import android.graphics.Path;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.content.res.Resources;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.provider.MediaStore;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.DragEvent;
 import android.view.Gravity;
+import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.view.HapticFeedbackConstants;
 import java.util.concurrent.atomic.AtomicInteger;
 import android.view.MotionEvent;
@@ -46,6 +62,7 @@ import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.animation.DecelerateInterpolator;
 import android.webkit.ValueCallback;
 import android.webkit.WebView;
 import android.widget.EditText;
@@ -69,9 +86,11 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.URLConnection;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
@@ -84,6 +103,101 @@ public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
     private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
+    private static volatile boolean sMasterSwitch = true;
+    private static volatile boolean sLandscapeTrigger = false;
+    private static volatile float sDragStartY = -1f;
+    private static volatile int sLongPressDurationMs = 800;
+    private static volatile int sTouchSlopDp = 24;
+    private static volatile float sTriggerThreshold = 0.76f;
+    private static volatile java.util.Set<String> sBlacklist = new java.util.HashSet<>();
+    private static volatile long sLastConfigCheckTime = 0;
+    private static volatile long sLastConfigFailTime = 0;
+    private static volatile boolean sConfigReceiverRegistered = false;
+
+    private static final BroadcastReceiver sConfigReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            sLastConfigCheckTime = 0;
+            sLastConfigFailTime = 0;
+            if (intent != null && intent.hasExtra("trigger_threshold")) {
+                int pct = intent.getIntExtra("trigger_threshold", 76);
+                if (pct >= 50 && pct <= 95) {
+                    sTriggerThreshold = pct / 100.0f;
+                }
+            }
+            refreshConfig(context);
+        }
+    };
+
+    private static void ensureConfig(Context context) {
+        if (context == null) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - sLastConfigFailTime < 30000) {
+            return;
+        }
+        if (now - sLastConfigCheckTime > 5000 || sLastConfigCheckTime == 0) {
+            sLastConfigCheckTime = now;
+            refreshConfig(context);
+        }
+        if (!sConfigReceiverRegistered) {
+            try {
+                IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    context.registerReceiver(sConfigReceiver, filter, Context.RECEIVER_EXPORTED);
+                } else {
+                    context.registerReceiver(sConfigReceiver, filter);
+                }
+                sConfigReceiverRegistered = true;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void refreshConfig(Context context) {
+        try {
+            Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+            Bundle res = context.getContentResolver().call(uri, "getConfig", null, null);
+            if (res != null) {
+                sMasterSwitch = res.getBoolean("master_switch", true);
+                sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
+                sLongPressDurationMs = res.getInt("long_press_duration", 800);
+                sTouchSlopDp = res.getInt("touch_slop", 24);
+                int thresholdPct = res.getInt("trigger_threshold", 76);
+                if (thresholdPct >= 50 && thresholdPct <= 95) {
+                    sTriggerThreshold = thresholdPct / 100.0f;
+                }
+                java.util.ArrayList<String> list = res.getStringArrayList("gesture_blacklist");
+                if (list != null) {
+                    sBlacklist = new java.util.HashSet<>(list);
+                }
+                Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " landscape=" + sLandscapeTrigger
+                        + " duration=" + sLongPressDurationMs + " slop=" + sTouchSlopDp
+                        + " threshold=" + sTriggerThreshold
+                        + " blacklist=" + sBlacklist.size());
+            }
+        } catch (Throwable t) {
+            sLastConfigFailTime = SystemClock.uptimeMillis();
+        }
+    }
+
+    public static int getLongPressDuration() {
+        return sLongPressDurationMs > 0 ? sLongPressDurationMs : 800;
+    }
+
+    private static boolean isLandscape(Context context) {
+        if (context == null) return false;
+        try {
+            return context.getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static boolean isBlacklisted(Context context) {
+        if (context == null || sBlacklist.isEmpty()) return false;
+        String pkg = context.getPackageName();
+        return pkg != null && sBlacklist.contains(pkg);
+    }
     private static final String PORTAL_SERVICE = PORTAL_PACKAGE + ".PortalService";
     private static volatile WeakReference<Context> sContextRef;
     private static volatile PointF sLastTouchPoint;
@@ -91,7 +205,7 @@ public final class Bridge {
     private static volatile Activity sLastActivity;
     private static volatile long sLastTouchAt;
 
-    private static final int CUSTOM_LONG_PRESS_TIMEOUT_MS = 400; // Oppo ColorOS standard
+    private static final int CUSTOM_LONG_PRESS_TIMEOUT_MS = 500; // Fallback after AES u/a (450ms)
     private static final int STATE_IDLE = 0;
     private static final int STATE_TRIGGERED = 1;
     private static final int STATE_DRAGGING = 2;
@@ -124,7 +238,11 @@ public final class Bridge {
     private static volatile Bitmap sActiveDragBitmap;
     private static volatile float sActiveDragDensity;
     private static volatile int sActiveDragSourceWidth;
+    private static volatile int sActiveDragScreenWidth;
+    private static volatile int sActiveDragScreenHeight;
     private static volatile boolean sActiveShadowSquare;
+    private static volatile float sShadowMorphProgress;
+    private static volatile ValueAnimator sShadowMorphAnimator;
     private static volatile boolean sShadowReceiverRegistered;
     private static final BroadcastReceiver sShadowReceiver = new BroadcastReceiver() {
         @Override
@@ -132,72 +250,15 @@ public final class Bridge {
             if (intent == null || !"com.dragshare.bridge.SHADOW_STATE".equals(intent.getAction())) {
                 return;
             }
-            int state = intent.getIntExtra("state", 0);
-            updateSystemShadow(state >= 2);
-        }
-    };
-    private static volatile boolean sMasterSwitch = true;
-    private static volatile int sLongPressDurationMs = 400;
-    private static volatile int sTouchSlopDp = 24;
-    private static volatile java.util.Set<String> sBlacklist = new java.util.HashSet<>();
-    private static volatile long sLastConfigCheckTime = 0;
-    private static volatile boolean sConfigReceiverRegistered = false;
-
-    private static final BroadcastReceiver sConfigReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            sLastConfigCheckTime = 0;
-            refreshConfig(context);
-        }
-    };
-
-    private static void ensureConfig(Context context) {
-        if (context == null) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - sLastConfigCheckTime > 3000 || sLastConfigCheckTime == 0) {
-            sLastConfigCheckTime = now;
-            refreshConfig(context);
-        }
-        if (!sConfigReceiverRegistered) {
-            try {
-                IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
-                if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    context.registerReceiver(sConfigReceiver, filter, Context.RECEIVER_EXPORTED);
-                } else {
-                    context.registerReceiver(sConfigReceiver, filter);
-                }
-                sConfigReceiverRegistered = true;
-            } catch (Throwable ignored) {
+            final int state = intent.getIntExtra("state", 0);
+            Log.i(TAG, "shadow receiver state=" + state);
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                updateSystemShadow(state >= 2);
+            } else {
+                sMainHandler.post(() -> updateSystemShadow(state >= 2));
             }
         }
-    }
-
-    private static void refreshConfig(Context context) {
-        try {
-            Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-            Bundle res = context.getContentResolver().call(uri, "getConfig", null, null);
-            if (res != null) {
-                sMasterSwitch = res.getBoolean("master_switch", true);
-                sLongPressDurationMs = res.getInt("long_press_duration", 400);
-                sTouchSlopDp = res.getInt("touch_slop", 24);
-                java.util.ArrayList<String> list = res.getStringArrayList("gesture_blacklist");
-                if (list != null) {
-                    sBlacklist = new java.util.HashSet<>(list);
-                }
-                Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " duration=" + sLongPressDurationMs
-                        + " slop=" + sTouchSlopDp + " blacklist=" + sBlacklist.size());
-            }
-        } catch (Throwable t) {
-            // Keep defaults if unreachable
-        }
-    }
-
-    private static boolean isBlacklisted(Context context) {
-        if (context == null || sBlacklist.isEmpty()) return false;
-        String pkg = context.getPackageName();
-        return pkg != null && sBlacklist.contains(pkg);
-    }
-
+    };
     private static volatile long sDownAt;
     private static volatile int sGestureGeneration;
     private static volatile int sPendingGeneration;
@@ -221,7 +282,7 @@ public final class Bridge {
 
     static {
         try {
-            Log.i(TAG, "Bridge loaded v36 pid=" + android.os.Process.myPid()
+            Log.i(TAG, "Bridge loaded v43 pid=" + android.os.Process.myPid()
                     + " uid=" + android.os.Process.myUid()
                     + " (classes2.dex)");
         } catch (Throwable ignored) {
@@ -256,7 +317,7 @@ public final class Bridge {
             Context appContext = activity != null ? activity.getApplicationContext() : currentContext();
             ensureShadowReceiver(appContext);
             ensureConfig(appContext);
-            if (!sMasterSwitch || isBlacklisted(appContext)) {
+            if (!sMasterSwitch || isBlacklisted(appContext) || (!sLandscapeTrigger && isLandscape(appContext))) {
                 return;
             }
             if (activity != null) {
@@ -286,14 +347,16 @@ public final class Bridge {
                     sCancelSent = false;
                     sActiveDragView = null;
                     sActiveShadowSquare = false;
+                    sShadowMorphProgress = 0f;
+                    cancelShadowMorphAnimator();
                     int generation = sGestureGeneration + 1;
                     sGestureGeneration = generation;
                     sPendingGeneration = generation;
-                    // AES' own u/a touch listener owns the long-press timer and
-                    // runs the extraction on its established pipeline. Do not
-                    // start a second 400ms engine here: that duplicate pass was
-                    // the main source of jank on simple pages.
-                    sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+                    // Schedule fallback at 500ms (after AES u/a's 450ms timer).
+                    // If u/a fires at 450ms, recordTouch() cancels this runnable so
+                    // it never duplicates work; if u/a was cancelled by 25-99px micro-tremor
+                    // or a non-DecorView window, this fallback catches it cleanly.
+                    sMainHandler.postDelayed(sCustomLongPressRunnable, sLongPressDurationMs > 0 ? sLongPressDurationMs : 800);
                 } else if (action == MotionEvent.ACTION_MOVE) {
                     sLastMoveRawX = rawX;
                     sLastMoveRawY = rawY;
@@ -301,9 +364,13 @@ public final class Bridge {
                     float dy = rawY - sDownRawY;
                     float dist = (float) Math.hypot(dx, dy);
 
-                    // Configurable touch slop: allow natural finger micro-tremors.
+                    // Allow small movement (> 24px) to trigger pending drag once long-press extracted content,
+                    // while only cancelling pre-long-press timer if user scrolled beyond touch slop threshold.
+                    if (dist > 24f && sPendingPayload != null) {
+                        sMovedSinceDown = true;
+                    }
                     float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
-                    float slopPx = sTouchSlopDp * density;
+                    float slopPx = Math.max(80f, sTouchSlopDp * density);
                     if (dist > slopPx) {
                         sMovedSinceDown = true;
                         if (sGestureState.get() == STATE_IDLE) {
@@ -311,14 +378,10 @@ public final class Bridge {
                         }
                     }
 
-                    if (sActiveDragView != null) {
-                        int height = sActiveDragView.getResources()
-                                .getDisplayMetrics().heightPixels;
-                        updateSystemShadow(rawY >= height * 0.82f);
-                    }
+
 
                     if (sGestureState.get() == STATE_DRAGGING) {
-                        // Custom long-press has already triggered and forwarded content
+                        // System drag is already active
                     } else if (sMovedSinceDown && sPendingPayload != null) {
                         Bundle pending = sPendingPayload;
                         Object pendingContent = sPendingContent;
@@ -330,16 +393,18 @@ public final class Bridge {
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     sMainHandler.removeCallbacks(sCustomLongPressRunnable);
                     sGestureActive = false;
+                    if ((action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_UP)
+                            && (sGestureState.get() == STATE_DRAGGING || sActiveDragView != null)) {
+                        // During active system drag, touch UP/CANCEL must NOT destroy drag context!
+                        // System DragEvent.ACTION_DRAG_ENDED handles lifecycle cleanup.
+                        Log.d(TAG, "ignore touch up/cancel while dragging");
+                        return;
+                    }
+                    cancelShadowMorphAnimator();
+                    sShadowMorphProgress = 0f;
                     sActiveDragView = null;
                     sActiveDragText = null;
                     sActiveDragBitmap = null;
-                    if (action == MotionEvent.ACTION_CANCEL && sGestureState.get() == STATE_DRAGGING) {
-                        // Our own cancelAppLongPress() injects an ACTION_CANCEL to
-                        // the decor. Do not let that synthetic event tear down the
-                        // drag state that was just established.
-                        Log.d(TAG, "ignore synthetic cancel while dragging");
-                        return;
-                    }
                     sPendingGeneration = -1;
                     sGestureState.set(STATE_IDLE);
                     if (sPendingPayload != null) {
@@ -356,8 +421,11 @@ public final class Bridge {
 
     private static void onCustomLongPressTriggered() {
         try {
-            if (!sGestureActive || sPendingGeneration != sGestureGeneration) {
-                Log.d(TAG, "customLongPress skipped (stale gesture)");
+            Context ctx = currentContext();
+            if (!sMasterSwitch || isBlacklisted(ctx) || (!sLandscapeTrigger && isLandscape(ctx))) {
+                return;
+            }
+            if (!sGestureActive || sPendingGeneration != sGestureGeneration || sPendingPayload != null) {
                 return;
             }
             if (!sGestureState.compareAndSet(STATE_IDLE, STATE_TRIGGERED)) {
@@ -374,7 +442,7 @@ public final class Bridge {
                 sGestureState.set(STATE_PROCESSED);
                 return;
             }
-            Log.i(TAG, "customLongPress triggered at " + sDownRawX + "," + sDownRawY
+            Log.i(TAG, "customLongPress fallback triggered at " + sDownRawX + "," + sDownRawY
                     + " after " + (startedAt - sDownAt) + "ms");
 
             View touchTarget = findDeepTouchView(root, sDownRawX, sDownRawY);
@@ -382,17 +450,14 @@ public final class Bridge {
                 touchTarget = root;
             }
 
-            // If AES' own long-press pipeline already extracted this gesture,
-            // reuse its result instead of running the whole tree scan twice.
-            Bundle content = sPendingPayload;
-            if (content != null && isBundleMeaningful(content)) {
-                sPendingPayload = null;
-                sPendingContent = null;
-                Log.i(TAG, "customLongPress reuses AES pipeline payload");
-            } else {
-                sPendingPayload = null;
-                sPendingContent = null;
-                content = preExtract(touchTarget, 3, false);
+            Bundle content = preExtract(touchTarget, 3, false);
+            if (content == null || !isBundleMeaningful(content)) {
+                View nonComposeTarget = findDeepTouchView(root, sDownRawX, sDownRawY, true /* skipCompose */);
+                Log.i(TAG, "customLongPress pass-through: " + (nonComposeTarget == null ? "null" : nonComposeTarget.getClass().getName()));
+                if (nonComposeTarget != null && nonComposeTarget != touchTarget) {
+                    touchTarget = nonComposeTarget;
+                    content = preExtract(touchTarget, 3, false);
+                }
             }
 
             // USER EXPLICIT CONSTRAINT: "不要全量兜底截屏"
@@ -407,20 +472,21 @@ public final class Bridge {
                     + " text=" + content.getString("viewContent")
                     + " bitmap=" + describeBitmap(content)
                     + " took=" + (SystemClock.uptimeMillis() - startedAt) + "ms");
-            sGestureState.set(STATE_DRAGGING);
-
-            try {
-                touchTarget.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-            } catch (Throwable ignored) {
-            }
 
             content.putString("coordinate", ((int) sDownRawX) + "-" + ((int) sDownRawY));
-            sMovedSinceDown = true;
             sLastTouchAt = SystemClock.uptimeMillis();
             if (touchTarget.isAttachedToWindow()) {
                 sLastTouchView = touchTarget;
             }
-            forwardToPortal(content, null);
+            if (sMovedSinceDown) {
+                sGestureState.set(STATE_DRAGGING);
+                forwardToPortal(content, null);
+            } else {
+                sPendingPayload = content;
+                sPendingContent = null;
+                sGestureState.set(STATE_IDLE);
+                forwardToPortal(content, null);
+            }
         } catch (Throwable throwable) {
             Log.w(TAG, "onCustomLongPressTriggered failed", throwable);
             sGestureState.set(STATE_PROCESSED);
@@ -430,6 +496,13 @@ public final class Bridge {
     /** Called at the beginning of Interceptor.l(PointF, PointF, View). */
     public static void recordTouch(PointF first, PointF second, View view) {
         try {
+            long elapsed = SystemClock.uptimeMillis() - sDownAt;
+            if (sDownAt > 0 && elapsed < (sLongPressDurationMs - 100)) {
+                Log.w(TAG, "recordTouch arrived too early (" + elapsed + "ms < " + sLongPressDurationMs
+                        + "ms), ignoring premature AES trigger");
+                return;
+            }
+            sMainHandler.removeCallbacks(sCustomLongPressRunnable);
             if (sGestureState.get() != STATE_IDLE) {
                 Log.d(TAG, "recordTouch ignored (custom engine active)");
                 return;
@@ -476,6 +549,13 @@ public final class Bridge {
      * Class.getDeclaredMethods()/getMethods() for every node of the window on
      * every long press, which is why simple pages could still stutter.
      */
+    private static boolean isObfuscatedAndroidComposeView(View view) {
+        return (view instanceof ViewGroup)
+                && (view instanceof android.view.ViewTreeObserver.OnGlobalLayoutListener)
+                && (view instanceof android.view.ViewTreeObserver.OnScrollChangedListener)
+                && (view instanceof android.view.ViewTreeObserver.OnTouchModeChangeListener);
+    }
+
     private static int viewKind(View view) {
         if (view == null) {
             return VIEW_KIND_NORMAL;
@@ -489,6 +569,7 @@ public final class Bridge {
         try {
             String name = clazz.getName();
             if (name.contains("AndroidComposeView") || name.contains("compose.ui.platform")
+                    || isObfuscatedAndroidComposeView(view)
                     || findMethod(clazz, "getSemanticsOwner") != null) {
                 kind = VIEW_KIND_COMPOSE;
             } else if (isWebViewLikeRaw(view)) {
@@ -905,7 +986,7 @@ public final class Bridge {
                     bundle.putInt("catchType", 2);
                     Bitmap preview = extractImageBitmap(view);
                     if (preview != null) {
-                        bundle.putParcelable("viewBitmap", scaleDown(preview, 360));
+                        bundle.putParcelable("viewBitmap", preview);
                     }
                     Log.i(TAG, "weibo remote image url hit " + remoteUrl);
                     return bundle;
@@ -943,17 +1024,18 @@ public final class Bridge {
             if (pfd == null) {
                 return null;
             }
-            if (directPfd != null && uri == null && file == null) {
-                long directSize = -1;
+            long statSize = -1;
+            try {
+                statSize = pfd.getStatSize();
+            } catch (Throwable ignored) {
+            }
+            if (statSize == 0) {
+                // An empty 0-byte file must not shadow the Bitmap fallback
                 try {
-                    directSize = directPfd.getStatSize();
+                    pfd.close();
                 } catch (Throwable ignored) {
                 }
-                if (directSize <= 0) {
-                    // A stale/closed PFD from a custom image loader must not
-                    // shadow the Bitmap fallback.
-                    return null;
-                }
+                return null;
             }
             String mime = null;
             try {
@@ -972,11 +1054,6 @@ public final class Bridge {
             bundle.putParcelable("filePfd", pfd);
             bundle.putString("fileName", name);
             bundle.putString("mimeType", mime == null ? "application/octet-stream" : mime);
-            long statSize = -1;
-            try {
-                statSize = pfd.getStatSize();
-            } catch (Throwable ignored) {
-            }
             bundle.putLong("fileSize", statSize);
             bundle.putInt("catchType", 2);
             // Keep a small in-memory preview so the drag shadow can follow the
@@ -1165,24 +1242,58 @@ public final class Bridge {
 
     private static boolean isFileValue(Object value) {
         if (value instanceof Uri) {
-            String scheme = ((Uri) value).getScheme();
-            return "content".equals(scheme) || "file".equals(scheme);
+            Uri uri = (Uri) value;
+            String scheme = uri.getScheme();
+            if ("file".equals(scheme)) {
+                String path = uri.getPath();
+                if (path != null) {
+                    try {
+                        File f = new File(path);
+                        return f.isFile() && f.length() > 0;
+                    } catch (Throwable ignored) {
+                        return false;
+                    }
+                }
+                return false;
+            }
+            return "content".equals(scheme);
         }
         if (value instanceof File) {
-            return true;
+            File f = (File) value;
+            return f.isFile() && f.length() > 0;
         }
         if (value instanceof ParcelFileDescriptor) {
             try {
-                return ((ParcelFileDescriptor) value).getFileDescriptor() != null;
+                ParcelFileDescriptor p = (ParcelFileDescriptor) value;
+                return p.getFileDescriptor() != null && p.getStatSize() != 0;
             } catch (Throwable ignored) {
                 return false;
             }
         }
         if (value instanceof String) {
             String string = (String) value;
-            return string.length() < 4096
-                    && (string.startsWith("content://") || string.startsWith("file://")
-                    || (string.startsWith("/") && string.indexOf('\n') < 0));
+            if (string.length() >= 4096) return false;
+            if (string.startsWith("content://")) return true;
+            if (string.startsWith("file://")) {
+                try {
+                    Uri u = Uri.parse(string);
+                    String path = u.getPath();
+                    if (path != null) {
+                        File f = new File(path);
+                        return f.isFile() && f.length() > 0;
+                    }
+                } catch (Throwable ignored) {
+                    return false;
+                }
+            }
+            if (string.startsWith("/") && string.indexOf('\n') < 0) {
+                try {
+                    File f = new File(string);
+                    return f.isFile() && f.length() > 0;
+                } catch (Throwable ignored) {
+                    return false;
+                }
+            }
         }
         return false;
     }
@@ -1190,16 +1301,28 @@ public final class Bridge {
     private static ParcelFileDescriptor openPfd(Context context, Uri uri, File file) {
         try {
             if (file != null) {
+                if (!file.isFile() || file.length() <= 0) return null;
                 return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
             }
             if (uri == null || context == null) {
                 return null;
             }
             if ("file".equals(uri.getScheme())) {
-                return ParcelFileDescriptor.open(new File(uri.getPath()),
-                        ParcelFileDescriptor.MODE_READ_ONLY);
+                String path = uri.getPath();
+                if (path == null) return null;
+                File f = new File(path);
+                if (!f.isFile() || f.length() <= 0) return null;
+                return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
             }
-            return context.getContentResolver().openFileDescriptor(uri, "r");
+            ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(uri, "r");
+            if (pfd != null && pfd.getStatSize() == 0) {
+                try {
+                    pfd.close();
+                } catch (Throwable ignored) {
+                }
+                return null;
+            }
+            return pfd;
         } catch (Throwable throwable) {
             Log.d(TAG, "openPfd failed: " + throwable);
             return null;
@@ -1327,7 +1450,7 @@ public final class Bridge {
                 Bitmap bmp = extractTelegramBitmap(view);
                 if (bmp != null && !bmp.isRecycled() && bmp.getWidth() >= 60 && bmp.getHeight() >= 60) {
                     Bundle b = new Bundle();
-                    b.putParcelable("viewBitmap", scaleDown(bmp, 1080));
+                    b.putParcelable("viewBitmap", toSoftwareBitmap(bmp));
                     b.putInt("catchType", 2);
                     Log.i(TAG, "telegram hit photo " + bmp.getWidth() + "x" + bmp.getHeight());
                     return b;
@@ -1396,6 +1519,12 @@ public final class Bridge {
         // AES already walks into children, and that scan used to run for every
         // leaf on every long press.
         if (isComposeView(view)) {
+            // Hybrid app check (e.g. Coolapk): Embedded native Views (ImageView / TextView)
+            // take strict precedence over Compose screenshot fallback to preserve original lossless content!
+            Bundle hybrid = extractHybridComposeContent(view, rawX, rawY, wantText, wantBitmap);
+            if (hybrid != null && isBundleMeaningful(hybrid)) {
+                return hybrid;
+            }
             Bundle compose = extractCompose(view, rawX, rawY, wantText, wantBitmap);
             if (compose != null && isBundleMeaningful(compose)) {
                 return compose;
@@ -1419,9 +1548,24 @@ public final class Bridge {
             }
         }
         if (isComposeView(target)) {
+            Bundle hybrid = extractHybridComposeContent(target, rawX, rawY, wantText, wantBitmap);
+            if (hybrid != null && isBundleMeaningful(hybrid)) {
+                return hybrid;
+            }
             Bundle compose = extractCompose(target, rawX, rawY, wantText, wantBitmap);
             if (compose != null && isBundleMeaningful(compose)) {
                 return compose;
+            }
+            // Hybrid app fix (e.g. Coolapk com.coolapk.market):
+            // The top-most ComposeView overlay has no Compose content under (rawX, rawY).
+            // Pass through to the underlying non-Compose view in the window hierarchy!
+            View rootView = target.getRootView();
+            if (rootView != null) {
+                View nonComposeLeaf = findDeepTouchView(rootView, rawX, rawY, true /* skipCompose */);
+                Log.i(TAG, "hybrid pass-through: " + (nonComposeLeaf == null ? "null" : nonComposeLeaf.getClass().getName()));
+                if (nonComposeLeaf != null && nonComposeLeaf != target) {
+                    target = nonComposeLeaf;
+                }
             }
         }
         if (isWebViewLike(target)) {
@@ -1434,6 +1578,20 @@ public final class Bridge {
         // 4. Hierarchy search starting from target: custom text views,
         // TextViews and ImageViews.
         View candidate = target;
+        if (candidate instanceof ViewGroup && !isComposeView(candidate) && !isWebViewLike(candidate)) {
+            if (wantText) {
+                Bundle grpText = extractViewGroupText((ViewGroup) candidate);
+                if (grpText != null && isBundleMeaningful(grpText)) {
+                    return grpText;
+                }
+            }
+            if (wantBitmap) {
+                Bundle grpImg = extractViewGroupImage((ViewGroup) candidate);
+                if (grpImg != null && isBundleMeaningful(grpImg)) {
+                    return grpImg;
+                }
+            }
+        }
         for (int depth = 0; candidate != null && depth < 5; depth++) {
             // Check candidate itself
             if (wantText) {
@@ -1527,12 +1685,67 @@ public final class Bridge {
         return null;
     }
 
+    // ColorOS OplusComposeViewDragProcessor exact text filter algorithms
+    private static final java.util.regex.Pattern OBFUSCATED_X_ID_PATTERN =
+            java.util.regex.Pattern.compile("^[Xx]\\.[0-9A-Za-z_]+(?:\\.[0-9A-Za-z_]+)?$");
+
+    private static boolean containsNaturalLanguage(String s) {
+        if (s == null) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isWhitespace(c)) {
+                return true;
+            }
+            if (c >= 0x4e00 && c <= 0x9fff) {
+                return true;
+            }
+            if (c > 0x7f && Character.isLetter(c)) {
+                return true;
+            }
+            if (Character.isLetterOrDigit(c)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isDragableUserText(String s) {
+        if (TextUtils.isEmpty(s)) {
+            return false;
+        }
+        String trimmed = s.trim();
+        if (trimmed.length() < 1) {
+            return false;
+        }
+        if (OBFUSCATED_X_ID_PATTERN.matcher(trimmed).matches()) {
+            return false;
+        }
+        if (trimmed.matches("^[Xx]\\.[0-9A-Za-z_]+.*") && !containsNaturalLanguage(trimmed)) {
+            return false;
+        }
+        if (trimmed.contains("SemanticsPropertyKey") || trimmed.startsWith("androidx.compose.")) {
+            return false;
+        }
+        if (trimmed.matches("^[\\w.$]+$") && trimmed.contains(".") && !trimmed.contains(" ") && !containsNaturalLanguage(trimmed)) {
+            return false;
+        }
+        if (!containsNaturalLanguage(trimmed)) {
+            return false;
+        }
+        return true;
+    }
+
     private static boolean isMeaningfulUserText(CharSequence text) {
         if (TextUtils.isEmpty(text)) {
             return false;
         }
         String s = text.toString().trim();
         if (s.isEmpty()) {
+            return false;
+        }
+        if (!isDragableUserText(s)) {
             return false;
         }
         String lower = s.toLowerCase(Locale.ROOT);
@@ -1577,6 +1790,65 @@ public final class Bridge {
             return false;
         }
         return true;
+    }
+
+    private static Bundle extractViewGroupText(ViewGroup group) {
+        if (group == null) return null;
+        StringBuilder sb = new StringBuilder();
+        collectTextViewsRecursively(group, sb, 0);
+        String text = sb.toString().trim();
+        if (isMeaningfulUserText(text)) {
+            Bundle b = new Bundle();
+            b.putString("viewContent", text);
+            b.putInt("catchType", 1);
+            return b;
+        }
+        return null;
+    }
+
+    private static void collectTextViewsRecursively(ViewGroup group, StringBuilder sb, int depth) {
+        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE) return;
+        int count = group.getChildCount();
+        for (int i = 0; i < count; i++) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) continue;
+            if (child instanceof TextView && !(child instanceof EditText)) {
+                CharSequence cs = ((TextView) child).getText();
+                if (!TextUtils.isEmpty(cs) && isMeaningfulUserText(cs)) {
+                    if (sb.length() > 0) sb.append("\n");
+                    sb.append(cs);
+                }
+            } else if (child instanceof ViewGroup && !isComposeView(child)) {
+                collectTextViewsRecursively((ViewGroup) child, sb, depth + 1);
+            }
+        }
+    }
+
+    private static Bundle extractViewGroupImage(ViewGroup group) {
+        if (group == null) return null;
+        return findFirstImageRecursively(group, 0);
+    }
+
+    private static Bundle findFirstImageRecursively(ViewGroup group, int depth) {
+        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE) return null;
+        int count = group.getChildCount();
+        for (int i = 0; i < count; i++) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) continue;
+            if (isAcceptableImageView(child)) {
+                Bitmap bmp = extractImageBitmap(child);
+                if (bmp != null) {
+                    Bundle b = new Bundle();
+                    b.putParcelable("viewBitmap", bmp);
+                    b.putInt("catchType", 2);
+                    return b;
+                }
+            } else if (child instanceof ViewGroup && !isComposeView(child)) {
+                Bundle b = findFirstImageRecursively((ViewGroup) child, depth + 1);
+                if (b != null) return b;
+            }
+        }
+        return null;
     }
 
     private static Bundle extractTextView(TextView tv) {
@@ -1947,7 +2219,7 @@ public final class Bridge {
             Bitmap tg = extractTelegramBitmap(view);
             if (tg != null && !tg.isRecycled() && tg.getWidth() >= 60 && tg.getHeight() >= 60) {
                 Log.i(TAG, "extractImageBitmap: extracted Telegram bitmap " + tg.getWidth() + "x" + tg.getHeight());
-                return scaleDown(toSoftwareBitmap(tg), 1080);
+                return toSoftwareBitmap(tg);
             }
             Bitmap source = null;
             if (view instanceof ImageView) {
@@ -1993,7 +2265,7 @@ public final class Bridge {
 // Removed arbitrary view.draw fallback to prevent capturing background overlays as images
             if (source != null && !source.isRecycled()) {
                 if (source.getWidth() >= 60 && source.getHeight() >= 60) {
-                    return scaleDown(toSoftwareBitmap(source), 1080);
+                    return toSoftwareBitmap(source);
                 }
             }
         } catch (Throwable throwable) {
@@ -2227,10 +2499,28 @@ public final class Bridge {
             return null;
         }
         try {
-            if (bitmap.getConfig() == Bitmap.Config.HARDWARE) {
-                return bitmap.copy(Bitmap.Config.ARGB_8888, false);
+            Bitmap.Config cfg = bitmap.getConfig();
+            if (cfg == Bitmap.Config.HARDWARE || cfg == Bitmap.Config.RGBA_F16) {
+                Bitmap copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+                if (copy != null) {
+                    return copy;
+                }
+                Bitmap software = Bitmap.createBitmap(bitmap.getWidth(), bitmap.getHeight(), Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(software);
+                Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+                canvas.drawBitmap(bitmap, 0, 0, paint);
+                return software;
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            Log.w(TAG, "toSoftwareBitmap failed", t);
+            try {
+                Bitmap software = Bitmap.createBitmap(bitmap.getWidth(), bitmap.getHeight(), Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(software);
+                Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+                canvas.drawBitmap(bitmap, 0, 0, paint);
+                return software;
+            } catch (Throwable ignored) {
+            }
         }
         return bitmap;
     }
@@ -2247,7 +2537,9 @@ public final class Bridge {
             return null;
         }
         String name = view.getClass().getName();
-        if (name.contains("AndroidComposeView") || findMethod(view.getClass(), "getSemanticsOwner") != null) {
+        if (name.contains("AndroidComposeView")
+                || isObfuscatedAndroidComposeView(view)
+                || findMethod(view.getClass(), "getSemanticsOwner") != null) {
             return view;
         }
         if (view instanceof ViewGroup) {
@@ -2256,6 +2548,394 @@ public final class Bridge {
                 View found = resolveAndroidComposeView(vg.getChildAt(i));
                 if (found != null) {
                     return found;
+                }
+            }
+            if (name.contains("ComposeView") && vg.getChildCount() > 0) {
+                return vg.getChildAt(0);
+            }
+        }
+        return null;
+    }
+
+    private static Bitmap trimLetterbox(Bitmap src) {
+        if (src == null || src.isRecycled()) return src;
+        int w = src.getWidth();
+        int h = src.getHeight();
+        if (w < 80 || h < 80) return src;
+
+        try {
+            // Row brightness analysis: identify black letterbox rows
+            boolean[] isBlackRow = new boolean[h];
+            int[] row = new int[w];
+            int step = Math.max(1, w / 60);
+            for (int y = 0; y < h; y++) {
+                src.getPixels(row, 0, w, 0, y, w, 1);
+                long sumR = 0, sumG = 0, sumB = 0;
+                int maxVal = 0;
+                int samples = 0;
+                for (int x = 0; x < w; x += step) {
+                    int c = row[x];
+                    int r = (c >> 16) & 0xFF;
+                    int g = (c >> 8) & 0xFF;
+                    int b = c & 0xFF;
+                    sumR += r;
+                    sumG += g;
+                    sumB += b;
+                    if (r > maxVal) maxVal = r;
+                    if (g > maxVal) maxVal = g;
+                    if (b > maxVal) maxVal = b;
+                    samples++;
+                }
+                float mean = (sumR + sumG + sumB) / (3.0f * Math.max(1, samples));
+                isBlackRow[y] = (mean < 4.5f) && (maxVal < 40);
+            }
+
+            // Find contiguous non-black row segments (filters out floating indicators like "1/9")
+            int bestY1 = 0, bestY2 = h - 1;
+            int maxH = 0;
+            int curStart = -1;
+            for (int y = 0; y < h; y++) {
+                if (!isBlackRow[y]) {
+                    if (curStart < 0) curStart = y;
+                } else {
+                    if (curStart >= 0) {
+                        int segH = y - curStart;
+                        if (segH > maxH) {
+                            maxH = segH;
+                            bestY1 = curStart;
+                            bestY2 = y - 1;
+                        }
+                        curStart = -1;
+                    }
+                }
+            }
+            if (curStart >= 0) {
+                int segH = h - curStart;
+                if (segH > maxH) {
+                    maxH = segH;
+                    bestY1 = curStart;
+                    bestY2 = h - 1;
+                }
+            }
+
+            if (maxH < 40) {
+                return src;
+            }
+
+            // Column brightness analysis on the selected row segment
+            int croppedH = bestY2 - bestY1 + 1;
+            boolean[] isBlackCol = new boolean[w];
+            int[] col = new int[croppedH];
+            int colStep = Math.max(1, croppedH / 60);
+            for (int x = 0; x < w; x++) {
+                src.getPixels(col, 0, 1, x, bestY1, 1, croppedH);
+                long sumR = 0, sumG = 0, sumB = 0;
+                int maxVal = 0;
+                int samples = 0;
+                for (int y = 0; y < croppedH; y += colStep) {
+                    int c = col[y];
+                    int r = (c >> 16) & 0xFF;
+                    int g = (c >> 8) & 0xFF;
+                    int b = c & 0xFF;
+                    sumR += r;
+                    sumG += g;
+                    sumB += b;
+                    if (r > maxVal) maxVal = r;
+                    if (g > maxVal) maxVal = g;
+                    if (b > maxVal) maxVal = b;
+                    samples++;
+                }
+                float mean = (sumR + sumG + sumB) / (3.0f * Math.max(1, samples));
+                isBlackCol[x] = (mean < 4.5f) && (maxVal < 40);
+            }
+
+            int bestX1 = 0, bestX2 = w - 1;
+            int maxW = 0;
+            curStart = -1;
+            for (int x = 0; x < w; x++) {
+                if (!isBlackCol[x]) {
+                    if (curStart < 0) curStart = x;
+                } else {
+                    if (curStart >= 0) {
+                        int segW = x - curStart;
+                        if (segW > maxW) {
+                            maxW = segW;
+                            bestX1 = curStart;
+                            bestX2 = x - 1;
+                        }
+                        curStart = -1;
+                    }
+                }
+            }
+            if (curStart >= 0) {
+                int segW = w - curStart;
+                if (segW > maxW) {
+                    maxW = segW;
+                    bestX1 = curStart;
+                    bestX2 = w - 1;
+                }
+            }
+
+            if (maxW < 40) {
+                bestX1 = 0;
+                bestX2 = w - 1;
+            }
+
+            if (bestX1 > 0 || bestX2 < w - 1 || bestY1 > 0 || bestY2 < h - 1) {
+                int newW = bestX2 - bestX1 + 1;
+                int newH = bestY2 - bestY1 + 1;
+                Log.i(TAG, "trimLetterbox: (" + w + "x" + h + ") -> (" + newW + "x" + newH + ") at " + bestX1 + "," + bestY1);
+                Bitmap trimmed = Bitmap.createBitmap(src, bestX1, bestY1, newW, newH);
+                src.recycle();
+                return trimmed;
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "trimLetterbox error", e);
+        }
+        return src;
+    }
+
+    private static void collectAllViews(View root, List<View> out) {
+        if (root == null || out.size() > 500) return;
+        out.add(root);
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                collectAllViews(vg.getChildAt(i), out);
+            }
+        }
+    }
+
+    private static Bitmap findNativeImageViewBitmap(View root, float rawX, float rawY) {
+        if (root == null) return null;
+        View windowRoot = root.getRootView();
+        if (windowRoot == null) windowRoot = root;
+        List<View> imageViews = new ArrayList<>();
+        collectAllViews(windowRoot, imageViews);
+
+        Bitmap bestBmp = null;
+        int maxArea = 0;
+        for (View v : imageViews) {
+            if (v instanceof ImageView || v.getClass().getName().contains("ImageView") || v.getClass().getName().contains("PhotoView")) {
+                Bitmap bmp = extractImageBitmap(v);
+                if (bmp != null && !bmp.isRecycled() && bmp.getWidth() > 100 && bmp.getHeight() > 100) {
+                    int area = bmp.getWidth() * bmp.getHeight();
+                    int[] loc = new int[2];
+                    v.getLocationOnScreen(loc);
+                    Rect r = new Rect(loc[0], loc[1], loc[0] + v.getWidth(), loc[1] + v.getHeight());
+                    if (r.contains((int) rawX, (int) rawY)) {
+                        Log.i(TAG, "findNativeImageViewBitmap: hit under touch (" + bmp.getWidth() + "x" + bmp.getHeight() + ") " + v.getClass().getName());
+                        return bmp;
+                    }
+                    if (area > maxArea) {
+                        maxArea = area;
+                        bestBmp = bmp;
+                    }
+                }
+            }
+        }
+        if (bestBmp != null) {
+            Log.i(TAG, "findNativeImageViewBitmap: picked largest candidate (" + bestBmp.getWidth() + "x" + bestBmp.getHeight() + ")");
+        }
+        return bestBmp;
+    }
+
+    private static Bitmap extractBitmapFromComposeSemantics(Object node) {
+        if (node == null) return null;
+        try {
+            // 1. Direct inspection of node fields
+            Bitmap direct = findBitmapInObject(node, 0, new HashSet<>());
+            if (direct != null) return direct;
+
+            // 2. SemanticsNode.layoutNode
+            Object layoutNode = null;
+            for (Method m : node.getClass().getMethods()) {
+                if (m.getParameterCount() == 0 && (m.getName().contains("Layout") || m.getReturnType().getSimpleName().contains("LayoutNode"))) {
+                    try {
+                        m.setAccessible(true);
+                        layoutNode = m.invoke(node);
+                        if (layoutNode != null) break;
+                    } catch (Throwable ignored) {}
+                }
+            }
+            if (layoutNode == null) {
+                for (Field f : node.getClass().getDeclaredFields()) {
+                    if (f.getType().getSimpleName().contains("LayoutNode")) {
+                        try {
+                            f.setAccessible(true);
+                            layoutNode = f.get(node);
+                            if (layoutNode != null) break;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+
+            if (layoutNode != null) {
+                Bitmap fromLayout = findBitmapInLayoutNode(layoutNode);
+                if (fromLayout != null) return fromLayout;
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "extractBitmapFromComposeSemantics err: " + e);
+        }
+        return null;
+    }
+
+    private static Bitmap findBitmapInLayoutNode(Object layoutNode) {
+        if (layoutNode == null) return null;
+        try {
+            for (Field f : layoutNode.getClass().getDeclaredFields()) {
+                f.setAccessible(true);
+                Object val = f.get(layoutNode);
+                if (val == null) continue;
+                String typeName = val.getClass().getSimpleName();
+                if (typeName.contains("NodeChain") || typeName.contains("Modifier")) {
+                    Bitmap bmp = findBitmapInObject(val, 0, new HashSet<>());
+                    if (bmp != null) return bmp;
+                }
+            }
+            for (Method m : layoutNode.getClass().getMethods()) {
+                if (m.getParameterCount() == 0 && (m.getName().equals("getNodes") || m.getName().endsWith("nodes"))) {
+                    m.setAccessible(true);
+                    Object val = m.invoke(layoutNode);
+                    if (val != null) {
+                        Bitmap bmp = findBitmapInObject(val, 0, new HashSet<>());
+                        if (bmp != null) return bmp;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static Bitmap findBitmapInObject(Object obj, int depth, Set<Object> visited) {
+        if (obj == null || depth > 5 || visited.contains(obj)) return null;
+        visited.add(obj);
+
+        Class<?> c = obj.getClass();
+        String cName = c.getName();
+        if (cName.startsWith("android.view.") || cName.startsWith("java.lang.")) return null;
+
+        if (obj instanceof Bitmap) {
+            Bitmap b = (Bitmap) obj;
+            if (!b.isRecycled() && b.getWidth() > 100 && b.getHeight() > 100) return b;
+        }
+        if (obj instanceof android.graphics.drawable.BitmapDrawable) {
+            Bitmap b = ((android.graphics.drawable.BitmapDrawable) obj).getBitmap();
+            if (b != null && !b.isRecycled() && b.getWidth() > 100 && b.getHeight() > 100) return b;
+        }
+
+        if (cName.contains("ImageBitmap")) {
+            for (Method m : c.getMethods()) {
+                if (m.getParameterCount() == 0 && m.getReturnType() == Bitmap.class) {
+                    try {
+                        m.setAccessible(true);
+                        Bitmap b = (Bitmap) m.invoke(obj);
+                        if (b != null && !b.isRecycled() && b.getWidth() > 100) return b;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        if (cName.contains("Success") || cName.contains("AsyncImage")) {
+            for (Method m : c.getMethods()) {
+                if (m.getParameterCount() == 0 && android.graphics.drawable.Drawable.class.isAssignableFrom(m.getReturnType())) {
+                    try {
+                        m.setAccessible(true);
+                        Object d = m.invoke(obj);
+                        if (d instanceof android.graphics.drawable.BitmapDrawable) {
+                            Bitmap b = ((android.graphics.drawable.BitmapDrawable) d).getBitmap();
+                            if (b != null && !b.isRecycled() && b.getWidth() > 100) return b;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        for (Class<?> cur = c; cur != null && cur != Object.class && !cur.getName().startsWith("android.view.View"); cur = cur.getSuperclass()) {
+            for (Field f : cur.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                Class<?> ft = f.getType();
+                if (ft.isPrimitive() || ft == String.class) continue;
+                try {
+                    f.setAccessible(true);
+                    Object fVal = f.get(obj);
+                    if (fVal == null) continue;
+                    if (fVal instanceof Bitmap) {
+                        Bitmap b = (Bitmap) fVal;
+                        if (!b.isRecycled() && b.getWidth() > 100 && b.getHeight() > 100) return b;
+                    }
+                    if (fVal instanceof android.graphics.drawable.BitmapDrawable) {
+                        Bitmap b = ((android.graphics.drawable.BitmapDrawable) fVal).getBitmap();
+                        if (b != null && !b.isRecycled() && b.getWidth() > 100 && b.getHeight() > 100) return b;
+                    }
+                    String fvName = fVal.getClass().getName();
+                    if (fvName.contains("Painter") || fvName.contains("ImageBitmap") || fvName.contains("AsyncImage") || fvName.contains("Success") || fvName.contains("Drawable") || fvName.contains("Modifier")) {
+                        Bitmap nested = findBitmapInObject(fVal, depth + 1, visited);
+                        if (nested != null) return nested;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private static void collectNativeViewsUnderPoint(View root, float rawX, float rawY, List<View> out) {
+        if (root == null || root.getVisibility() != View.VISIBLE) return;
+        int[] loc = new int[2];
+        root.getLocationOnScreen(loc);
+        int left = loc[0];
+        int top = loc[1];
+        int right = left + root.getWidth();
+        int bottom = top + root.getHeight();
+        if (rawX < left - 30 || rawX > right + 30 || rawY < top - 30 || rawY > bottom + 30) {
+            return;
+        }
+        if (root instanceof ImageView || root instanceof TextView) {
+            out.add(0, root);
+        } else if (!isComposeView(root)) {
+            out.add(root);
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = vg.getChildCount() - 1; i >= 0; i--) {
+                collectNativeViewsUnderPoint(vg.getChildAt(i), rawX, rawY, out);
+            }
+        }
+    }
+
+    private static Bundle extractHybridComposeContent(View composeView, float rawX, float rawY,
+                                                     boolean wantText, boolean wantBitmap) {
+        if (composeView == null) return null;
+        View actual = resolveAndroidComposeView(composeView);
+        View root = actual != null ? actual : composeView;
+
+        List<View> nativeViews = new ArrayList<>();
+        collectNativeViewsUnderPoint(root, rawX, rawY, nativeViews);
+
+        for (View v : nativeViews) {
+            if (wantBitmap) {
+                Bundle file = extractFile(v);
+                if (file != null && isBundleMeaningful(file)) {
+                    Log.i(TAG, "hybrid compose hit file " + v.getClass().getName());
+                    return file;
+                }
+                if (isAcceptableImageView(v) || v instanceof ImageView) {
+                    Bitmap bmp = extractImageBitmap(v);
+                    if (bmp != null && !bmp.isRecycled()) {
+                        Bundle b = new Bundle();
+                        b.putParcelable("viewBitmap", toSoftwareBitmap(bmp));
+                        b.putInt("catchType", 2);
+                        Log.i(TAG, "hybrid compose hit native ImageView " + bmp.getWidth() + "x" + bmp.getHeight());
+                        return b;
+                    }
+                }
+            }
+            if (wantText) {
+                Bundle custom = extractCustomText(v);
+                if (custom != null && isBundleMeaningful(custom)) return custom;
+                if (v instanceof TextView) {
+                    Bundle tv = extractTextView((TextView) v);
+                    if (tv != null && isBundleMeaningful(tv)) return tv;
                 }
             }
         }
@@ -2278,7 +2958,7 @@ public final class Bridge {
             float localY = rawY - loc[1];
             int viewWidth = actualComposeView.getWidth();
             int viewHeight = actualComposeView.getHeight();
-            if (localX < 0 || localX > viewWidth || localY < 0 || localY > viewHeight) {
+            if (localX < -36 || localX > viewWidth + 36 || localY < -36 || localY > viewHeight + 36) {
                 return null;
             }
 
@@ -2288,7 +2968,9 @@ public final class Bridge {
                 if (rootNode != null) {
                     List<ComposeSemanticsMatch> candidates = new ArrayList<>();
                     collectComposeCandidates(rootNode, 0, localX, localY, rawX, rawY, viewWidth, viewHeight, candidates);
-                    Log.i(TAG, "compose candidates count=" + candidates.size());
+                    Log.i(TAG, "compose owner=" + owner.getClass().getName()
+                            + " root=" + rootNode.getClass().getName()
+                            + " candidates=" + candidates.size());
 
                     ComposeSemanticsMatch best = pickBestComposeMatch(candidates, viewWidth, viewHeight);
                     if (best != null) {
@@ -2307,23 +2989,80 @@ public final class Bridge {
                             int h = Math.min(viewHeight - y, b.height());
                             if (w >= 32 && h >= 32) {
                                 try {
-                                    Bitmap full = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888);
-                                    actualComposeView.draw(new Canvas(full));
-                                    Bitmap crop = Bitmap.createBitmap(full, x, y, w, h);
-                                    full.recycle();
-                                    Bitmap scaled = scaleDown(crop, 1080);
-                                    Bundle res = new Bundle();
-                                    res.putParcelable("viewBitmap", scaled);
-                                    res.putInt("catchType", 2);
-                                    Log.i(TAG, "compose hit image " + w + "x" + h + " depth=" + best.depth);
-                                    return res;
+                                    // 1. Try to find embedded native ImageView under best.bounds first!
+                                    Bundle hybrid = extractHybridComposeContent(actualComposeView,
+                                            loc[0] + x + w / 2f, loc[1] + y + h / 2f, false, true);
+                                    if (hybrid != null && hybrid.getParcelable("viewBitmap") != null) {
+                                        return hybrid;
+                                    }
+
+                                    // 2. Try to extract original lossless Bitmap directly from Compose Semantics / Painter / Coil!
+                                    Bitmap directBmp = extractBitmapFromComposeSemantics(best.node);
+                                    if (directBmp != null && !directBmp.isRecycled()) {
+                                        Log.i(TAG, "compose hit direct lossless Bitmap " + directBmp.getWidth() + "x" + directBmp.getHeight());
+                                        Bundle res = new Bundle();
+                                        res.putParcelable("viewBitmap", toSoftwareBitmap(directBmp));
+                                        res.putInt("catchType", 2);
+                                        return res;
+                                    }
+
+                                    // 3. Try to find any native ImageView / PhotoView in the window hierarchy
+                                    Bitmap winBmp = findNativeImageViewBitmap(actualComposeView, rawX, rawY);
+                                    if (winBmp != null && !winBmp.isRecycled()) {
+                                        Log.i(TAG, "compose hit window ImageView Bitmap " + winBmp.getWidth() + "x" + winBmp.getHeight());
+                                        Bundle res = new Bundle();
+                                        res.putParcelable("viewBitmap", toSoftwareBitmap(winBmp));
+                                        res.putInt("catchType", 2);
+                                        return res;
+                                    }
+
+                                    // 4. Compose screenshot fallback with smart segmented trimming
+                                    // Only screenshot fallback enforces aspect ratio to avoid capturing dividers / background bars
+                                    float aspect = w / (float) Math.max(1, h);
+                                    if (aspect >= 0.5f && aspect <= 2.0f) {
+                                        Bitmap full = Bitmap.createBitmap(viewWidth, viewHeight, Bitmap.Config.ARGB_8888);
+                                        actualComposeView.draw(new Canvas(full));
+                                        Bitmap crop = Bitmap.createBitmap(full, x, y, w, h);
+                                        full.recycle();
+                                        Bitmap clean = trimLetterbox(crop);
+                                        if (clean != null && !clean.isRecycled()) {
+                                            float cleanAspect = clean.getWidth() / (float) Math.max(1, clean.getHeight());
+                                            if (cleanAspect >= 0.5f && cleanAspect <= 2.0f) {
+                                                Bundle res = new Bundle();
+                                                res.putParcelable("viewBitmap", toSoftwareBitmap(clean));
+                                                res.putInt("catchType", 2);
+                                                Log.i(TAG, "compose hit image (screenshot fallback cropped) " + clean.getWidth() + "x" + clean.getHeight() + " depth=" + best.depth);
+                                                return res;
+                                            } else {
+                                                Log.i(TAG, "compose screenshot cropped bitmap rejected by aspect ratio: " + cleanAspect);
+                                            }
+                                        }
+                                    } else {
+                                        Log.i(TAG, "compose screenshot candidate rejected by aspect ratio: " + aspect + " (" + w + "x" + h + ")");
+                                    }
                                 } catch (Throwable drawErr) {
                                     Log.w(TAG, "compose draw bitmap failed: " + drawErr);
                                 }
                             }
                         }
                     }
+
+                    // ColorOS OplusComposeViewDragProcessor fallback:
+                    // When the finger touches a chat bubble / card container's padding or a row node
+                    // whose text lives in child SemanticsNodes, aggregate text from the deepest container row's subtree!
+                    if (wantText && !candidates.isEmpty()) {
+                        String rowText = collectTextFromCandidateSubtrees(candidates, viewWidth, viewHeight);
+                        if (!TextUtils.isEmpty(rowText) && isMeaningfulUserText(rowText)) {
+                            Bundle b = new Bundle();
+                            b.putString("viewContent", rowText);
+                            b.putInt("catchType", 1);
+                            Log.i(TAG, "compose hit row subtree text=" + rowText.length());
+                            return b;
+                        }
+                    }
                 }
+            } else {
+                Log.i(TAG, "compose semanticsOwner miss on " + actualComposeView.getClass().getName());
             }
         } catch (Throwable throwable) {
             Log.w(TAG, "extractCompose failed: " + throwable);
@@ -2341,6 +3080,51 @@ public final class Bridge {
         return null;
     }
 
+    private static boolean isPlausibleSemanticsNodeClass(Class<?> nc) {
+        if (nc == null || nc.isPrimitive() || nc.isArray() || nc == Object.class || nc == String.class) {
+            return false;
+        }
+        String name = nc.getName();
+        if (name.startsWith("java.") || name.startsWith("android.") || name.startsWith("kotlin.")) {
+            return false;
+        }
+        if (name.contains("SemanticsNode")) {
+            return true;
+        }
+        boolean hasListReturn = false;
+        boolean hasBoxReturn = false;
+        try {
+            for (Method m : nc.getDeclaredMethods()) {
+                if (List.class.isAssignableFrom(m.getReturnType())) {
+                    hasListReturn = true;
+                }
+                if (m.getParameterCount() == 0 && hasFourBoxFieldsClass(m.getReturnType())) {
+                    hasBoxReturn = true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return hasListReturn && hasBoxReturn;
+    }
+
+    private static boolean hasFourBoxFieldsClass(Class<?> c) {
+        if (c == null || c.isPrimitive() || c.isArray() || c == Object.class || c == String.class) {
+            return false;
+        }
+        try {
+            int floatCount = 0;
+            for (Field f : c.getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())
+                        && (f.getType() == float.class || f.getType() == Float.class)) {
+                    floatCount++;
+                }
+            }
+            return floatCount == 4;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static Object getComposeSemanticsOwner(View view) {
         View target = resolveAndroidComposeView(view);
         if (target == null) {
@@ -2350,15 +3134,19 @@ public final class Bridge {
             Method m = findMethod(target.getClass(), "getSemanticsOwner");
             if (m != null) {
                 m.setAccessible(true);
-                return m.invoke(view);
+                Object res = m.invoke(target);
+                if (res != null) return res;
             }
         } catch (Throwable ignored) {
         }
         try {
-            Field f = findFieldOrNull(target.getClass(), "semanticsOwner");
-            if (f != null) {
-                f.setAccessible(true);
-                return f.get(target);
+            for (Class<?> c = target.getClass(); c != null && c != ViewGroup.class && c != Object.class; c = c.getSuperclass()) {
+                Field f = findFieldOrNull(c, "semanticsOwner");
+                if (f != null) {
+                    f.setAccessible(true);
+                    Object res = f.get(target);
+                    if (res != null) return res;
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -2366,7 +3154,32 @@ public final class Bridge {
             for (Method m : target.getClass().getMethods()) {
                 if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("SemanticsOwner")) {
                     m.setAccessible(true);
-                    return m.invoke(target);
+                    Object res = m.invoke(target);
+                    if (res != null) return res;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        // Full R8 obfuscation fallback: match field/method whose type has a 0-arg method returning SemanticsNode
+        try {
+            for (Class<?> c = target.getClass(); c != null && c != ViewGroup.class && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Class<?> ft = f.getType();
+                    if (ft.isPrimitive() || ft.isArray() || View.class.isAssignableFrom(ft)) continue;
+                    String fn = ft.getName();
+                    if (fn.startsWith("java.") || fn.startsWith("android.") || fn.startsWith("kotlin.")) continue;
+                    for (Method m : ft.getDeclaredMethods()) {
+                        if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                                && m.getParameterCount() == 0
+                                && isPlausibleSemanticsNodeClass(m.getReturnType())) {
+                            f.setAccessible(true);
+                            Object cand = f.get(target);
+                            if (cand != null) {
+                                return cand;
+                            }
+                        }
+                    }
                 }
             }
         } catch (Throwable ignored) {
@@ -2394,93 +3207,105 @@ public final class Bridge {
             }
         } catch (Throwable ignored) {
         }
-        try {
-            for (Method m : owner.getClass().getMethods()) {
-                if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("SemanticsNode")) {
-                    m.setAccessible(true);
-                    return m.invoke(owner);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        // ProGuard fallback (e.g. so5.a() -> po5):
+        // ProGuard fallback (e.g. Ldf9;->a()Laf9; or so5.a() -> po5):
+        // Prefer the method returning a SemanticsNode whose mergingEnabled (boolean field) is false (unmerged root)
+        Object firstNodeCandidate = null;
         try {
             for (Method m : owner.getClass().getDeclaredMethods()) {
-                if (m.getParameterCount() == 0 && !m.getReturnType().isPrimitive()
-                        && m.getReturnType() != void.class && m.getReturnType() != String.class) {
-                    m.setAccessible(true);
-                    Object res = m.invoke(owner);
-                    if (res != null) {
-                        return res;
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers()) || m.getParameterCount() != 0) {
+                    continue;
+                }
+                Class<?> rt = m.getReturnType();
+                if (rt.isPrimitive() || rt == void.class || rt == String.class) {
+                    continue;
+                }
+                if (isPlausibleSemanticsNodeClass(rt) || "a".equals(m.getName())) {
+                    try {
+                        m.setAccessible(true);
+                        Object res = m.invoke(owner);
+                        if (res != null) {
+                            if (firstNodeCandidate == null) {
+                                firstNodeCandidate = res;
+                            }
+                            if (isUnmergedSemanticsNode(res)) {
+                                return res;
+                            }
+                        }
+                    } catch (Throwable ignored) {
                     }
                 }
             }
         } catch (Throwable ignored) {
         }
-        return null;
+        return firstNodeCandidate;
+    }
+
+    private static boolean isUnmergedSemanticsNode(Object node) {
+        if (node == null) return false;
+        try {
+            for (Field f : node.getClass().getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) && f.getType() == boolean.class) {
+                    f.setAccessible(true);
+                    return !f.getBoolean(node);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static Rect getComposeNodeBounds(Object node) {
         if (node == null) {
             return null;
         }
-        Object boundsObj = null;
+        String[] preferredNames = new String[]{"getBoundsInRoot", "g", "getBoundsInWindow", "h", "m"};
+        for (String name : preferredNames) {
+            try {
+                Method m = findMethod(node.getClass(), name);
+                if (m != null && m.getParameterCount() == 0) {
+                    m.setAccessible(true);
+                    Object boundsObj = m.invoke(node);
+                    Rect r = toRectFromFourBox(boundsObj);
+                    if (r != null && (r.width() > 0 || r.height() > 0)) {
+                        return r;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        Rect fallbackEmpty = null;
         try {
-            Method m = findMethod(node.getClass(), "getBoundsInRoot");
-            if (m != null) {
-                m.setAccessible(true);
-                boundsObj = m.invoke(node);
+            for (Method m : node.getClass().getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                        && m.getParameterCount() == 0
+                        && !m.getReturnType().isPrimitive()
+                        && m.getReturnType() != void.class
+                        && m.getReturnType() != List.class) {
+                    try {
+                        m.setAccessible(true);
+                        Object res = m.invoke(node);
+                        if (res != null && hasFourBoxFields(res)) {
+                            Rect r = toRectFromFourBox(res);
+                            if (r != null) {
+                                if (r.width() > 0 || r.height() > 0) {
+                                    return r;
+                                }
+                                if (fallbackEmpty == null) {
+                                    fallbackEmpty = r;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
         } catch (Throwable ignored) {
         }
-        if (boundsObj == null) {
-            try {
-                for (Method m : node.getClass().getMethods()) {
-                    if (m.getParameterCount() == 0 && m.getName().toLowerCase(Locale.US).contains("boundsinroot")) {
-                        m.setAccessible(true);
-                        boundsObj = m.invoke(node);
-                        if (boundsObj != null) break;
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        // ProGuard fallback: prefer 'h' (boundsInRoot in Compose po5)
-        if (boundsObj == null) {
-            try {
-                for (Method m : node.getClass().getDeclaredMethods()) {
-                    if ("h".equals(m.getName()) && m.getParameterCount() == 0) {
-                        m.setAccessible(true);
-                        Object res = m.invoke(node);
-                        if (res != null && hasFourBoxFields(res)) {
-                            boundsObj = res;
-                            break;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        if (boundsObj == null) {
-            try {
-                for (Method m : node.getClass().getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && !m.getReturnType().isPrimitive()
-                            && m.getReturnType() != void.class && m.getReturnType() != List.class
-                            && m.getReturnType() != boolean.class) {
-                        m.setAccessible(true);
-                        Object res = m.invoke(node);
-                        if (res != null && hasFourBoxFields(res)) {
-                            boundsObj = res;
-                            break;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        if (boundsObj == null) {
-            return null;
-        }
+        return fallbackEmpty;
+    }
+
+    private static Rect toRectFromFourBox(Object boundsObj) {
+        if (boundsObj == null) return null;
         try {
             Class<?> bc = boundsObj.getClass();
             Field leftF = findFieldIgnoreCase(bc, "left", "a");
@@ -2514,19 +3339,28 @@ public final class Bridge {
         return floatCount >= 4;
     }
 
-    private static boolean boundsContainTouch(Rect bounds, float localX, float localY, float rawX, float rawY) {
+    private static boolean boundsContainExactTouch(Rect bounds, float localX, float localY, float rawX, float rawY) {
         if (bounds == null) return false;
-        // Check local coordinates (if bounds is boundsInRoot)
         if (bounds.contains((int) localX, (int) localY)) {
             return true;
         }
-        // Check window coordinates (if bounds is boundsInWindow)
-        if (bounds.contains((int) rawX, (int) rawY)) {
+        if ((localX != rawX || localY != rawY) && bounds.contains((int) rawX, (int) rawY)) {
             return true;
         }
-        // Finger touch slop (36px margin for natural finger placement)
-        Rect slop = new Rect(bounds.left - 36, bounds.top - 36, bounds.right + 36, bounds.bottom + 36);
-        return slop.contains((int) localX, (int) localY) || slop.contains((int) rawX, (int) rawY);
+        return false;
+    }
+
+    private static boolean boundsContainTouch(Rect bounds, float localX, float localY, float rawX, float rawY) {
+        if (bounds == null) return false;
+        if (boundsContainExactTouch(bounds, localX, localY, rawX, rawY)) {
+            return true;
+        }
+        // Tight 12px (~4dp) slop so adjacent buttons/lines are not mis-selected with an offset
+        Rect slop = new Rect(bounds.left - 12, bounds.top - 12, bounds.right + 12, bounds.bottom + 12);
+        if (slop.contains((int) localX, (int) localY)) {
+            return true;
+        }
+        return (localX != rawX || localY != rawY) && slop.contains((int) rawX, (int) rawY);
     }
 
     private static Field findFieldIgnoreCase(Class<?> clazz, String... names) {
@@ -2560,23 +3394,32 @@ public final class Bridge {
         }
         try {
             for (Field f : node.getClass().getDeclaredFields()) {
-                if (f.getType().getSimpleName().contains("SemanticsConfiguration")) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
                     f.setAccessible(true);
-                    return f.get(node);
+                    Object val = f.get(node);
+                    if (val != null && (f.getType().getSimpleName().contains("SemanticsConfiguration") || hasMapOrEntries(val))) {
+                        return val;
+                    }
                 }
             }
         } catch (Throwable ignored) {
         }
-        // ProGuard fallback (e.g. po5.k() -> jo5)
+        // ProGuard fallback (e.g. Laf9;->k()Lte9; or po5.k() -> jo5)
         try {
             for (Method m : node.getClass().getDeclaredMethods()) {
-                if (m.getParameterCount() == 0 && !m.getReturnType().isPrimitive()
-                        && m.getReturnType() != void.class && m.getReturnType() != List.class
-                        && m.getReturnType() != String.class && m.getReturnType() != boolean.class) {
-                    m.setAccessible(true);
-                    Object res = m.invoke(node);
-                    if (res != null && hasMapOrEntries(res)) {
-                        return res;
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                        && m.getParameterCount() == 0
+                        && !m.getReturnType().isPrimitive()
+                        && m.getReturnType() != void.class
+                        && m.getReturnType() != List.class
+                        && m.getReturnType() != String.class) {
+                    try {
+                        m.setAccessible(true);
+                        Object res = m.invoke(node);
+                        if (res != null && hasMapOrEntries(res)) {
+                            return res;
+                        }
+                    } catch (Throwable ignored) {
                     }
                 }
             }
@@ -2601,10 +3444,10 @@ public final class Bridge {
         }
         try {
             Method m = findMethod(node.getClass(), "getChildren");
-            if (m != null) {
+            if (m != null && !java.lang.reflect.Modifier.isStatic(m.getModifiers()) && m.getParameterCount() == 0) {
                 m.setAccessible(true);
                 Object res = m.invoke(node);
-                if (res instanceof List) {
+                if (res instanceof List && !((List<?>) res).isEmpty()) {
                     return (List<Object>) res;
                 }
             }
@@ -2612,49 +3455,84 @@ public final class Bridge {
         }
         try {
             for (Method m : node.getClass().getMethods()) {
-                if (m.getParameterCount() == 0 && m.getName().startsWith("getChildren")) {
-                    m.setAccessible(true);
-                    Object res = m.invoke(node);
-                    if (res instanceof List) {
-                        return (List<Object>) res;
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                        && m.getParameterCount() == 0
+                        && m.getName().startsWith("getChildren")) {
+                    try {
+                        m.setAccessible(true);
+                        Object res = m.invoke(node);
+                        if (res instanceof List && !((List<?>) res).isEmpty()) {
+                            return (List<Object>) res;
+                        }
+                    } catch (Throwable ignored) {
                     }
                 }
             }
         } catch (Throwable ignored) {
         }
-        // ProGuard fallback (e.g. po5.i(false, false) -> List or any method returning List)
-        try {
-            for (Method m : node.getClass().getDeclaredMethods()) {
-                if (List.class.isAssignableFrom(m.getReturnType())) {
+        // ProGuard fallback 1: s(ArrayList, boolean) -> unmergedChildren$ui_release (e.g. Laf9;->s(ArrayList, Z))
+        // and i(boolean, boolean) -> getChildren$ui_release(includeReplacedSemantics=true, includeFakeNodes=false)
+        List<Object> emptyFallback = null;
+        for (Method m : node.getClass().getDeclaredMethods()) {
+            try {
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                        || !List.class.isAssignableFrom(m.getReturnType())) {
+                    continue;
+                }
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 2 && pts[0] == boolean.class && pts[1] == boolean.class) {
                     m.setAccessible(true);
-                    Object[] args = new Object[m.getParameterCount()];
-                    for (int i = 0; i < args.length; i++) {
-                        Class<?> pt = m.getParameterTypes()[i];
-                        if (pt == boolean.class) args[i] = Boolean.FALSE;
-                        else if (pt == int.class) args[i] = 0;
-                        else args[i] = null;
-                    }
-                    Object res = m.invoke(node, args);
+                    Object res = m.invoke(node, Boolean.TRUE, Boolean.FALSE);
                     if (res instanceof List) {
+                        List<Object> list = (List<Object>) res;
+                        if (!list.isEmpty()) {
+                            return list;
+                        }
+                        emptyFallback = list;
+                    }
+                    Object res2 = m.invoke(node, Boolean.FALSE, Boolean.FALSE);
+                    if (res2 instanceof List && !((List<?>) res2).isEmpty()) {
+                        return (List<Object>) res2;
+                    }
+                } else if (pts.length == 2 && List.class.isAssignableFrom(pts[0]) && pts[1] == boolean.class) {
+                    m.setAccessible(true);
+                    ArrayList<Object> acc = new ArrayList<>();
+                    Object res = m.invoke(node, acc, Boolean.FALSE);
+                    if (res instanceof List && !((List<?>) res).isEmpty()) {
+                        return (List<Object>) res;
+                    }
+                    if (!acc.isEmpty()) {
+                        return acc;
+                    }
+                } else if (pts.length == 0) {
+                    m.setAccessible(true);
+                    Object res = m.invoke(node);
+                    if (res instanceof List && !((List<?>) res).isEmpty()) {
+                        return (List<Object>) res;
+                    }
+                } else if (pts.length == 1 && pts[0] == boolean.class) {
+                    m.setAccessible(true);
+                    Object res = m.invoke(node, Boolean.TRUE);
+                    if (res instanceof List && !((List<?>) res).isEmpty()) {
                         return (List<Object>) res;
                     }
                 }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
         }
         try {
             for (Field f : node.getClass().getDeclaredFields()) {
-                if (List.class.isAssignableFrom(f.getType())) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) && List.class.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
                     Object res = f.get(node);
-                    if (res instanceof List) {
+                    if (res instanceof List && !((List<?>) res).isEmpty()) {
                         return (List<Object>) res;
                     }
                 }
             }
         } catch (Throwable ignored) {
         }
-        return null;
+        return emptyFallback;
     }
 
     private static void collectComposeCandidates(Object node, int depth,
@@ -2668,12 +3546,11 @@ public final class Bridge {
         if (bounds == null || !boundsContainTouch(bounds, localX, localY, rawX, rawY)) {
             return;
         }
+        boolean exactHit = boundsContainExactTouch(bounds, localX, localY, rawX, rawY);
         Object config = getComposeConfig(node);
-        if (config != null) {
-            ComposeSemanticsMatch match = buildComposeMatch(node, config, bounds, depth, viewWidth, viewHeight);
-            if (match != null && !match.isLink) {
-                candidates.add(match);
-            }
+        ComposeSemanticsMatch match = buildComposeMatch(node, config, bounds, depth, exactHit, viewWidth, viewHeight);
+        if (match != null) {
+            candidates.add(match);
         }
         List<Object> children = getComposeChildren(node);
         if (children != null) {
@@ -2683,64 +3560,96 @@ public final class Bridge {
         }
     }
 
+    private static boolean isIgnoredSemanticsPropertyKey(String keyName) {
+        if (keyName == null) return true;
+        return keyName.contains("EditableText")
+                || keyName.contains("TextSubstitution")
+                || keyName.contains("TextLayout")
+                || keyName.contains("TestTag")
+                || keyName.contains("LinkTestMarker")
+                || keyName.contains("Action")
+                || keyName.contains("Result")
+                || keyName.startsWith("Set");
+    }
+
     private static boolean isSemanticsTextKey(String keyName) {
-        if (keyName == null) return false;
-        if (keyName.contains("Action") || keyName.contains("Result") || keyName.startsWith("Set")) {
-            return false;
-        }
-        return keyName.equals("Text") || keyName.equals("EditableText")
-                || keyName.endsWith(".Text") || keyName.endsWith(".EditableText");
+        if (keyName == null || isIgnoredSemanticsPropertyKey(keyName)) return false;
+        return keyName.equals("Text") || keyName.endsWith(".Text");
     }
 
     private static ComposeSemanticsMatch buildComposeMatch(Object node, Object config, Rect bounds, int depth,
-                                                           int viewWidth, int viewHeight) {
-        String foundText = null;
-        boolean isImage = false;
-        boolean isLink = false;
+                                                           boolean exactHit, int viewWidth, int viewHeight) {
+        String[] textOut = new String[1];
+        boolean[] imageOut = new boolean[1];
+        extractFromSemanticsConfig(config, textOut, imageOut);
+
+        // ColorOS OplusComposeViewDragProcessor.extractTextFromLayoutNodeAttached:
+        // Also inspect SemanticsNode.layoutNode -> collapsedSemantics (Lkb6;->x()Lte9; / t: Lte9;)
+        // and Modifier.Node chain (Ldha; TextAnnotatedStringNode / Lqla; TextStringSimpleNode)
+        String layoutAttachedText = extractTextFromLayoutNodeAttached(node, config);
+        if (!TextUtils.isEmpty(layoutAttachedText)) {
+            textOut[0] = pickLongerText(textOut[0], layoutAttachedText);
+        }
+
+        // ColorOS rule: if node has valid text, it cannot be treated as an image
+        boolean isImage = imageOut[0] && TextUtils.isEmpty(textOut[0]);
+
+        return new ComposeSemanticsMatch(bounds, depth, textOut[0], isImage, false, exactHit, node);
+    }
+
+    private static void extractFromSemanticsConfig(Object config, String[] textOut, boolean[] imageOut) {
+        if (config == null) return;
+        String foundText = textOut[0];
+        boolean isImage = imageOut[0];
 
         if (config instanceof Iterable) {
-            for (Object item : (Iterable<?>) config) {
-                if (item instanceof Map.Entry) {
-                    Map.Entry<?, ?> entry = (Map.Entry<?, ?>) item;
-                    String keyName = getSemanticsKeyName(entry.getKey());
-                    Object value = entry.getValue();
-                    if (keyName != null) {
-                        if (isSemanticsTextKey(keyName)) {
-                            String parsed = parseComposeTextValue(value);
-                            if (!TextUtils.isEmpty(parsed)) {
-                                foundText = pickLongerText(foundText, parsed);
+            try {
+                for (Object item : (Iterable<?>) config) {
+                    if (item instanceof Map.Entry) {
+                        Map.Entry<?, ?> entry = (Map.Entry<?, ?>) item;
+                        String keyName = getSemanticsKeyName(entry.getKey());
+                        Object value = entry.getValue();
+                        if (keyName != null && !isIgnoredSemanticsPropertyKey(keyName)) {
+                            if (isSemanticsTextKey(keyName)) {
+                                String parsed = parseComposeTextValue(value);
+                                if (!TextUtils.isEmpty(parsed)) {
+                                    foundText = pickLongerText(foundText, parsed);
+                                }
+                            } else if (keyName.contains("ContentDescription")) {
+                                String parsed = parseComposeTextValue(value);
+                                if (!TextUtils.isEmpty(parsed) && foundText == null) {
+                                    foundText = parsed;
+                                }
+                            } else if (keyName.contains("Role")) {
+                                if (value != null && value.toString().contains("Image")) {
+                                    isImage = true;
+                                }
                             }
-                        } else if (keyName.contains("ContentDescription")) {
-                            String parsed = parseComposeTextValue(value);
-                            if (!TextUtils.isEmpty(parsed) && foundText == null) {
-                                foundText = parsed;
-                            }
-                        } else if (keyName.contains("Role")) {
-                            if (value != null && value.toString().contains("Image")) {
-                                isImage = true;
-                            }
-                        } else if (keyName.contains("TestTag") || keyName.contains("Link")) {
-                            isLink = true;
                         }
                     }
                 }
+            } catch (Throwable ignored) {
             }
         }
 
-        // Direct ScatterMap inspection (c14: b=keys, c=values) if foundText is still empty
-        if (TextUtils.isEmpty(foundText) && config != null) {
+        // Direct ScatterMap inspection (Lpd7; / c14: b=keys, c=values)
+        if (TextUtils.isEmpty(foundText)) {
             for (Field f : config.getClass().getDeclaredFields()) {
                 try {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
                     f.setAccessible(true);
                     Object sub = f.get(config);
                     if (sub != null) {
                         Field keysField = null;
                         Field valsField = null;
-                        for (Field sf : sub.getClass().getDeclaredFields()) {
-                            if (sf.getType() == Object[].class) {
-                                if (keysField == null) keysField = sf;
-                                else if (valsField == null) { valsField = sf; break; }
+                        for (Class<?> sc = sub.getClass(); sc != null && sc != Object.class; sc = sc.getSuperclass()) {
+                            for (Field sf : sc.getDeclaredFields()) {
+                                if (sf.getType() == Object[].class) {
+                                    if (keysField == null) keysField = sf;
+                                    else if (valsField == null) { valsField = sf; break; }
+                                }
                             }
+                            if (keysField != null && valsField != null) break;
                         }
                         if (keysField != null && valsField != null) {
                             keysField.setAccessible(true);
@@ -2754,7 +3663,7 @@ public final class Bridge {
                                     Object v = vals[i];
                                     if (k == null || v == null) continue;
                                     String keyName = getSemanticsKeyName(k);
-                                    if (keyName != null) {
+                                    if (keyName != null && !isIgnoredSemanticsPropertyKey(keyName)) {
                                         if (isSemanticsTextKey(keyName)) {
                                             String parsed = parseComposeTextValue(v);
                                             if (!TextUtils.isEmpty(parsed)) {
@@ -2766,7 +3675,7 @@ public final class Bridge {
                                                 foundText = parsed;
                                             }
                                         } else if (keyName.contains("Role")) {
-                                            if (v != null && v.toString().contains("Image")) {
+                                            if (v.toString().contains("Image")) {
                                                 isImage = true;
                                             }
                                         }
@@ -2786,7 +3695,7 @@ public final class Bridge {
                 for (Map.Entry<?, ?> entry : propsMap.entrySet()) {
                     String keyName = getSemanticsKeyName(entry.getKey());
                     Object value = entry.getValue();
-                    if (keyName != null) {
+                    if (keyName != null && !isIgnoredSemanticsPropertyKey(keyName)) {
                         if (isSemanticsTextKey(keyName)) {
                             String parsed = parseComposeTextValue(value);
                             if (!TextUtils.isEmpty(parsed)) {
@@ -2807,10 +3716,188 @@ public final class Bridge {
             }
         }
 
-        // Note: Do NOT guess isImage from arbitrary container aspect ratios.
-        // Doing so misclassifies text container layouts as images and crashes with hardware bitmap draw errors.
+        textOut[0] = foundText;
+        imageOut[0] = isImage;
+    }
 
-        return new ComposeSemanticsMatch(bounds, depth, foundText, isImage, isLink, node);
+    private static String extractTextFromModifierNode(Object modNode, int depth, Set<Object> visited) {
+        if (modNode == null || depth > 8 || visited == null || visited.size() > 32 || !visited.add(modNode)) return null;
+        String best = null;
+        try {
+            Class<?> mc = modNode.getClass();
+            for (Field f : mc.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                Class<?> ft = f.getType();
+                if (CharSequence.class.isAssignableFrom(ft)) {
+                    f.setAccessible(true);
+                    Object val = f.get(modNode);
+                    if (val instanceof CharSequence) {
+                        String s = val.toString().trim();
+                        if (isMeaningfulUserText(s)) {
+                            best = pickLongerText(best, s);
+                        }
+                    }
+                }
+            }
+            // Check delegate chain (e.g. Lup3;->p:Lw97;) and next child in Modifier.Node chain (Lw97;->f:Lw97;)
+            for (Class<?> c = mc; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    String fn = f.getName();
+                    if ("f".equals(fn) || "child".equals(fn) || "p".equals(fn) || "delegate".equals(fn)) {
+                        Class<?> ft = f.getType();
+                        if (!ft.isPrimitive() && ft != String.class && ft != Object.class) {
+                            f.setAccessible(true);
+                            Object next = f.get(modNode);
+                            if (next != null && next != modNode) {
+                                String sub = extractTextFromModifierNode(next, depth + 1, visited);
+                                if (!TextUtils.isEmpty(sub)) {
+                                    best = pickLongerText(best, sub);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return best;
+    }
+
+    private static String extractTextFromLayoutNodeAttached(Object node, Object nodeConfig) {
+        if (node == null) return null;
+        String best = null;
+        Class<?> configClass = nodeConfig != null ? nodeConfig.getClass() : null;
+
+        try {
+            for (Field nf : node.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(nf.getModifiers())) continue;
+                Class<?> ft = nf.getType();
+                if (ft.isPrimitive() || ft == String.class || (configClass != null && ft == configClass)
+                        || ft == node.getClass()) {
+                    continue;
+                }
+                nf.setAccessible(true);
+                Object fieldVal = nf.get(node);
+                if (fieldVal == null) continue;
+
+                // 1. Direct Modifier.Node on SemanticsNode (Laf9;->a: Lw97;)
+                String modText = extractTextFromModifierNode(fieldVal, 0, new HashSet<>());
+                if (!TextUtils.isEmpty(modText)) {
+                    best = pickLongerText(best, modText);
+                }
+
+                // 2. Check fields of layoutNode (e.g. Lkb6;->t: Lte9; and Lkb6;->E: Lbi; NodeChain)
+                for (Field lf : fieldVal.getClass().getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(lf.getModifiers())) continue;
+                    if ((configClass != null && lf.getType() == configClass)
+                            || lf.getType().getSimpleName().contains("SemanticsConfiguration")) {
+                        lf.setAccessible(true);
+                        Object collapsed = lf.get(fieldVal);
+                        if (collapsed != null && collapsed != nodeConfig) {
+                            String[] out = new String[1];
+                            boolean[] img = new boolean[1];
+                            extractFromSemanticsConfig(collapsed, out, img);
+                            if (!TextUtils.isEmpty(out[0])) {
+                                best = pickLongerText(best, out[0]);
+                            }
+                        }
+                    } else if ("E".equals(lf.getName()) || lf.getName().contains("nodes")) {
+                        lf.setAccessible(true);
+                        Object nodeChain = lf.get(fieldVal);
+                        if (nodeChain != null) {
+                            for (Field cf : nodeChain.getClass().getDeclaredFields()) {
+                                if (java.lang.reflect.Modifier.isStatic(cf.getModifiers())) continue;
+                                if ("f".equals(cf.getName()) || "g".equals(cf.getName()) || "head".equals(cf.getName())) {
+                                    cf.setAccessible(true);
+                                    Object headMod = cf.get(nodeChain);
+                                    if (headMod != null) {
+                                        String chainText = extractTextFromModifierNode(headMod, 0, new HashSet<>());
+                                        if (!TextUtils.isEmpty(chainText)) {
+                                            best = pickLongerText(best, chainText);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 3. Check 0-arg methods of layoutNode returning SemanticsConfiguration (e.g. Lkb6;->x()Lte9;)
+                for (Method lm : fieldVal.getClass().getDeclaredMethods()) {
+                    if (!java.lang.reflect.Modifier.isStatic(lm.getModifiers())
+                            && lm.getParameterCount() == 0
+                            && ((configClass != null && lm.getReturnType() == configClass)
+                            || lm.getReturnType().getSimpleName().contains("SemanticsConfiguration"))) {
+                        lm.setAccessible(true);
+                        Object collapsed = lm.invoke(fieldVal);
+                        if (collapsed != null && collapsed != nodeConfig) {
+                            String[] out = new String[1];
+                            boolean[] img = new boolean[1];
+                            extractFromSemanticsConfig(collapsed, out, img);
+                            if (!TextUtils.isEmpty(out[0])) {
+                                best = pickLongerText(best, out[0]);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return best;
+    }
+
+    private static String collectTextFromCandidateSubtrees(List<ComposeSemanticsMatch> candidates,
+                                                           int viewWidth, int viewHeight) {
+        if (candidates == null || candidates.isEmpty()) return null;
+        int maxArea = (int) (viewWidth * viewHeight * 0.55f);
+        // Walk from deepest candidate under the finger upwards, NEVER aggregating full-screen root/scaffold nodes!
+        for (int i = candidates.size() - 1; i >= 0; i--) {
+            ComposeSemanticsMatch cand = candidates.get(i);
+            if (cand.node == null || cand.bounds == null) continue;
+            if (cand.area <= 0 || cand.depth <= 0 || (maxArea > 0 && cand.area > maxArea)) continue;
+            List<String> segments = new ArrayList<>();
+            int[] visited = new int[]{0};
+            collectSubtreeTextsInBounds(cand.node, cand.bounds, 0, visited, segments);
+            if (!segments.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                for (String seg : segments) {
+                    if (TextUtils.isEmpty(seg)) continue;
+                    if (sb.indexOf(seg) >= 0) continue;
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(seg);
+                }
+                String combined = sb.toString().trim();
+                if (isMeaningfulUserText(combined)) {
+                    return combined;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void collectSubtreeTextsInBounds(Object node, Rect rowBounds, int depth,
+                                                    int[] visited, List<String> out) {
+        if (node == null || depth > 24 || visited[0] > 128) return;
+        visited[0]++;
+        Rect nb = getComposeNodeBounds(node);
+        if (nb != null && rowBounds != null && !Rect.intersects(nb, rowBounds)) {
+            return;
+        }
+        Object config = getComposeConfig(node);
+        String[] textOut = new String[1];
+        boolean[] imgOut = new boolean[1];
+        extractFromSemanticsConfig(config, textOut, imgOut);
+        String attached = extractTextFromLayoutNodeAttached(node, config);
+        String nodeText = pickLongerText(textOut[0], attached);
+        if (!TextUtils.isEmpty(nodeText) && isMeaningfulUserText(nodeText)) {
+            out.add(nodeText);
+        }
+        List<Object> children = getComposeChildren(node);
+        if (children != null) {
+            for (Object child : children) {
+                collectSubtreeTextsInBounds(child, rowBounds, depth + 1, visited, out);
+            }
+        }
     }
 
     private static String getSemanticsKeyName(Object key) {
@@ -2854,17 +3941,28 @@ public final class Bridge {
 
     private static String parseComposeTextValue(Object value) {
         if (value == null) return null;
-        if (value.getClass().getName().contains("AccessibilityAction") || value.toString().startsWith("AccessibilityAction(")) return null;
+        String className = value.getClass().getName();
+        if (className.contains("AccessibilityAction")) return null;
         if (value instanceof List) {
-            String longest = null;
-            for (Object item : (List<?>) value) {
-                String s = parseComposeTextValue(item);
-                longest = pickLongerText(longest, s);
+            List<?> list = (List<?>) value;
+            if (list.isEmpty()) return null;
+            if (list.size() == 1) {
+                return parseComposeTextValue(list.get(0));
             }
-            return longest;
+            StringBuilder sb = new StringBuilder();
+            for (Object item : list) {
+                String s = parseComposeTextValue(item);
+                if (!TextUtils.isEmpty(s)) {
+                    if (sb.indexOf(s) >= 0) continue;
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(s);
+                }
+            }
+            return sb.length() > 0 ? sb.toString().trim() : null;
         }
         if (value instanceof CharSequence) {
-            return value.toString().trim();
+            String s = value.toString().trim();
+            return s.startsWith("AccessibilityAction(") ? null : s;
         }
         try {
             Method m = value.getClass().getMethod("getText");
@@ -2877,7 +3975,8 @@ public final class Bridge {
         }
         try {
             for (Field f : value.getClass().getDeclaredFields()) {
-                if (CharSequence.class.isAssignableFrom(f.getType())) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())
+                        && CharSequence.class.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
                     Object val = f.get(value);
                     if (val instanceof CharSequence && !TextUtils.isEmpty((CharSequence) val)) {
@@ -2887,7 +3986,7 @@ public final class Bridge {
             }
         } catch (Throwable ignored) {
         }
-        return value.toString().trim();
+        return null;
     }
 
     private static String pickLongerText(String a, String b) {
@@ -2899,11 +3998,15 @@ public final class Bridge {
     private static ComposeSemanticsMatch pickBestComposeMatch(List<ComposeSemanticsMatch> candidates,
                                                              int viewWidth, int viewHeight) {
         if (candidates == null || candidates.isEmpty()) return null;
-        // Priority 1: Pick candidates with real meaningful text (prefer deepest / most specific)
+        // Priority 1: Pick candidates with real meaningful text (strictly prefer exactHit over slop hit, then deepest / smallest)
         ComposeSemanticsMatch bestText = null;
         for (ComposeSemanticsMatch m : candidates) {
             if (m.hasText && isMeaningfulUserText(m.text)) {
-                if (bestText == null || m.depth > bestText.depth
+                if (bestText == null) {
+                    bestText = m;
+                } else if (m.exactHit != bestText.exactHit) {
+                    if (m.exactHit) bestText = m;
+                } else if (m.depth > bestText.depth
                         || (m.depth == bestText.depth && m.area < bestText.area)) {
                     bestText = m;
                 }
@@ -2912,7 +4015,13 @@ public final class Bridge {
         if (bestText != null) {
             return bestText;
         }
-        // Priority 2: Image-like candidates
+        // Priority 2: Image-like candidates (prefer exactHit first)
+        for (int i = candidates.size() - 1; i >= 0; i--) {
+            ComposeSemanticsMatch m = candidates.get(i);
+            if (m.isImageLike && m.exactHit) {
+                return m;
+            }
+        }
         for (int i = candidates.size() - 1; i >= 0; i--) {
             ComposeSemanticsMatch m = candidates.get(i);
             if (m.isImageLike) {
@@ -2939,16 +4048,18 @@ public final class Bridge {
         final boolean hasText;
         final boolean isImageLike;
         final boolean isLink;
+        final boolean exactHit;
         final int area;
         final Object node;
 
-        ComposeSemanticsMatch(Rect bounds, int depth, String text, boolean isImageLike, boolean isLink, Object node) {
+        ComposeSemanticsMatch(Rect bounds, int depth, String text, boolean isImageLike, boolean isLink, boolean exactHit, Object node) {
             this.bounds = bounds;
             this.depth = depth;
             this.text = text;
             this.hasText = !TextUtils.isEmpty(text);
             this.isImageLike = isImageLike;
             this.isLink = isLink;
+            this.exactHit = exactHit;
             this.area = bounds != null ? Math.max(0, bounds.width()) * Math.max(0, bounds.height()) : 0;
             this.node = node;
         }
@@ -3016,9 +4127,10 @@ public final class Bridge {
         if (source == null || source.isRecycled()) {
             return null;
         }
-        if (source.getConfig() == Bitmap.Config.HARDWARE) {
+        Bitmap.Config cfg = source.getConfig();
+        if (cfg == Bitmap.Config.HARDWARE || cfg == Bitmap.Config.RGBA_F16) {
             Bitmap software = toSoftwareBitmap(source);
-            if (software == null || software.getConfig() == Bitmap.Config.HARDWARE) {
+            if (software == null || software.getConfig() == Bitmap.Config.HARDWARE || software.getConfig() == Bitmap.Config.RGBA_F16) {
                 return null;
             }
             source = software;
@@ -3055,12 +4167,18 @@ public final class Bridge {
         try {
             Context ctx = currentContext();
             ensureConfig(ctx);
-            if (!sMasterSwitch || isBlacklisted(ctx)) {
-                Log.d(TAG, "deliverContent ignored (disabled or blacklisted)");
+            if (!sMasterSwitch || isBlacklisted(ctx) || (!sLandscapeTrigger && isLandscape(ctx))) {
+                Log.d(TAG, "deliverContent ignored (disabled, blacklisted, or landscape)");
                 return;
             }
             if (content == null || sGestureState.get() == STATE_DRAGGING) {
                 Log.d(TAG, "deliverContent ignored (custom engine already dragging)");
+                return;
+            }
+            long elapsed = SystemClock.uptimeMillis() - sDownAt;
+            if (sDownAt > 0 && elapsed < (sLongPressDurationMs - 100)) {
+                Log.w(TAG, "deliverContent arrived too early (" + elapsed + "ms < " + sLongPressDurationMs
+                        + "ms), ignoring premature AES delivery");
                 return;
             }
             Object resultMap = getField(content, "mResultMap");
@@ -3139,12 +4257,21 @@ public final class Bridge {
         String name = payload.getString("fileName");
         String mime = payload.getString("mimeType");
         String suffix = ".bin";
-        if (mime != null && mime.contains("png")) {
+        String lowerMime = mime == null ? "" : mime.toLowerCase(Locale.US);
+        if (lowerMime.contains("png")) {
             suffix = ".png";
-        } else if (mime != null && mime.contains("webp")) {
+        } else if (lowerMime.contains("webp")) {
             suffix = ".webp";
-        } else if (mime != null && (mime.contains("jpeg") || mime.contains("jpg"))) {
+        } else if (lowerMime.contains("jpeg") || lowerMime.contains("jpg")) {
             suffix = ".jpg";
+        } else if (lowerMime.contains("gif")) {
+            suffix = ".gif";
+        } else if (lowerMime.contains("bmp")) {
+            suffix = ".bmp";
+        } else if (lowerMime.contains("heic")) {
+            suffix = ".heic";
+        } else if (lowerMime.contains("heif")) {
+            suffix = ".heif";
         } else if (name != null && name.contains(".")) {
             suffix = name.substring(name.lastIndexOf('.'));
         }
@@ -3166,16 +4293,141 @@ public final class Bridge {
                 total += count;
                 if (total > 128L * 1024 * 1024) {
                     Log.w(TAG, "copyPfdToPortal too large, aborting");
+                    context.getContentResolver().delete(target, null, null);
                     return null;
                 }
             }
             output.flush();
+            if (total <= 0) {
+                Log.w(TAG, "copyPfdToPortal read 0 bytes, deleting empty target and falling back");
+                context.getContentResolver().delete(target, null, null);
+                return null;
+            }
             Log.i(TAG, "copyPfdToPortal " + name + " " + total + " bytes");
             return name;
         } catch (Throwable throwable) {
             Log.w(TAG, "copyPfdToPortal failed", throwable);
+            try {
+                context.getContentResolver().delete(target, null, null);
+            } catch (Throwable ignored) {
+            }
             return null;
         }
+    }
+
+    private static String copyBitmapToPortal(Context context, Bitmap bitmap) {
+        if (context == null || bitmap == null) return null;
+        boolean hasAlpha = bitmap.hasAlpha();
+        String ext = hasAlpha ? ".png" : ".jpg";
+        String name = "drag_" + SystemClock.uptimeMillis() + ext;
+        Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+        try (OutputStream output = context.getContentResolver().openOutputStream(target, "w")) {
+            if (output == null) return null;
+            if (hasAlpha) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
+            } else {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output);
+            }
+            output.flush();
+            Log.i(TAG, "copyBitmapToPortal " + name + " " + bitmap.getWidth() + "x" + bitmap.getHeight());
+            return name;
+        } catch (Throwable t) {
+            Log.w(TAG, "copyBitmapToPortal failed", t);
+            return null;
+        }
+    }
+
+    /**
+     * Fallback for HyperOS AutoStart rejection: QQ may not be allowed to start
+     * HyperPortal's ContentProvider, so write a media item through MediaStore instead.
+     * The returned content://media URI is readable by the normal system share/drag path.
+     */
+    private static Uri insertBitmapToMediaStore(Context context, Bitmap bitmap) {
+        if (context == null || bitmap == null) {
+            return null;
+        }
+        Uri uri = null;
+        try {
+            ContentResolver resolver = context.getContentResolver();
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME,
+                    "dragshare_" + SystemClock.uptimeMillis() + ".png");
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+            if (Build.VERSION.SDK_INT >= 29) {
+                values.put(MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/HyperPortal");
+                values.put(MediaStore.Images.Media.IS_PENDING, 1);
+            }
+            uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                return null;
+            }
+            try (OutputStream output = resolver.openOutputStream(uri)) {
+                if (output == null || !bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    throw new IllegalStateException("MediaStore PNG compression failed");
+                }
+                output.flush();
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues done = new ContentValues();
+                done.put(MediaStore.Images.Media.IS_PENDING, 0);
+                resolver.update(uri, done, null, null);
+            }
+            try {
+                context.grantUriPermission(
+                        PORTAL_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Throwable throwable) {
+                Log.w(TAG, "grant MediaStore uri to portal failed", throwable);
+            }
+            Log.i(TAG, "insertBitmapToMediaStore " + uri);
+            return uri;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "insertBitmapToMediaStore failed", throwable);
+            if (uri != null) {
+                try {
+                    context.getContentResolver().delete(uri, null, null);
+                } catch (Throwable ignored) {
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * The staged file is the source of truth. Source MIME values such as image/gif
+     * must not be reused when the bitmap fallback actually produced a PNG.
+     */
+    private static String mimeForStagedFile(String name, String fallback) {
+        if (name != null) {
+            String lower = name.toLowerCase(Locale.US);
+            if (lower.endsWith(".png")) return "image/png";
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+            if (lower.endsWith(".webp")) return "image/webp";
+            if (lower.endsWith(".gif")) return "image/gif";
+            if (lower.endsWith(".bmp")) return "image/bmp";
+            if (lower.endsWith(".heic")) return "image/heic";
+            if (lower.endsWith(".heif")) return "image/heif";
+        }
+        if (TextUtils.isEmpty(fallback)) {
+            return null;
+        }
+        if ("application/octet-stream".equalsIgnoreCase(fallback)) {
+            return "image/png";
+        }
+        return fallback;
+    }
+
+    private static String mimeForUri(Uri uri, String fallback) {
+        if (uri != null) {
+            String name = uri.getLastPathSegment();
+            if (!TextUtils.isEmpty(name)) {
+                String fromName = mimeForStagedFile(name, null);
+                if (!TextUtils.isEmpty(fromName)) {
+                    return fromName;
+                }
+            }
+        }
+        return mimeForStagedFile(null, fallback);
     }
 
     private static final class PfdBytes {
@@ -3273,6 +4525,33 @@ public final class Bridge {
         return null;
     }
 
+    public static int getPhysicalScreenHeight(Context context) {
+        if (context != null) {
+            try {
+                WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowMetrics metrics = wm.getMaximumWindowMetrics();
+                        int h = metrics.getBounds().height();
+                        if (h > 0) return h;
+                    }
+                    Display display = wm.getDefaultDisplay();
+                    if (display != null) {
+                        DisplayMetrics dm = new DisplayMetrics();
+                        display.getRealMetrics(dm);
+                        if (dm.heightPixels > 0) return dm.heightPixels;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            return Resources.getSystem().getDisplayMetrics().heightPixels;
+        } catch (Throwable ignored) {
+            return 2656;
+        }
+    }
+
     private static void forwardToPortal(Bundle payload, Object content) {
         Context context = currentContext();
         if (context == null) {
@@ -3304,46 +4583,100 @@ public final class Bridge {
             }
         }
         String imageCacheName = null;
-        int previewHeight = dp(context, 76);
+        int previewHeight;
         int previewWidth;
+        float density = context.getResources().getDisplayMetrics().density;
+        int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getPhysicalScreenHeight(context);
         if (bitmap instanceof Bitmap) {
-            // ColorOS image preview is a 76dp square; text preview keeps the
-            // source width until it reaches the bottom hot zone.
-            previewWidth = dp(context, 76);
+            Bitmap bm = (Bitmap) bitmap;
+            float area = (float) bm.getWidth() * (float) bm.getHeight();
+            float scale = PreviewShadow.getImageScale(area, density);
+            previewWidth = Math.max(1, Math.round(bm.getWidth() * scale));
+            previewHeight = Math.max(1, Math.round(bm.getHeight() * scale));
+        } else if (!TextUtils.isEmpty(text)) {
+            TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+            tp.setTextSize(12.27f * density);
+            float textMeasuredWidth = tp.measureText(text);
+            int maxAllowedWidth = (int) (screenWidth * 0.8f);
+            int baseWidth = (int) textMeasuredWidth;
+            if (sLastTouchView != null && sLastTouchView.getWidth() > 0) {
+                baseWidth = Math.min(baseWidth, sLastTouchView.getWidth());
+            }
+            int contentW = Math.min((int) (baseWidth * 1.05f), maxAllowedWidth);
+            previewWidth = Math.min(contentW + Math.round(24f * density), screenWidth);
+            previewHeight = Math.min(Math.round(120f * density), (int) (screenHeight * 0.8f));
         } else {
-            int maxWidth = dp(context, 150);
-            int viewWidth = sLastTouchView != null ? sLastTouchView.getWidth() : 0;
-            previewWidth = viewWidth > 0
-                    ? Math.min(Math.max(viewWidth, dp(context, 76)), maxWidth)
-                    : maxWidth;
-            int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
-            previewWidth = Math.min(previewWidth, screenWidth - dp(context, 32));
+            previewWidth = Math.round(120f * density);
+            previewHeight = Math.round(68f * density);
         }
         intent.putExtra("previewWidth", previewWidth);
         intent.putExtra("previewHeight", previewHeight);
-        if (filePfd instanceof ParcelFileDescriptor) {
-            imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
-        }
+        Uri imageContentUri = null;
+        String imageMimeType = payload.getString("mimeType");
+        String lowerSourceMime = imageMimeType == null
+                ? "" : imageMimeType.toLowerCase(Locale.US);
+        String sourceName = payload.getString("fileName");
+        boolean sourceIsGif = lowerSourceMime.contains("gif")
+                || (sourceName != null
+                && sourceName.toLowerCase(Locale.US).endsWith(".gif"));
+
         Bitmap dragBitmap = null;
         if (bitmap instanceof Bitmap) {
             dragBitmap = toSoftwareBitmap((Bitmap) bitmap);
         }
+
+        // Animated GIFs are intentionally reduced to their first frame (PNG) because
+        // the current extraction path exposes a static bitmap. Keep the original file
+        // only when there is no bitmap to convert.
+        boolean preferPngForGif = sourceIsGif && dragBitmap != null;
+        if (filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
+            imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+        }
+        if (imageCacheName == null && dragBitmap != null) {
+            // Stage full-resolution bitmap into PortalFileProvider as lossless PNG
+            imageCacheName = copyBitmapToPortal(context, dragBitmap);
+            imageMimeType = "image/png";
+        }
+        if (imageCacheName == null && filePfd instanceof ParcelFileDescriptor) {
+            // Staging a bitmap failed; preserve the original file rather than dropping it.
+            imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+        }
+        Uri mediaUri = null;
+        if (imageCacheName == null && dragBitmap != null) {
+            // HyperOS AutoStart may reject a ContentProvider start from QQ. Fall
+            // back to a MediaStore item owned by QQ, which needs no provider start.
+            mediaUri = insertBitmapToMediaStore(context, dragBitmap);
+        }
+        if (imageCacheName != null) {
+            imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(imageCacheName));
+            intent.putExtra("imageCacheName", imageCacheName);
+            intent.putExtra("imageUri", imageContentUri.toString());
+            intent.putExtra("imageFileName", payload.getString("fileName", imageCacheName));
+            // The staged file extension is authoritative: a bitmap fallback is always
+            // .png even when the source was image/gif, and a .bin file must never be
+            // advertised as image/*.
+            String normalizedMime = mimeForStagedFile(imageCacheName, imageMimeType);
+            imageMimeType = TextUtils.isEmpty(normalizedMime) ? "image/png" : normalizedMime;
+            intent.putExtra("imageMimeType", imageMimeType);
+            Log.i(TAG, "staged image name=" + imageCacheName
+                    + " mime=" + imageMimeType
+                    + " sourceMime=" + lowerSourceMime
+                    + " bitmap=" + describeBitmap(payload));
+        } else if (mediaUri != null) {
+            imageContentUri = mediaUri;
+            imageMimeType = "image/png";
+            intent.putExtra("imageUri", mediaUri.toString());
+            intent.putExtra("imageFileName", "dragshare_" + SystemClock.uptimeMillis() + ".png");
+            intent.putExtra("imageMimeType", imageMimeType);
+            Log.i(TAG, "staged image fallback MediaStore uri=" + mediaUri);
+        }
         if (dragBitmap != null) {
-            // With the original file staged in the portal cache we only need a
-            // tiny drag preview. Without a file, use the normal 360px bitmap.
-            Bitmap preview = scaleDown(dragBitmap, imageCacheName != null ? 128 : 360);
+            // Preview thumbnail for UI and drag shadow (small so Intent parcel doesn't exceed 1MB)
+            Bitmap preview = scaleDown(dragBitmap, 360);
             if (preview != null) {
                 intent.putExtra("viewBitmap", preview);
             }
-        }
-        if (imageCacheName != null) {
-            intent.putExtra("imageCacheName", imageCacheName);
-            intent.putExtra("imageFileName", payload.getString("fileName"));
-            String mime = payload.getString("mimeType");
-            if (TextUtils.isEmpty(mime)) {
-                mime = URLConnection.guessContentTypeFromName(imageCacheName);
-            }
-            intent.putExtra("imageMimeType", TextUtils.isEmpty(mime) ? "image/*" : mime);
         }
         intent.putExtra("catchType", payload.getInt("catchType", 0));
         if (source != null) {
@@ -3353,8 +4686,9 @@ public final class Bridge {
                 + " bitmap=" + describeBitmap(payload)
                 + " file=" + (filePfd == null ? "null" : payload.getString("fileName"))
                 + " cache=" + imageCacheName
+                + " uri=" + imageContentUri
                 + " source=" + source);
-        boolean dragStarted = startSystemDrag(text, dragBitmap);
+        boolean dragStarted = startSystemDrag(context, text, dragBitmap, imageContentUri, imageMimeType);
         intent.putExtra("dragActive", dragStarted);
         try {
             // The target app is foreground during long-press, so a plain
@@ -3377,23 +4711,18 @@ public final class Bridge {
             if (!started) {
                 try {
                     Intent broadcast = new Intent("com.github.leaf.hyperportal.SHOW");
-                    broadcast.setPackage(PORTAL_PACKAGE);
                     broadcast.putExtras(intent);
-                    context.sendBroadcast(broadcast);
+                    Intent appBrd = new Intent(broadcast);
+                    appBrd.setPackage(PORTAL_PACKAGE);
+                    context.sendBroadcast(appBrd);
+                    Intent sysUiBrd = new Intent(broadcast);
+                    sysUiBrd.setPackage("com.android.systemui");
+                    sysUiBrd.removeExtra("viewBitmap");
+                    context.sendBroadcast(sysUiBrd);
                     started = true;
                     Log.i(TAG, "forward fallback broadcast sent");
                 } catch (Throwable third) {
                     Log.w(TAG, "forward fallback broadcast failed", third);
-                }
-            }
-            if (!started) {
-                try {
-                    Intent activity = new Intent(intent);
-                    activity.setClassName(PORTAL_PACKAGE, PORTAL_PACKAGE + ".MainActivity");
-                    activity.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    context.startActivity(activity);
-                } catch (Throwable fourth) {
-                    Log.w(TAG, "forward fallback activity failed", fourth);
                 }
             }
         }
@@ -3403,14 +4732,16 @@ public final class Bridge {
         // portal always gets a visible card.
         try {
             Intent mirror = new Intent("com.github.leaf.hyperportal.SHOW");
-            mirror.setPackage(PORTAL_PACKAGE);
             mirror.putExtras(intent);
-            // Keep imageBytes in the mirror: if HyperOS dropped the direct
-            // startForegroundService, this broadcast is the only path that can
-            // still deliver the original image. PFDs cannot cross a broadcast.
             mirror.removeExtra("filePfd");
             mirror.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            context.sendBroadcast(mirror);
+            Intent appMirror = new Intent(mirror);
+            appMirror.setPackage(PORTAL_PACKAGE);
+            context.sendBroadcast(appMirror);
+            Intent sysUiMirror = new Intent(mirror);
+            sysUiMirror.setPackage("com.android.systemui");
+            sysUiMirror.removeExtra("viewBitmap");
+            context.sendBroadcast(sysUiMirror);
             Log.i(TAG, "forward receiver mirror sent");
         } catch (Throwable throwable) {
             Log.w(TAG, "forward receiver mirror failed", throwable);
@@ -3422,35 +4753,151 @@ public final class Bridge {
      * follows the same finger without lifting, which is exactly ColorOS's
      * "long press and drag in one gesture" behaviour.
      */
+    private static void cancelShadowMorphAnimator() {
+        ValueAnimator anim = sShadowMorphAnimator;
+        sShadowMorphAnimator = null;
+        if (anim != null) {
+            try {
+                anim.cancel();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void animateShadowMorph(View view, boolean toSquare) {
+        cancelShadowMorphAnimator();
+        float start = sShadowMorphProgress;
+        float target = toSquare ? 1.0f : 0.0f;
+        if (Math.abs(start - target) < 0.001f) {
+            return;
+        }
+        sActiveShadowSquare = toSquare;
+        ValueAnimator anim = ValueAnimator.ofFloat(start, target);
+        anim.setDuration(180);
+        anim.setInterpolator(new DecelerateInterpolator());
+        final long[] lastFrame = new long[]{0};
+        anim.addUpdateListener(animation -> {
+            long now = SystemClock.uptimeMillis();
+            float val = (Float) animation.getAnimatedValue();
+            sShadowMorphProgress = val;
+            if (now - lastFrame[0] < 14 && val < 0.99f && val > 0.01f) {
+                return;
+            }
+            lastFrame[0] = now;
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 24 && view != null && view.isAttachedToWindow()) {
+                    view.updateDragShadow(new PreviewShadow(sActiveDragText,
+                            sActiveDragBitmap, sActiveDragDensity, sActiveDragSourceWidth,
+                            sActiveDragScreenWidth, sActiveDragScreenHeight, sShadowMorphProgress));
+                }
+            } catch (Throwable ignored) {
+            }
+        });
+        anim.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (sShadowMorphAnimator == animation) {
+                    sShadowMorphAnimator = null;
+                    sShadowMorphProgress = target;
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= 24 && view != null && view.isAttachedToWindow()) {
+                            view.updateDragShadow(new PreviewShadow(sActiveDragText,
+                                    sActiveDragBitmap, sActiveDragDensity, sActiveDragSourceWidth,
+                                    sActiveDragScreenWidth, sActiveDragScreenHeight, target));
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        });
+        sShadowMorphAnimator = anim;
+        anim.start();
+    }
+
     private static void updateSystemShadow(boolean square) {
         View view = sActiveDragView;
         if (view == null || !view.isAttachedToWindow() || sActiveShadowSquare == square) {
             return;
         }
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= 24) {
-                view.updateDragShadow(new PreviewShadow(sActiveDragText,
-                        sActiveDragBitmap, sActiveDragDensity, square, sActiveDragSourceWidth));
-                sActiveShadowSquare = square;
-                Log.i(TAG, "shadow morph square=" + square);
-            }
-        } catch (Throwable throwable) {
-            Log.w(TAG, "updateDragShadow failed", throwable);
+        sActiveShadowSquare = square;
+        Log.i(TAG, "shadow update called square=" + square);
+        Runnable action = () -> animateShadowMorph(view, square);
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            sMainHandler.post(action);
+        } else {
+            action.run();
         }
     }
 
+    private static int sLastNotifiedState = -1;
+    private static float sLastNotifiedY = -1f;
+    private static long sLastNotifyTime = 0;
+
+    private static void notifyPortalDragState(Context context, int state, float x, float y) {
+        if (context == null) return;
+        long now = SystemClock.uptimeMillis();
+        if (state != 0) {
+            if (state == 2 && sLastNotifiedState == 2) {
+                return;
+            }
+            if (state == 1 && sLastNotifiedState == 1) {
+                if (now - sLastNotifyTime < 50 || Math.abs(y - sLastNotifiedY) < 15f) {
+                    return;
+                }
+            }
+        }
+        sLastNotifiedState = state;
+        sLastNotifiedY = y;
+        sLastNotifyTime = now;
+        try {
+            Intent intent = new Intent("com.github.leaf.hyperportal.ACTION_DRAG_STATE");
+            intent.putExtra("state", state);
+            intent.putExtra("x", x);
+            intent.putExtra("y", y);
+            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+
+            Intent appIntent = new Intent(intent);
+            appIntent.setPackage(PORTAL_PACKAGE);
+            context.sendBroadcast(appIntent);
+
+            Intent sysUiIntent = new Intent(intent);
+            sysUiIntent.setPackage("com.android.systemui");
+            context.sendBroadcast(sysUiIntent);
+
+            Log.i(TAG, "notified portal drag state=" + state + " x=" + x + " y=" + y);
+        } catch (Throwable t) {
+            Log.w(TAG, "notifyPortalDragState failed", t);
+        }
+    }
+
+    private static void notifyPortalDragState(Context context, int state, float y) {
+        notifyPortalDragState(context, state, -1f, y);
+    }
+
     private static boolean startSystemDrag(String text, Bitmap bitmap) {
+        return startSystemDrag(null, text, bitmap, null, null);
+    }
+
+    private static boolean startSystemDrag(Context context, String text, Bitmap bitmap,
+                                           Uri imageUri, String imageMime) {
         try {
             View view = sLastTouchView;
             if (view == null || !view.isAttachedToWindow()) {
                 Log.i(TAG, "system drag skipped: no attached view");
                 return false;
             }
-            if (SystemClock.uptimeMillis() - sLastTouchAt > 1500) {
+            if (context == null) {
+                context = view.getContext();
+            }
+            ensureConfig(context);
+            if (!sMasterSwitch || isBlacklisted(context) || (!sLandscapeTrigger && isLandscape(context))) {
+                return false;
+            }
+            if (SystemClock.uptimeMillis() - sLastTouchAt > Math.max(3000, sLongPressDurationMs + 2000)) {
                 Log.i(TAG, "system drag skipped: stale long press");
                 return false;
             }
-            if (TextUtils.isEmpty(text) && bitmap == null) {
+            if (TextUtils.isEmpty(text) && bitmap == null && imageUri == null) {
                 return false;
             }
             if (!sMovedSinceDown) {
@@ -3458,36 +4905,155 @@ public final class Bridge {
                 return false;
             }
             View target = view;
+            sGestureState.set(STATE_DRAGGING);
             cancelAppLongPress(target);
-            ClipDescription description = new ClipDescription("content",
-                    new String[]{"text/plain", "application/x-dragshare"});
-            ClipData clip = new ClipData(description,
-                    new ClipData.Item(TextUtils.isEmpty(text) ? "image" : text));
+
+            if (imageUri == null && bitmap != null && context != null) {
+                String name = copyBitmapToPortal(context, bitmap);
+                if (name != null) {
+                    imageUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                    imageMime = "image/png";
+                } else {
+                    Uri mediaUri = insertBitmapToMediaStore(context, bitmap);
+                    if (mediaUri != null) {
+                        imageUri = mediaUri;
+                        imageMime = "image/png";
+                    }
+                }
+            }
+
+            ClipData clip;
+            if (imageUri != null) {
+                if (context != null) {
+                    try {
+                        context.getContentResolver().call(
+                                Uri.parse("content://com.github.leaf.hyperportal.files"),
+                                "grantDragPermissions",
+                                imageUri.toString(),
+                                null
+                        );
+                    } catch (Throwable ignored) {
+                    }
+                }
+                String mime = mimeForUri(imageUri, imageMime);
+                if (TextUtils.isEmpty(mime)) {
+                    mime = "image/png";
+                }
+                // Keep image/* as the primary type for generic drag consumers; carry the
+                // exact MIME as the secondary type for decoders that need it.
+                ClipDescription description = new ClipDescription("image",
+                        new String[]{"image/*", mime, ClipDescription.MIMETYPE_TEXT_URILIST, "application/x-dragshare"});
+                ClipData.Item item = new ClipData.Item(imageUri.toString(), null, null, imageUri);
+                clip = new ClipData(description, item);
+                Log.i(TAG, "startSystemDrag: dragging image URI " + imageUri + " mime=" + mime);
+            } else {
+                ClipDescription description = new ClipDescription("content",
+                        new String[]{"text/plain", "application/x-dragshare"});
+                ClipData.Item item = new ClipData.Item(TextUtils.isEmpty(text) ? "" : text);
+                clip = new ClipData(description, item);
+                Log.i(TAG, "startSystemDrag: dragging text length=" + (text == null ? 0 : text.length()));
+            }
+
             DisplayMetrics metrics = view.getResources().getDisplayMetrics();
+            int screenW = metrics.widthPixels;
+            int screenH = getPhysicalScreenHeight(view.getContext());
             View.DragShadowBuilder shadow = new PreviewShadow(text, bitmap, metrics.density,
-                    false, target.getWidth());
+                    target.getWidth(), screenW, screenH);
             try {
                 View root = target.getRootView();
-                root.setOnDragListener((v, event) -> {
-                    if (event != null && event.getAction() == DragEvent.ACTION_DRAG_LOCATION) {
-                        int screenHeight = v.getResources().getDisplayMetrics().heightPixels;
-                        updateSystemShadow(event.getY() >= screenHeight * 0.82f);
+                root.setOnDragListener(new View.OnDragListener() {
+                    private float lastNotifiedMotionY = -1f;
+
+                    @Override
+                    public boolean onDrag(View v, DragEvent event) {
+                        if (event == null) return false;
+                        int action = event.getAction();
+                        if (action == DragEvent.ACTION_DRAG_STARTED) {
+                            sDragStartY = -1f;
+                            notifyPortalDragState(v.getContext(), 1, 0f);
+                            return true;
+                        }
+                        if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                            if (event.getX() == 0f && event.getY() == 0f) {
+                                return true;
+                            }
+                            int[] loc = new int[2];
+                            v.getLocationOnScreen(loc);
+                            float screenX = loc[0] + event.getX();
+                            float screenY = loc[1] + event.getY();
+                            if (sDragStartY < 0f) {
+                                sDragStartY = sDownRawY > 0 ? sDownRawY : screenY;
+                            }
+                            float enterFactor = sTriggerThreshold > 0f ? sTriggerThreshold : 0.76f;
+                            float exitFactor = Math.max(0.40f, enterFactor - 0.06f);
+                            int enterThreshold = (int) (screenH * enterFactor);
+                            int exitThreshold = (int) (screenH * exitFactor);
+                            boolean inHotZone;
+                            if (sDragStartY >= enterThreshold) {
+                                float downwardRequired = dp(v.getContext(), 35);
+                                if (sActiveShadowSquare) {
+                                    inHotZone = (screenY >= sDragStartY + dp(v.getContext(), 10)) && (screenY >= exitThreshold);
+                                } else {
+                                    inHotZone = (screenY >= sDragStartY + downwardRequired) && (screenY >= enterThreshold);
+                                }
+                            } else {
+                                inHotZone = sActiveShadowSquare
+                                        ? (screenY >= exitThreshold)
+                                        : (screenY >= enterThreshold);
+                            }
+                            if (inHotZone != sActiveShadowSquare) {
+                                Log.i(TAG, "onDrag hotZone=" + inHotZone + " screenY=" + screenY);
+                                updateSystemShadow(inHotZone);
+                                notifyPortalDragState(v.getContext(), inHotZone ? 2 : 1, screenX, screenY);
+                                lastNotifiedMotionY = screenY;
+                            } else if (!inHotZone && Math.abs(screenY - lastNotifiedMotionY) > 25.0f) {
+                                lastNotifiedMotionY = screenY;
+                                notifyPortalDragState(v.getContext(), 1, screenX, screenY);
+                            }
+                            return true;
+                        }
+                        if (action == DragEvent.ACTION_DROP) {
+                            sDragStartY = -1f;
+                            // Return false so WMS treats the drop as unhandled outside targets,
+                            // triggering WMS createCancelAnimationLocked to smoothly fly the
+                            // drag shadow back to its original text position!
+                            updateSystemShadow(false);
+                            return false;
+                        }
+                        if (action == DragEvent.ACTION_DRAG_ENDED) {
+                            sDragStartY = -1f;
+                            cancelShadowMorphAnimator();
+                            sShadowMorphProgress = 0f;
+                            sActiveShadowSquare = false;
+                            notifyPortalDragState(v.getContext(), 0, 0f);
+                            sActiveDragView = null;
+                            sActiveDragText = null;
+                            sActiveDragBitmap = null;
+                            sGestureState.set(STATE_IDLE);
+                            return true;
+                        }
+                        return false;
                     }
-                    return true;
                 });
             } catch (Throwable ignored) {
             }
-            // Task zoom / dim / bottom app bar are handled by the LSPosed
-            // system_server module. The app-process Bridge must not scale the
-            // DecorView; it only starts the system drag.
+            sActiveDragView = target;
+            sActiveDragText = text;
+            sActiveDragBitmap = bitmap;
+            sActiveDragDensity = metrics.density;
+            sActiveDragSourceWidth = target.getWidth();
+            sActiveDragScreenWidth = screenW;
+            sActiveDragScreenHeight = screenH;
+            sActiveShadowSquare = false;
+            sShadowMorphProgress = 0f;
+            cancelShadowMorphAnimator();
             boolean started = target.startDragAndDrop(clip, shadow, null,
                     View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ | View.DRAG_FLAG_GLOBAL_URI_WRITE);
-            if (started) {
-                sActiveDragView = target;
-                sActiveDragText = text;
-                sActiveDragBitmap = bitmap;
-                sActiveDragDensity = metrics.density;
-                sActiveShadowSquare = false;
+            if (!started) {
+                sActiveDragView = null;
+                sActiveDragText = null;
+                sActiveDragBitmap = null;
+                sGestureState.set(STATE_IDLE);
             }
             Log.i(TAG, "system drag started=" + started + " target=" + target.getClass().getName()
                     + " text=" + (text == null ? "null" : text.length()));
@@ -3576,32 +5142,103 @@ public final class Bridge {
         return false;
     }
 
-    private static View findDeepTouchView(View root, float rawX, float rawY) {
-        if (root == null || root.getVisibility() != View.VISIBLE) {
-            return null;
+    private static boolean isPassthroughOverlay(View v) {
+        if (v == null) return false;
+        String name = v.getClass().getName();
+        if (name.contains("CanvasProxyView")
+                || name.contains("Slidr")
+                || name.contains("SwipeBack")
+                || name.contains("SlideBack")
+                || name.contains("TouchProxy")
+                || name.contains("GestureOverlay")
+                || name.contains("TouchInterceptor")) {
+            return true;
         }
-        if (isComposeView(root) || isWebViewLike(root)) {
-            return root;
-        }
-        if (root instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) root;
-            for (int i = group.getChildCount() - 1; i >= 0; i--) {
-                View child = group.getChildAt(i);
-                if (child.getVisibility() != View.VISIBLE) {
-                    continue;
-                }
-                int[] location = new int[2];
-                child.getLocationOnScreen(location);
-                if (rawX >= location[0] && rawX <= location[0] + child.getWidth()
-                        && rawY >= location[1] && rawY <= location[1] + child.getHeight()) {
-                    View deep = findDeepTouchView(child, rawX, rawY);
-                    if (deep != null) {
-                        return deep;
-                    }
+        if (!(v instanceof ViewGroup) && !isComposeView(v) && !isWebViewLike(v)
+                && !(v instanceof TextView) && !(v instanceof ImageView) && !isTextLikeView(v)) {
+            Drawable bg = v.getBackground();
+            if (bg == null || bg.getOpacity() == PixelFormat.TRANSPARENT) {
+                if (!v.isClickable() && !v.isLongClickable()) {
+                    return true;
                 }
             }
         }
-        return root;
+        return false;
+    }
+
+    private static View findDeepTouchView(View root, float rawX, float rawY) {
+        return findDeepTouchView(root, rawX, rawY, false);
+    }
+
+    private static View findDeepTouchView(View root, float rawX, float rawY, boolean skipCompose) {
+        if (root == null || root.getVisibility() != View.VISIBLE) {
+            return null;
+        }
+        if (isPassthroughOverlay(root)) {
+            return null;
+        }
+        try {
+            if (isWebViewLike(root)) {
+                return root;
+            }
+            if (isComposeView(root)) {
+                if (root instanceof ViewGroup) {
+                    View deep = findDeepChildInGroup((ViewGroup) root, rawX, rawY, skipCompose);
+                    if (deep != null && deep != root && (!skipCompose || !isComposeView(deep))) {
+                        return deep;
+                    }
+                }
+                return skipCompose ? null : root;
+            }
+            if (root instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) root;
+                View deep = findDeepChildInGroup(group, rawX, rawY, skipCompose);
+                if (deep != null) {
+                    return deep;
+                }
+                if (skipCompose) {
+                    return null;
+                }
+            }
+            return root;
+        } catch (Throwable ignored) {
+            return root;
+        }
+    }
+
+    private static View findDeepChildInGroup(ViewGroup group, float rawX, float rawY, boolean skipCompose) {
+        int count = group.getChildCount();
+        int[] location = new int[2];
+        for (int i = count - 1; i >= 0; i--) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            if (isPassthroughOverlay(child)) {
+                continue;
+            }
+            if (skipCompose && isComposeView(child)) {
+                if (child instanceof ViewGroup && ((ViewGroup) child).getChildCount() > 0) {
+                    View deepChild = findDeepChildInGroup((ViewGroup) child, rawX, rawY, true);
+                    if (deepChild != null && !isComposeView(deepChild)) {
+                        return deepChild;
+                    }
+                }
+                continue;
+            }
+            child.getLocationOnScreen(location);
+            int left = location[0];
+            int top = location[1];
+            int right = left + child.getWidth();
+            int bottom = top + child.getHeight();
+            if (rawX >= left - 5 && rawX <= right + 5 && rawY >= top - 5 && rawY <= bottom + 5) {
+                View deep = findDeepTouchView(child, rawX, rawY, skipCompose);
+                if (deep != null) {
+                    return deep;
+                }
+            }
+        }
+        return null;
     }
 
     private static void cancelAppLongPress(View target) {
@@ -3699,7 +5336,7 @@ public final class Bridge {
             }
             Context context = decor.getContext();
             int screenWidth = decor.getResources().getDisplayMetrics().widthPixels;
-            int screenHeight = decor.getResources().getDisplayMetrics().heightPixels;
+            int screenHeight = getPhysicalScreenHeight(context);
             for (Object item : (List<?>) value) {
                 if (!(item instanceof View)) {
                     continue;
@@ -3752,7 +5389,7 @@ public final class Bridge {
     }
 
     private static void updateTiltFromDrag(View decor, float rawY) {
-        int screenHeight = decor.getResources().getDisplayMetrics().heightPixels;
+        int screenHeight = getPhysicalScreenHeight(decor.getContext());
         float start = screenHeight * 0.62f;
         float end = screenHeight * 0.92f;
         updateTiltProgress((rawY - start) / (end - start));
@@ -3767,10 +5404,25 @@ public final class Bridge {
                 case DragEvent.ACTION_DRAG_ENTERED: {
                     int[] decorLocation = new int[2];
                     decor.getLocationOnScreen(decorLocation);
-                    updateTiltFromDrag(decor, decorLocation[1] + event.getY());
+                    float currentY = decorLocation[1] + event.getY();
+                    updateTiltFromDrag(decor, currentY);
+                    int screenH = getPhysicalScreenHeight(decor.getContext());
+                    float density = decor.getResources().getDisplayMetrics().density;
+                    int enterThreshold = Math.min((int) (screenH * 0.82f),
+                            screenH - Math.round(160f * density));
+                    int exitThreshold = (int) (screenH * 0.77f);
+                    boolean inHotZone = sActiveShadowSquare
+                            ? (currentY >= exitThreshold)
+                            : (currentY >= enterThreshold);
+                    updateSystemShadow(inHotZone);
+                    return true;
+                }
+                case DragEvent.ACTION_DRAG_EXITED: {
+                    updateSystemShadow(false);
                     return true;
                 }
                 case DragEvent.ACTION_DROP: {
+                    updateSystemShadow(false);
                     String text = null;
                     ClipData clip = event.getClipData();
                     if (clip != null && clip.getItemCount() > 0) {
@@ -3788,6 +5440,7 @@ public final class Bridge {
                     return true;
                 }
                 case DragEvent.ACTION_DRAG_ENDED:
+                    updateSystemShadow(false);
                     hideTiltEffect();
                     return true;
                 default:
@@ -4017,116 +5670,217 @@ public final class Bridge {
         private final String text;
         private final Bitmap bitmap;
         private final float density;
-        private final boolean square;
-        private final int width;
-        private final int height;
+        private final int sourceWidth;
+        private final int screenWidth;
+        private final int screenHeight;
+        private final float morphProgress;
 
-        PreviewShadow(String text, Bitmap bitmap, float density, boolean square, int sourceWidth) {
+        private int width;
+        private int height;
+        private int touchX;
+        private int touchY;
+        private StaticLayout layout;
+
+        PreviewShadow(String text, Bitmap bitmap, float density, int sourceWidth, int screenWidth, int screenHeight) {
+            this(text, bitmap, density, sourceWidth, screenWidth, screenHeight, 0f);
+        }
+
+        PreviewShadow(String text, Bitmap bitmap, float density, int sourceWidth, int screenWidth, int screenHeight, boolean square) {
+            this(text, bitmap, density, sourceWidth, screenWidth, screenHeight, square ? 1f : 0f);
+        }
+
+        PreviewShadow(String text, Bitmap bitmap, float density, int sourceWidth, int screenWidth, int screenHeight, float morphProgress) {
             this.text = text;
             this.bitmap = bitmap;
-            this.density = density;
-            this.square = square;
-            // ColorOS DragViewHelper: text keeps the source view width and
-            // 76dp height; images keep their decoded bitmap dimensions. At
-            // the bottom hot zone both collapse to 76x76.
-            if (square) {
-                this.width = dp(76);
-                this.height = dp(76);
-            } else if (bitmap != null) {
-                this.width = bitmap.getWidth();
-                this.height = bitmap.getHeight();
-            } else {
-                this.width = sourceWidth > 0 ? sourceWidth : dp(260);
-                this.height = dp(76);
-            }
+            this.density = density > 0 ? density : 3.0f;
+            this.sourceWidth = sourceWidth;
+            this.screenWidth = screenWidth > 0 ? screenWidth : 1080;
+            this.screenHeight = screenHeight > 0 ? screenHeight : 2400;
+            this.morphProgress = Math.max(0f, Math.min(1f, morphProgress));
+
+            initMetrics();
         }
 
         private int dp(float value) {
             return Math.round(value * density);
         }
 
+        static float getImageScale(float areaPx, float density) {
+            float d2 = density * density;
+            if (areaPx <= 14400f * d2) {
+                return 1.10f;
+            } else if (areaPx <= 40000f * d2) {
+                return 0.85f;
+            } else if (areaPx <= 129600f * d2) {
+                return 0.60f;
+            } else if (areaPx <= 230400f * d2) {
+                return 0.40f;
+            } else {
+                return 0.30f;
+            }
+        }
+
+        private void initMetrics() {
+            if (bitmap != null) {
+                float areaPx = (float) bitmap.getWidth() * (float) bitmap.getHeight();
+                float scale = getImageScale(areaPx, density);
+                width = Math.max(dp(76), Math.round(bitmap.getWidth() * scale));
+                height = Math.max(dp(76), Math.round(bitmap.getHeight() * scale));
+                touchX = width / 2;
+                touchY = height / 2;
+                return;
+            }
+
+            if (!TextUtils.isEmpty(text)) {
+                TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+                float fontSize = 12.27f * density;
+                textPaint.setTextSize(fontSize);
+                textPaint.setColor(Color.BLACK);
+
+                float textMeasuredWidth = textPaint.measureText(text);
+                int maxAllowedWidth = (int) (screenWidth * 0.8f);
+                int baseWidth = (int) textMeasuredWidth;
+                if (sourceWidth > 0) {
+                    baseWidth = Math.min(baseWidth, sourceWidth);
+                }
+                baseWidth = Math.min(baseWidth, maxAllowedWidth);
+                int shadowContentWidth = Math.min((int) (baseWidth * 1.05f), maxAllowedWidth);
+                if (shadowContentWidth < dp(60)) {
+                    shadowContentWidth = Math.min(dp(220), maxAllowedWidth);
+                }
+
+                float lineHeight = 17.43f * density;
+                float lineSpacingMult = (lineHeight - 4f) / fontSize;
+                if (lineSpacingMult <= 0) {
+                    lineSpacingMult = 1.5f;
+                }
+
+                try {
+                    if (android.os.Build.VERSION.SDK_INT >= 23) {
+                        layout = StaticLayout.Builder.obtain(text, 0, text.length(), textPaint, shadowContentWidth)
+                                .setLineSpacing(0f, lineSpacingMult)
+                                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                                .build();
+                    } else {
+                        layout = new StaticLayout(text, textPaint, shadowContentWidth,
+                                Layout.Alignment.ALIGN_NORMAL, lineSpacingMult, 0f, true);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "StaticLayout creation failed", t);
+                }
+
+                int padding = dp(12);
+                int layoutH = layout != null ? layout.getHeight() : dp(40);
+                int maxAllowedHeight = (int) (screenHeight * 0.8f);
+
+                width = Math.max(dp(76), Math.min(shadowContentWidth + padding * 2, screenWidth));
+                height = Math.max(dp(76), Math.min(layoutH + padding * 2, maxAllowedHeight));
+
+                touchX = width / 2;
+                touchY = height / 2;
+                return;
+            }
+
+            width = dp(120);
+            height = dp(76);
+            touchX = width / 2;
+            touchY = height / 2;
+        }
+
         @Override
         public void onProvideShadowMetrics(Point outShadowSize, Point outShadowTouchPoint) {
             outShadowSize.set(width, height);
-            outShadowTouchPoint.set(width / 2, height / 2);
+            outShadowTouchPoint.set(touchX, touchY);
         }
 
         @Override
         public void onDrawShadow(Canvas canvas) {
+            canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+            float p = morphProgress;
+            int targetBox = dp(76);
+            float curW = width + (targetBox - width) * p;
+            float curH = height + (targetBox - height) * p;
+            float boxLeft = touchX - curW / 2f;
+            float boxTop = touchY - curH / 2f;
+            RectF boxRect = new RectF(boxLeft, boxTop, boxLeft + curW, boxTop + curH);
+            float radius = dp(12) + (dp(16) - dp(12)) * p;
+
             if (bitmap != null) {
-                float radius = dp(8);
                 Path clip = new Path();
-                clip.addRoundRect(new RectF(0, 0, width, height), radius, radius,
-                        Path.Direction.CW);
+                clip.addRoundRect(boxRect, radius, radius, Path.Direction.CW);
                 canvas.save();
                 canvas.clipPath(clip);
-                float scale = Math.max(width / (float) bitmap.getWidth(),
-                        height / (float) bitmap.getHeight());
-                int srcW = Math.min(bitmap.getWidth(), Math.round(width / scale));
-                int srcH = Math.min(bitmap.getHeight(), Math.round(height / scale));
-                int srcX = (bitmap.getWidth() - srcW) / 2;
-                int srcY = (bitmap.getHeight() - srcH) / 2;
-                canvas.drawBitmap(bitmap,
-                        new Rect(srcX, srcY, srcX + srcW, srcY + srcH),
-                        new Rect(0, 0, width, height),
-                        new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
+                float scale = Math.max(curW / bitmap.getWidth(), curH / bitmap.getHeight());
+                float dx = boxRect.left + (curW - bitmap.getWidth() * scale) * 0.5f;
+                float dy = boxRect.top + (curH - bitmap.getHeight() * scale) * 0.5f;
+                canvas.translate(dx, dy);
+                canvas.scale(scale, scale);
+                canvas.drawBitmap(bitmap, 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
                 canvas.restore();
                 return;
             }
 
             Paint background = new Paint(Paint.ANTI_ALIAS_FLAG);
             background.setColor(Color.WHITE);
-            float radius = dp(10);
-            canvas.drawRoundRect(0, 0, width, height, radius, radius, background);
+            canvas.drawRoundRect(boxRect, radius, radius, background);
 
-            if (TextUtils.isEmpty(text)) {
-                return;
-            }
-            Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            textPaint.setColor(Color.BLACK);
-            textPaint.setTextSize(dp(11));
-            String content = text.replace('\n', ' ');
-            if (content.length() > 40) {
-                content = content.substring(0, 40);
-            }
-            int pad = dp(6);
-            List<String> lines = wrapText(content, textPaint, width - 2 * pad, 4);
-            float lineHeight = dp(14);
-            float y = (height - lines.size() * lineHeight) / 2f + textPaint.getTextSize();
-            for (String line : lines) {
-                canvas.drawText(line, pad, y, textPaint);
-                y += lineHeight;
-            }
-        }
-    }
+            if (!TextUtils.isEmpty(text)) {
+                if (p <= 0.01f && layout != null) {
+                    int padding = dp(12);
+                    canvas.save();
+                    canvas.translate(padding, padding);
+                    layout.draw(canvas);
+                    canvas.restore();
+                    return;
+                }
+                float pad = dp(12) + (dp(6) - dp(12)) * p;
+                float fontSize = (12.27f + (11.0f - 12.27f) * p) * density;
+                float fullSpacing = ((17.43f * density) - 4f) / (12.27f * density);
+                if (fullSpacing <= 0f) fullSpacing = 1.1f;
+                float spacingMult = fullSpacing + (1.0f - fullSpacing) * p;
 
-    private static List<String> wrapText(String text, Paint paint, int maxWidth, int maxLines) {
-        List<String> lines = new ArrayList<>();
-        if (text == null) {
-            return lines;
+                TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+                tp.setTextSize(fontSize);
+                tp.setColor(Color.BLACK);
+
+                int innerW = Math.max(dp(36), Math.round(curW - pad * 2f));
+                int innerH = Math.max(dp(24), Math.round(curH - pad * 2f));
+                float lineH = Math.max(fontSize, fontSize * spacingMult);
+                int maxLines = Math.max(1, Math.round(innerH / lineH));
+                if (p >= 0.85f) {
+                    maxLines = Math.min(maxLines, 4);
+                }
+                String sub = text.length() > 300 ? text.substring(0, 300) : text;
+                StaticLayout dynLayout = null;
+                try {
+                    if (android.os.Build.VERSION.SDK_INT >= 23) {
+                        dynLayout = StaticLayout.Builder.obtain(sub, 0, sub.length(), tp, innerW)
+                                .setLineSpacing(0f, spacingMult)
+                                .setMaxLines(maxLines)
+                                .setEllipsize(TextUtils.TruncateAt.END)
+                                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                                .build();
+                    } else {
+                        dynLayout = new StaticLayout(sub, tp, innerW,
+                                Layout.Alignment.ALIGN_NORMAL, spacingMult, 0f, true);
+                    }
+                } catch (Throwable ignored) {
+                }
+
+                if (dynLayout != null) {
+                    Path clip = new Path();
+                    clip.addRoundRect(boxRect, radius, radius, Path.Direction.CW);
+                    canvas.save();
+                    canvas.clipPath(clip);
+                    float centeredTop = boxRect.top + (curH - dynLayout.getHeight()) / 2f;
+                    float normalTop = boxRect.top + pad;
+                    float drawTop = normalTop + (Math.max(boxRect.top + pad, centeredTop) - normalTop) * p;
+                    canvas.translate(boxRect.left + pad, drawTop);
+                    dynLayout.draw(canvas);
+                    canvas.restore();
+                }
+            }
         }
-        int start = 0;
-        while (start < text.length() && lines.size() < maxLines) {
-            int count = paint.breakText(text, start, text.length(), true, maxWidth, null);
-            if (count <= 0) {
-                break;
-            }
-            int end = start + count;
-            int space = text.lastIndexOf(' ', end);
-            if (space > start) {
-                end = space;
-            }
-            String line = text.substring(start, end).trim();
-            if (lines.size() == maxLines - 1 && end < text.length()) {
-                line = line + "…";
-            }
-            lines.add(line);
-            start = end;
-            while (start < text.length() && text.charAt(start) == ' ') {
-                start++;
-            }
-        }
-        return lines;
     }
 
     private static String tokenString(Object content) {
