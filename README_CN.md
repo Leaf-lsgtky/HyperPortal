@@ -1,6 +1,6 @@
 # HyperPortal (ohmyAES)
 
-> 将 ColorOS 15 流体云 / 内容传送门（DragShare）完整的交互体验与多模态流体动效，无缝带到小米 HyperOS（Android 14/15）！  
+> 将 ColorOS 17 内容传送门（DragShare）完整的交互体验与多模态流体动效，无缝带到小米 HyperOS 4（Android 17）！  
 > 包含系统级多模态内容识别、ColorOS 极光流光着色器、底部与右侧动态边栏、BigBang 大爆炸分词、以及基于 LSPosed 的底层 3D 空间倾斜动画。
 
 [English](README.md) | [简体中文](README_CN.md) | [开发者与 AI 维护指南 (AGENTS.md)](AGENTS.md)

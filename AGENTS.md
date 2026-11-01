@@ -7,7 +7,7 @@
 
 ## 1. Project Overview & Architectural Model
 
-`ohmyAES` ports the fluid, multimodal **ColorOS 15 Content Portal (DragShare / 流体云)** experience to **Xiaomi HyperOS (Android 14/15)**.
+`ohmyAES` (HyperPortal) ports the fluid, multimodal **ColorOS 17 Content Portal (DragShare / 内容传送门)** experience to **Xiaomi HyperOS 4 (Android 17)**.
 
 It uses a dual-engine architecture:
 ```

@@ -59,16 +59,31 @@ if ANDROID_SDK:
         for bt in bt_versions:
             if bt.is_dir():
                 d8_bat = bt / "d8.bat"
+                d8_sh = bt / "d8"
                 d8_jar = bt / "lib" / "d8.jar"
                 za = bt / "zipalign.exe" if os.name == "nt" else bt / "zipalign"
                 signer_bat = bt / "apksigner.bat"
+                signer_sh = bt / "apksigner"
                 signer_jar = bt / "lib" / "apksigner.jar"
 
-                if (d8_bat.is_file() or d8_jar.is_file()) and za.is_file() and (signer_bat.is_file() or signer_jar.is_file()):
+                has_d8 = d8_bat.is_file() or d8_sh.is_file() or d8_jar.is_file()
+                has_signer = signer_bat.is_file() or signer_sh.is_file() or signer_jar.is_file()
+
+                if has_d8 and za.is_file() and has_signer:
                     BUILD_TOOLS_DIR = bt
-                    D8_CMD = str(d8_bat) if d8_bat.is_file() else f'java -cp "{d8_jar}" com.android.tools.r8.D8'
+                    if os.name == "nt" and d8_bat.is_file():
+                        D8_CMD = str(d8_bat)
+                    elif os.name != "nt" and d8_sh.is_file():
+                        D8_CMD = str(d8_sh)
+                    else:
+                        D8_CMD = f'java -cp "{d8_jar}" com.android.tools.r8.D8'
                     ZIPALIGN_EXE = str(za)
-                    APKSIGNER_CMD = str(signer_bat) if signer_bat.is_file() else f'java -jar "{signer_jar}"'
+                    if os.name == "nt" and signer_bat.is_file():
+                        APKSIGNER_CMD = str(signer_bat)
+                    elif os.name != "nt" and signer_sh.is_file():
+                        APKSIGNER_CMD = str(signer_sh)
+                    else:
+                        APKSIGNER_CMD = f'java -jar "{signer_jar}"'
                     break
 
 # 4. Find Apktool

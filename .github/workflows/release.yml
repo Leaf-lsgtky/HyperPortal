@@ -1,0 +1,83 @@
+name: Release HyperPortal
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g. v0.0.1-alpha1)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android NDK and Tools
+        run: |
+          echo "y" | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/26.1.10909125" >> $GITHUB_ENV
+
+      - name: Download Apktool
+        run: |
+          mkdir -p tools/bin
+          curl -sL https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar -o tools/bin/apktool.jar
+
+      - name: Setup Release Keystore & Secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p .sign
+          echo "$KEYSTORE_B64" | base64 -d > .sign/my-release-key.jks
+          python3 -c "
+          import os
+          with open('.sign/qianming.txt', 'w', encoding='utf-8') as f:
+              f.write(f'ALIAS\n{os.environ[\"KEY_ALIAS\"]}\nKEY_PASSWORD\n{os.environ[\"KEY_PASSWORD\"]}\nKEYSTORE_PASSWORD\n{os.environ[\"KEYSTORE_PASSWORD\"]}\n')
+          "
+
+      - name: Grant Execute Permissions
+        run: chmod +x gradlew
+
+      - name: Build HyperPortal & AES Hook (R8 Enabled)
+        run: |
+          python3 tools/build.py all --r8
+
+      - name: Prepare Release Artifacts
+        run: |
+          cp dist/HyperPortal-r8.apk dist/HyperPortal.apk
+          cp dist/ContentCatcher-patched.apk dist/AES-patched.apk
+          ls -lh dist/
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          files: |
+            dist/HyperPortal.apk
+            dist/AES-patched.apk
+          name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

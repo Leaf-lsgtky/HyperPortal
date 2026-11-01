@@ -1,6 +1,6 @@
 # HyperPortal (ohmyAES)
 
-> Bringing the fluid, multimodal **ColorOS 15 Fluid Cloud / Content Portal (DragShare)** experience to **Xiaomi HyperOS (Android 14/15)**!  
+> Bringing the fluid, multimodal **ColorOS 17 Content Portal (DragShare)** experience to **Xiaomi HyperOS 4 (Android 17)**!  
 > Powered by system-level multimodal content extraction, ColorOS Aurora Glow AGSL shader, bottom & right-edge dynamic docks, BigBang text segmentation, and LSPosed `system_server` 3D perspective spatial tilt.
 
 [English](README.md) | [简体中文](README_CN.md) | [AI Agent & Contributor Guide (AGENTS.md)](AGENTS.md)
