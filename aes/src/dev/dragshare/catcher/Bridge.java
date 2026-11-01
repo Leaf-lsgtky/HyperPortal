@@ -78,6 +78,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -1631,14 +1632,19 @@ public final class Bridge {
             try {
                 View bubble = findWeChatBubbleView(view);
                 if (bubble == null) bubble = view;
+                Log.i(TAG, "extractWeChatFile: bubble view=" + bubble.getClass().getName()
+                        + " (" + bubble.getWidth() + "x" + bubble.getHeight() + ")");
                 Bitmap preview = viewToBitmap(bubble);
                 if (preview == null) {
                     preview = extractImageBitmap(bubble);
                 }
                 if (preview != null) {
+                    Log.i(TAG, "extractWeChatFile: bubble bitmap=" + preview.getWidth() + "x" + preview.getHeight());
                     bundle.putParcelable("viewBitmap", scaleDown(toSoftwareBitmap(preview), 720));
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                Log.w(TAG, "extractWeChatFile: snapshot bubble failed", t);
+            }
 
             return bundle;
         } catch (Throwable t) {
@@ -1846,57 +1852,148 @@ public final class Bridge {
         return null;
     }
 
+    private static boolean isLikelyUuidOrHash(String s) {
+        if (TextUtils.isEmpty(s)) return false;
+        int len = s.length();
+        if (len != 32 && len != 36) return false;
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '-') {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static File resolveWeChatRefFile(File f) {
+        if (f == null || !f.isFile()) return f;
+        long len = f.length();
+        // WeChat .ref pointers are 36 bytes (UUID) or 32 bytes (hash)
+        if (len >= 32 && len <= 40) {
+            try {
+                byte[] buf = new byte[(int) len];
+                try (FileInputStream in = new FileInputStream(f)) {
+                    int read = in.read(buf);
+                    if (read > 0) {
+                        String uuid = new String(buf, 0, read, StandardCharsets.UTF_8).trim();
+                        if (isLikelyUuidOrHash(uuid)) {
+                            File parent = f.getParentFile();
+                            if (parent != null) {
+                                // 1. Same dir .ref/d/<uuid> (e.g. attachment/.ref/d/<uuid>)
+                                File refD = new File(new File(parent, ".ref"), "d/" + uuid);
+                                if (refD.isFile() && refD.length() > 0) {
+                                    Log.i(TAG, "resolveWeChatRefFile: resolved " + f.getName()
+                                            + " -> " + refD.getAbsolutePath() + " (" + refD.length() + " bytes)");
+                                    return refD;
+                                }
+                                // 2. Account level sibling attachment/.ref/d/ or message/media/.ref/d/
+                                File accountDir = parent.getParentFile();
+                                if (accountDir != null) {
+                                    File attachRef = new File(accountDir, "attachment/.ref/d/" + uuid);
+                                    if (attachRef.isFile() && attachRef.length() > 0) {
+                                        Log.i(TAG, "resolveWeChatRefFile: resolved " + f.getName()
+                                                + " -> " + attachRef.getAbsolutePath() + " (" + attachRef.length() + " bytes)");
+                                        return attachRef;
+                                    }
+                                    File mediaRef = new File(accountDir, "message/media/.ref/d/" + uuid);
+                                    if (mediaRef.isFile() && mediaRef.length() > 0) {
+                                        Log.i(TAG, "resolveWeChatRefFile: resolved " + f.getName()
+                                                + " -> " + mediaRef.getAbsolutePath() + " (" + mediaRef.length() + " bytes)");
+                                        return mediaRef;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return f;
+    }
+
+    private static File resolveAndMatchCandidate(File f, long totalLen, String md5) {
+        if (f == null || !f.isFile() || f.length() <= 0) return null;
+        File real = resolveWeChatRefFile(f);
+        if (real == null || !real.isFile() || real.length() <= 0) return null;
+        if (totalLen > 0 && real.length() != totalLen) return null;
+        if (!TextUtils.isEmpty(md5) && totalLen > 0) {
+            String fMd5 = calculateFileMd5(real);
+            if (!TextUtils.isEmpty(fMd5) && !md5.equalsIgnoreCase(fMd5)) {
+                return null;
+            }
+        }
+        return real;
+    }
+
+    private static void collectCandidateFiles(File dir, int depth, int maxDepth, List<File> result, int maxTotal) {
+        if (dir == null || !dir.isDirectory() || result.size() >= maxTotal) return;
+        File[] entries = dir.listFiles();
+        if (entries == null) return;
+        for (File entry : entries) {
+            if (result.size() >= maxTotal) break;
+            if (entry.isFile()) {
+                if (entry.length() > 0) {
+                    result.add(entry);
+                }
+            } else if (entry.isDirectory() && depth < maxDepth) {
+                if (!".ref".equals(entry.getName())) {
+                    collectCandidateFiles(entry, depth + 1, maxDepth, result, maxTotal);
+                }
+            }
+        }
+    }
+
     private static File findWeChatPhysicalFile(Context ctx, String title, String ext, long totalLen, String md5) {
         List<File> searchDirs = collectWeChatSearchDirs(ctx);
         if (searchDirs.isEmpty()) {
             return null;
         }
 
-        // Fast path: Direct file check
+        // Fast path: Direct file check in all known search directories
         for (File dir : searchDirs) {
             if (!dir.isDirectory()) continue;
-            File direct = new File(dir, title);
-            if (isCandidateMatched(direct, totalLen, md5)) {
-                return direct;
-            }
-            File ref = new File(dir, title + "\u2316");
-            if (isCandidateMatched(ref, totalLen, md5)) {
-                return ref;
-            }
-            File pref1 = new File(dir, "1_" + title);
-            if (isCandidateMatched(pref1, totalLen, md5)) {
-                return pref1;
-            }
-            File pref2 = new File(dir, "2_" + title);
-            if (isCandidateMatched(pref2, totalLen, md5)) {
-                return pref2;
-            }
+            File direct = resolveAndMatchCandidate(new File(dir, title), totalLen, md5);
+            if (direct != null) return direct;
+
+            File ref = resolveAndMatchCandidate(new File(dir, title + "\u2316"), totalLen, md5);
+            if (ref != null) return ref;
+
+            File pref1 = resolveAndMatchCandidate(new File(dir, "1_" + title), totalLen, md5);
+            if (pref1 != null) return pref1;
+
+            File pref2 = resolveAndMatchCandidate(new File(dir, "2_" + title), totalLen, md5);
+            if (pref2 != null) return pref2;
         }
 
-        // BFS / Directory scan with scoring
+        // Directory scan with candidate collection
         File bestFile = null;
         int bestScore = -1;
 
+        List<File> candidates = new ArrayList<>();
         for (File dir : searchDirs) {
             if (!dir.isDirectory()) continue;
-            File[] files = dir.listFiles();
-            if (files == null) continue;
-            for (File f : files) {
-                if (!f.isFile() || f.length() <= 0) continue;
-                String name = f.getName();
-                String cleanName = name.endsWith("\u2316") ? name.substring(0, name.length() - 1) : name;
-                if (!TextUtils.isEmpty(title) && cleanName.equalsIgnoreCase(title)) {
-                    if (totalLen <= 0 || f.length() == totalLen) {
-                        return f;
-                    }
+            int maxDepth = (dir.getAbsolutePath().contains("opendata") || dir.getAbsolutePath().contains("appmsg")) ? 3 : 1;
+            collectCandidateFiles(dir, 0, maxDepth, candidates, 800);
+            if (candidates.size() >= 800) break;
+        }
+
+        for (File f : candidates) {
+            File real = resolveWeChatRefFile(f);
+            if (real == null || !real.isFile() || real.length() <= 0) continue;
+            String name = f.getName();
+            String cleanName = name.endsWith("\u2316") ? name.substring(0, name.length() - 1) : name;
+            if (!TextUtils.isEmpty(title) && cleanName.equalsIgnoreCase(title)) {
+                if (totalLen <= 0 || real.length() == totalLen) {
+                    return real;
                 }
-                int score = scoreWeChatCandidate(f, title, ext, totalLen, md5);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestFile = f;
-                    if (score >= 120) {
-                        return bestFile;
-                    }
+            }
+            int score = scoreWeChatCandidate(real, title, ext, totalLen, md5);
+            if (score > bestScore) {
+                bestScore = score;
+                bestFile = real;
+                if (score >= 120) {
+                    return bestFile;
                 }
             }
         }
@@ -1905,12 +2002,6 @@ public final class Bridge {
             return bestFile;
         }
         return null;
-    }
-
-    private static boolean isCandidateMatched(File f, long totalLen, String md5) {
-        if (f == null || !f.isFile() || f.length() <= 0) return false;
-        if (totalLen > 0 && f.length() != totalLen) return false;
-        return true;
     }
 
     private static int scoreWeChatCandidate(File file, String title, String ext, long totalLen, String md5) {
@@ -1922,7 +2013,9 @@ public final class Bridge {
             String lowerName = name.toLowerCase(Locale.US);
             String lowerExt = ext.toLowerCase(Locale.US);
             if (!lowerName.endsWith("." + lowerExt) && !lowerName.endsWith("." + lowerExt + "\u2316")) {
-                return -1;
+                if (TextUtils.isEmpty(md5) || totalLen <= 0 || file.length() != totalLen) {
+                    return -1;
+                }
             }
         }
 
@@ -1930,7 +2023,7 @@ public final class Bridge {
         if (!TextUtils.isEmpty(md5) && totalLen > 0 && file.length() == totalLen) {
             String fMd5 = calculateFileMd5(file);
             if (!TextUtils.isEmpty(fMd5) && md5.equalsIgnoreCase(fMd5)) {
-                return 200;
+                return 250;
             }
         }
 
@@ -1962,10 +2055,17 @@ public final class Bridge {
 
     private static List<File> collectWeChatSearchDirs(Context ctx) {
         List<File> dirs = new ArrayList<>();
-        // 1. Data dir accounts (/data/data/com.tencent.mm/MicroMsg/<hash>/attachment/)
+        // 1. Data dir accounts (/data/user/0/com.tencent.mm/...)
         try {
             File dataDir = ctx.getDataDir();
             if (dataDir != null) {
+                File shareTemp = new File(dataDir, "cache/temp/share_file_temp");
+                if (shareTemp.isDirectory()) dirs.add(shareTemp);
+                File temp = new File(dataDir, "cache/temp");
+                if (temp.isDirectory() && !dirs.contains(temp)) dirs.add(temp);
+                File filesShare = new File(dataDir, "files/share");
+                if (filesShare.isDirectory()) dirs.add(filesShare);
+
                 File mm = new File(dataDir, "MicroMsg");
                 if (mm.isDirectory()) {
                     File[] subs = mm.listFiles();
@@ -1976,6 +2076,14 @@ public final class Bridge {
                                 if (attach.isDirectory()) dirs.add(attach);
                                 File video = new File(s, "video");
                                 if (video.isDirectory()) dirs.add(video);
+                                File opendata = new File(s, "message/media/opendata");
+                                if (opendata.isDirectory()) dirs.add(opendata);
+                                File appmsg = new File(s, "message/media/appmsg");
+                                if (appmsg.isDirectory()) dirs.add(appmsg);
+                                File draft = new File(s, "draft");
+                                if (draft.isDirectory()) dirs.add(draft);
+                                File record = new File(s, "record");
+                                if (record.isDirectory()) dirs.add(record);
                             }
                         }
                     }
@@ -1983,7 +2091,18 @@ public final class Bridge {
             }
         } catch (Throwable ignored) {}
 
-        // 2. External storage accounts (/sdcard/Android/data/com.tencent.mm/MicroMsg/)
+        // 2. Cache dir temp
+        try {
+            File cacheDir = ctx.getCacheDir();
+            if (cacheDir != null) {
+                File shareTemp = new File(cacheDir, "temp/share_file_temp");
+                if (shareTemp.isDirectory() && !dirs.contains(shareTemp)) dirs.add(shareTemp);
+                File temp = new File(cacheDir, "temp");
+                if (temp.isDirectory() && !dirs.contains(temp)) dirs.add(temp);
+            }
+        } catch (Throwable ignored) {}
+
+        // 3. External storage accounts (/sdcard/Android/data/com.tencent.mm/MicroMsg/)
         try {
             File ext = ctx.getExternalFilesDir(null);
             File extMm = ext != null ? new File(ext.getParentFile(), "MicroMsg") : null;
@@ -2001,13 +2120,15 @@ public final class Bridge {
                             if (attach.isDirectory()) dirs.add(attach);
                             File video = new File(s, "video");
                             if (video.isDirectory()) dirs.add(video);
+                            File opendata = new File(s, "message/media/opendata");
+                            if (opendata.isDirectory()) dirs.add(opendata);
                         }
                     }
                 }
             }
         } catch (Throwable ignored) {}
 
-        // 3. Public Download / WeiXin
+        // 4. Public Download / WeiXin
         try {
             File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WeiXin");
             if (pub.isDirectory()) dirs.add(pub);
@@ -2059,15 +2180,45 @@ public final class Bridge {
     }
 
     private static View findWeChatBubbleView(View view) {
+        if (view == null) return null;
+        int screenW = view.getResources().getDisplayMetrics().widthPixels;
+        View bestBubble = null;
         View current = view;
-        for (int depth = 0; current != null && depth < 6; depth++) {
-            if (current.isLongClickable()) {
-                return current;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) current;
+                int w = vg.getWidth();
+                int h = vg.getHeight();
+                if (w > 0 && h > 0) {
+                    if (w >= screenW * 0.90f) {
+                        if (bestBubble != null) {
+                            return bestBubble;
+                        }
+                    } else if (w >= dp(view.getContext(), 140)) {
+                        bestBubble = vg;
+                        if (vg.getChildCount() >= 2 && hasDescendantImageView(vg)) {
+                            return vg;
+                        }
+                    }
+                }
             }
             ViewParent p = current.getParent();
             current = (p instanceof View) ? (View) p : null;
         }
-        return view;
+        return bestBubble != null ? bestBubble : view;
+    }
+
+    private static boolean hasDescendantImageView(ViewGroup group) {
+        if (group == null) return false;
+        int count = group.getChildCount();
+        for (int i = 0; i < count; i++) {
+            View child = group.getChildAt(i);
+            if (child instanceof ImageView) return true;
+            if (child instanceof ViewGroup) {
+                if (hasDescendantImageView((ViewGroup) child)) return true;
+            }
+        }
+        return false;
     }
 
     private static Bitmap viewToBitmap(View view) {
@@ -5000,23 +5151,25 @@ public final class Bridge {
     }
 
     private static Bundle pickPayload(Map<?, ?> map) {
+        Bundle textPayload = null;
         Bundle bitmapPayload = null;
         for (Object value : map.values()) {
             if (!(value instanceof Bundle)) {
                 continue;
             }
             Bundle bundle = (Bundle) value;
-            String text = bundle.getString("viewContent");
-            if (isMeaningfulUserText(text)) {
-                return bundle;
-            }
             if (bundle.getParcelable("filePfd") instanceof ParcelFileDescriptor) {
                 return bundle;
+            }
+            String text = bundle.getString("viewContent");
+            if (textPayload == null && isMeaningfulUserText(text)) {
+                textPayload = bundle;
             }
             if (bitmapPayload == null && bundle.getParcelable("viewBitmap") instanceof Bitmap) {
                 bitmapPayload = bundle;
             }
         }
+        if (textPayload != null) return textPayload;
         return bitmapPayload;
     }
 
@@ -6548,8 +6701,16 @@ public final class Bridge {
             if (bitmap != null) {
                 float areaPx = (float) bitmap.getWidth() * (float) bitmap.getHeight();
                 float scale = getImageScale(areaPx, density);
-                width = Math.max(dp(76), Math.round(bitmap.getWidth() * scale));
-                height = Math.max(dp(76), Math.round(bitmap.getHeight() * scale));
+                int scaledW = Math.round(bitmap.getWidth() * scale);
+                int scaledH = Math.round(bitmap.getHeight() * scale);
+                if (scaledW < dp(76) || scaledH < dp(76)) {
+                    float minScale = Math.max((float) dp(76) / bitmap.getWidth(), (float) dp(76) / bitmap.getHeight());
+                    scale = Math.max(scale, minScale);
+                    scaledW = Math.round(bitmap.getWidth() * scale);
+                    scaledH = Math.round(bitmap.getHeight() * scale);
+                }
+                width = scaledW;
+                height = scaledH;
                 touchX = width / 2;
                 touchY = height / 2;
                 return;
