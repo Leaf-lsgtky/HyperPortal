@@ -1,22 +1,25 @@
-# ohmyAES (DragShare)
+# HyperPortal (ohmyAES)
 
-> Bringing ColorOS 15 Fluid Cloud / DragShare content portal interactive experience and fluid animations to Xiaomi HyperOS!  
-> Features system-level multimodal content extraction, ColorOS Aurora Glow AGSL shader, bottom rearrangement & shadow morphing, and LSPosed `system_server` 3D tilt transformation.
+> Bringing the fluid, multimodal **ColorOS 15 Fluid Cloud / Content Portal (DragShare)** experience to **Xiaomi HyperOS (Android 14/15)**!  
+> Powered by system-level multimodal content extraction, ColorOS Aurora Glow AGSL shader, bottom & right-edge dynamic docks, BigBang text segmentation, and LSPosed `system_server` 3D perspective spatial tilt.
 
 [English](README.md) | [简体中文](README_CN.md) | [AI Agent & Contributor Guide (AGENTS.md)](AGENTS.md)
 
 ---
 
-## 🌟 Feature Matrix
+## 🌟 Feature Highlights
 
 | Module | Technology | Highlights |
 | :--- | :--- | :--- |
-| 🎯 **Multimodal Content Extraction** | Privileged AES Plugin + Hybrid View Traversal | Deep penetration into classic View hierarchies, Jetpack Compose Semantics, and `AndroidViewsHandler` hybrid trees (seamlessly extracts Coolapk feed posts, WeChat, Weibo, Xiaohongshu, Telegram, etc.). |
-| 🌈 **ColorOS Aurora Glow** | AGSL (Android Graphics Shading Language) | Custom hardware-accelerated `RuntimeShader` with multi-frequency noise displacement. Progressively ramps with finger movement. |
-| 📱 **Rearrangement & Card Morphing** | Dynamic WMS Drag Shadow Morphing | Morphs into a rounded-corner card and slightly scales down upon crossing the 76% bottom threshold, smoothly raising the app shelf with haptics. |
-| ↩️ **Native Cancel Fly-Back** | WMS Return Trajectory Restoration | Strictly returns `false` on non-target drops, seamlessly triggering Android's native WindowManager cancel fly-back animation to the original text/image position. |
-| 📐 **3D Spatial Tilt Transformation** | LSPosed `system_server` Hook | Directly hooks `com.android.server.wm.DragState`, manipulating the SurfaceFlinger layer via `SurfaceControl.Transaction.setMatrix` to create real-time 3D perspective tilt. |
-| ✂️ **Text Segmentation** | cppjieba + BigBang chips | Drop text onto the bottom shelf and open “Text Segmentation”: a local dictionary splits the text into selectable word chips with copy, web/dictionary search, system share and character-level re-segmentation. The captured text never leaves the device. |
+| 🎯 **Multimodal Content Extraction** | Privileged AES Plugin + Hybrid Tree Traversal | Deep penetration into classic View hierarchies, Jetpack Compose Semantics, and `AndroidViewsHandler` hybrid trees (Coolapk feed & image viewers, Bilibili Compose viewer, Weibo, Xiaohongshu, Telegram, etc.). |
+| 💬 **WeChat Chat & File Extraction** | Chat Bubble & File Resolution Engine | Resolves WeChat chat bubbles and physical file attachments (`.ref` UUID pointers, shared app storage cache, XML entity unescaping). Built-in LRU cache pruner (max 5 files, 12h TTL). |
+| 🗂️ **Dual Dock Trigger Modes** | Bottom Shelf & Right Edge Vertical Dock | Choose between classic **Bottom Shelf** and **Right Edge Dock**. Features full-height gesture coverage, status bar cutout avoidance, smooth fish-eye icon magnification following finger Y coordinates, and high-FPS edge glow tracking. |
+| 🌈 **ColorOS Aurora Glow** | AGSL (Android Graphics Shading Language) | Custom hardware-accelerated `RuntimeShader` with multi-frequency noise displacement and 60s modulo time wrapping to prevent GPU precision loss. Gently scales with finger motion. |
+| 📱 **Dynamic Rearrangement & Morphing** | WMS Drag Shadow Morphing | Morphs into a rounded-corner card and scales down upon crossing the customizable threshold (default 76%), raising the app dock with haptics. |
+| 📐 **3D Spatial Tilt Transformation** | LSPosed `system_server` Hook | Directly hooks `com.android.server.wm.DragState`, manipulating the SurfaceFlinger layer via `SurfaceControl.Transaction.setMatrix` to create real-time 3D pitch and yaw perspective tilt adapted to dock position. |
+| ✂️ **BigBang Text Segmentation** | cppjieba (C++ JNI) + Jetpack Compose | Drop text into the dock to trigger local word segmentation: word chips support multi-select, slide-select, copy, dictionary/web search, system sharing, and character splitting without data ever leaving the device. |
+| ↩️ **Native Cancel Fly-Back** | WMS Return Trajectory Restoration | Strictly returns `false` on non-target drops, triggering Android's native WindowManager cancel fly-back physics animation back to the origin position. |
+| ⚙️ **Modern Miuix Compose UI** | Miuix Compose + Adaptive Icon | Native HyperOS visual style settings page built with Miuix UI & Preference components, customizable trigger position, threshold sliders, and adaptive launcher icons. |
 
 ---
 
@@ -29,24 +32,23 @@ sequenceDiagram
     participant App as Target App (Coolapk/WeChat/etc.)
     participant AES as AES Bridge (dev.dragshare.catcher)
     participant WMS as Android system_server (DragState)
-    participant Portal as Companion App (PortalService)
+    participant Dock as SystemUI / HyperPortal Dock
 
-    User->>App: Long-press text, image, or card
+    User->>App: Long-press text, image, file, or chat bubble
     App->>AES: Touch events intercepted by AES Interceptor
-    AES->>AES: Penetrates View & Compose hierarchy to extract semantics
-    AES->>Portal: Starts service with content payload
+    AES->>AES: Penetrates View & Compose hierarchy to extract semantics / files
+    AES->>Dock: Broadcasts content payload & initiates drag
     AES->>WMS: Starts drag with initial custom DragShadow
-    WMS->>WMS: LSPosed injects 3D perspective tilt matrix
-    User->>Portal: Drag moves downward (upper screen)
-    AES->>Portal: Continuously dispatches drag location Y
-    Portal->>Portal: GlowView Aurora gently emerges
-    Note over AES,Portal: Crosses bottom hot zone (76% screen height)
+    WMS->>WMS: LSPosed injects 3D perspective tilt matrix (Pitch / Yaw)
+    User->>Dock: Finger drags toward trigger edge (Bottom / Right)
+    AES->>Dock: Continuously dispatches drag location coordinates
+    Dock->>Dock: GlowView Aurora gently emerges and follows finger
+    Note over AES,Dock: Crosses trigger threshold (Customizable, default 76%)
     AES->>WMS: Triggers Shadow Morphing (transforms into rounded card)
-    AES->>Portal: Dispatches state=2
-    Portal->>Portal: Bottom shelf rises with haptic feedback
-    alt Drop onto App Target
-        User->>Portal: Release finger on target app icon
-        Portal->>App: Dispatches share intent / clipboard copy
+    Dock->>Dock: App dock surfaces with haptics & fish-eye magnification
+    alt Drop onto Target App Icon
+        User->>Dock: Release finger on target app icon / BigBang chip
+        Dock->>App: Dispatches share intent / BigBang word segmentation
     else Release in empty space
         User->>WMS: Finger released outside targets
         AES-->>WMS: return false (Drag not consumed)
@@ -59,8 +61,8 @@ sequenceDiagram
 ## 📁 Repository Structure
 
 ```
-ohmyAES/
-├── aes/                               # [Component 1] Privileged System Hook Component
+HyperPortal/
+├── aes/                               # [Component 1] Privileged System Hook (AES)
 │   ├── src/                           # Java source injected into AES classes2.dex
 │   │   └── dev/dragshare/catcher/
 │   │       └── Bridge.java            # Content extraction, touch hooks, gesture bridge
@@ -68,61 +70,56 @@ ohmyAES/
 │   ├── base/                          # Official base APK (Application Extension Service_5.1.7.apk)
 │   └── patches/                       # Automated Smali injector script
 │
-├── bridge/                            # [Component 2] Companion App & LSPosed Module
+├── bridge/                            # [Component 2] HyperPortal App & LSPosed System Modules
 │   ├── AndroidManifest.xml
-│   ├── src/
-│   │   └── com/dragshare/portal/
-│   │       ├── MainActivity.java      # Settings & overlay permission entry
-│   │       ├── PortalService.java     # Aurora GlowView, bottom shelf, drop interception
-│   │       ├── PortalReceiver.java    # IPC broadcast synchronization
-│   │       ├── PortalFileProvider.java# FileProvider for secure cross-app sharing
-│   │       └── system/
-│   │           └── PortalSystemModule.java # LSPosed module (system_server 3D tilt)
-│   ├── assets/
-│   │   └── oppo_glow.png              # Aurora noise texture
-│   ├── resources/
-│   │   └── META-INF/xposed/           # Modern LSPosed module descriptors
-│   └── libs/                          # Compile-time Xposed API & Stubs
+│   ├── build.gradle.kts               # Gradle build script (Miuix, NDK, Cmake, R8 rules)
+│   ├── proguard-rules.pro             # ProGuard / R8 keep rules
+│   ├── src/main/
+│   │   ├── cpp/                       # C++ JNI TextSegmenter (cppjieba)
+│   │   ├── java/com/dragshare/portal/ # Companion Service, SystemServer tilt hook, SystemUI dock
+│   │   │   ├── system/PortalSystemModule.java    # LSPosed hook for system_server 3D tilt
+│   │   │   ├── system/PortalSystemUiModule.java  # LSPosed hook for SystemUI dock & glow
+│   │   │   └── ui/                               # Miuix Compose settings & BigBang UI
+│   │   ├── assets/                    # Aurora noise texture & cppjieba dictionaries
+│   │   └── res/                       # Vectors, Miuix styles, and adaptive launcher icons
+│   └── resources/META-INF/xposed/     # Modern LSPosed module descriptors
 │
 ├── tools/                             # Unified Build & Deployment Toolchain
-│   ├── config.py                      # Android SDK, Build-Tools, Apktool auto-detection
-│   ├── build.py                       # High-speed dual-target builder
+│   ├── config.py                      # Android SDK, Build-Tools, signing auto-detection
+│   ├── build.py                       # High-speed dual-target builder (supports --r8)
 │   ├── deploy.py                      # One-click install, LSPosed sync, soft reboot, logcat
 │   └── repack.py                      # Binary AXML versionCode modifier & DEX bundler
 │
+├── design/icons/                      # Adaptive launcher icon SVG designs & preview gallery
 ├── docs/                              # Reverse engineering and architecture documentation
-│   ├── ARCHITECTURE.md
-│   ├── COLOROS_VIEWDRAG_SPEC.md
-│   └── COLOROS_COMPOSE_EXTRACTION_SPEC.md
-│
 ├── .sign/                             # Local signing keystore/credentials (git-ignored)
-├── dist/                              # Output directory for release APKs
-├── AGENTS.md                          # ⚠️ Mandatory Engineering Rules for AI Agents & Developers
-├── README.md                          # English documentation
-└── README_CN.md                       # Chinese documentation
+├── dist/                              # Output directory for release APKs (git-ignored)
+└── AGENTS.md                          # ⚠️ Mandatory Engineering Rules for AI Agents & Developers
 ```
 
 ---
 
 ## 🚀 Building from Source
 
-No Gradle or manual patch scripts needed. Directly invokes Android SDK build tools:
-
 ### 1. Prerequisites
 - **Python 3.8+**
-- **JDK 11+**
-- **Android SDK** (with `ANDROID_HOME` set, including `build-tools` 33+ and `platforms`)
+- **JDK 17+**
+- **Android SDK** (API 34/37, `build-tools` 34+, Android NDK `26.1.10909125`, CMake `3.22.1`)
+- **Signing Credentials**: Place `my-release-key.jks` and `qianming.txt` into `.sign/` (see [Signing Boundary](AGENTS.md#rule-9-release-signing--r8-boundary)).
 
 ### 2. Build Commands
 
 ```bash
-# Build both APKs (DragShareBridge.apk + ContentCatcher-patched.apk)
-python tools/build.py all
+# Build both APKs with R8 optimization enabled for HyperPortal
+python tools/build.py all --r8
 
-# Build DragShareBridge only
+# Build HyperPortal only (Normal test build, R8 off)
 python tools/build.py bridge
 
-# Build AES patched APK only
+# Build HyperPortal with R8 minification (~6.9 MB)
+python tools/build.py bridge --r8
+
+# Build AES patched APK only (always unminified)
 python tools/build.py aes
 
 # Clean build cache
@@ -130,7 +127,7 @@ python tools/build.py clean
 ```
 
 Artifacts are placed in `dist/`:
-- `dist/DragShareBridge.apk`
+- `dist/HyperPortal-r8.apk` (or `dist/HyperPortal.apk`)
 - `dist/ContentCatcher-patched.apk`
 
 ---
@@ -141,11 +138,11 @@ Artifacts are placed in `dist/`:
 # 1. Install both APKs and sync LSPosed scope
 python tools/deploy.py --install all --refresh-lsp
 
-# 2. Soft reboot (restart system_server, takes ~5s)
-python tools/deploy.py --soft-reboot
-
-# 3. Attach live logcat monitor
+# 2. Attach live logcat monitor (passively monitors physical device gestures)
 python tools/deploy.py --logs
+
+# 3. Soft reboot (only needed when testing new system_server hook changes)
+python tools/deploy.py --soft-reboot
 ```
 
 ---
@@ -156,19 +153,25 @@ python tools/deploy.py --logs
 <summary><b>Q1: Why did the 3D tilt animation disappear after a hard reboot? Do I need a soft reboot every time?</b></summary>
 
 **A:** **No! Daily reboots never require a soft reboot.**  
-The issue occurred during development because `adb install -r` generated a new hash directory for the APK in `/data/app/`. An immediate hard reboot caught LSPosed with an unsynced cache, attempting to load the deleted old path at early boot. Once persisted, the APK path remains fixed forever across all hard reboots and normal boots. A soft reboot is only required when you compile and install new hook code via ADB from your computer.
+The issue only occurs during development because `adb install -r` generates a new randomized hash directory for the APK in `/data/app/`. An immediate hard reboot caught LSPosed with an unsynced cache attempting to load the old deleted path. Once persisted, the APK path remains fixed forever across all hard reboots and cold boots. A soft reboot is only needed when pushing new hook code during development.
 </details>
 
 <details>
-<summary><b>Q2: Why does the drag shadow sometimes vanish instead of flying back to the original text?</b></summary>
+<summary><b>Q2: Why does the drag shadow sometimes vanish instead of flying back to the source text/image?</b></summary>
 
-**A:** In Android's WindowManager, the return animation (`createCancelAnimationLocked`) is only executed if `ACTION_DROP` returns `false`. If any listener erroneously returns `true`, WMS treats the drop as consumed and immediately dismisses the shadow. ohmyAES strictly returns `false` on drops outside valid targets.
+**A:** In Android's WindowManager, the return animation (`createCancelAnimationLocked`) only executes if `ACTION_DROP` returns `false`. If any listener erroneously returns `true`, WMS treats the drag as consumed and dismisses the shadow immediately. HyperPortal strictly returns `false` on any drop outside valid targets.
 </details>
 
 <details>
-<summary><b>Q3: Why were Coolapk feed posts previously unrecognized?</b></summary>
+<summary><b>Q3: How are Coolapk and hybrid Jetpack Compose layouts penetrated?</b></summary>
 
-**A:** Coolapk overlays a transparent `CanvasProxyView` (Slidr swipe-to-back proxy) and nests its feed inside `ComposeView` $\rightarrow$ `AndroidViewsHandler` $\rightarrow$ `ViewFactoryHolder`. Standard Compose semantics only reveal empty wrappers. ohmyAES uses deep hybrid penetration to bypass proxy views and extract the true `FixAppCompatTextView` and images.
+**A:** Coolapk overlays a transparent `CanvasProxyView` (Slidr swipe-to-back proxy) and nests its feed inside `ComposeView` $\rightarrow$ `AndroidViewsHandler` $\rightarrow$ `ViewFactoryHolder`. Standard Compose semantics only reveal empty wrappers. HyperPortal uses deep recursive hybrid penetration to bypass proxy views and extract the true `FixAppCompatTextView` and images directly.
+</details>
+
+<details>
+<summary><b>Q4: How does WeChat chat file extraction work?</b></summary>
+
+**A:** WeChat chat file items store `.ref` UUID pointers rather than direct file paths. HyperPortal parses chat bubble hierarchies, resolves the underlying physical files from the shared application cache, unescapes XML entities, and maintains an automatic LRU cache pruner (keeping up to 5 files with a 12-hour TTL).
 </details>
 
 ---
@@ -178,7 +181,9 @@ The issue occurred during development because `adb install -r` generated a new h
 Before submitting PRs or prompting AI agents, **please read [AGENTS.md](AGENTS.md)**:
 - **Never automate touch events on physical test devices** (leave gestures to human testers; agents only monitor logs).
 - **Never use full-screen fallback screenshots** (maintain 100% semantic extraction).
-- **Respect the 76% / 70% hysteresis thresholds** and **AGSL shader modulo wrapping**.
+- **Never auto-reboot or soft-reboot the device** without explicit user confirmation.
+- **Respect the hysteresis thresholds** (76% enter, 70% exit) and **AGSL shader modulo wrapping**.
+- **Commit code changes promptly to git** upon verification.
 
 ---
 
