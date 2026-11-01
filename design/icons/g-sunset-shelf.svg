@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC94D"/>
+      <stop offset="1" stop-color="#FF8A3D"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <!-- shelf glow + bar -->
+  <ellipse cx="512" cy="782" rx="300" ry="105" fill="url(#glow)"/>
+  <rect x="287" y="770" width="450" height="26" rx="13" fill="#FFFFFF"/>
+  <!-- back card: link -->
+  <g transform="rotate(-13 512 860)">
+    <rect x="352" y="250" width="320" height="440" rx="50" fill="#FFFFFF" opacity="0.55"/>
+  </g>
+  <!-- middle card: image -->
+  <g transform="rotate(13 512 860)">
+    <rect x="352" y="250" width="320" height="440" rx="50" fill="#FFFFFF" opacity="0.75"/>
+  </g>
+  <!-- front card: text + image -->
+  <rect x="352" y="230" width="320" height="460" rx="50" fill="#FFFFFF"/>
+  <rect x="398" y="284" width="160" height="24" rx="12" fill="#FF8A3D"/>
+  <rect x="398" y="332" width="228" height="24" rx="12" fill="#FFD9B8"/>
+  <rect x="398" y="380" width="194" height="24" rx="12" fill="#FFD9B8"/>
+  <rect x="398" y="436" width="228" height="206" rx="30" fill="#FFF1E0"/>
+  <path d="M420 620 L492 532 L540 590 L572 556 L608 620 Z" fill="#FFB547"/>
+  <circle cx="582" cy="484" r="18" fill="#FF8A3D"/>
+</svg>

@@ -11,6 +11,8 @@
     <application
         android:name=".HyperPortalApplication"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="HyperPortal"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: design/icons/g-sunset-shelf.svg (1024 artboard mapped to the 72dp safe zone). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1536"
+    android:viewportHeight="1536">
+    <path android:pathData="M0,0 H1536 V1536 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="768"
+                android:startY="256"
+                android:endX="768"
+                android:endY="1280"
+                android:tileMode="clamp">
+                <item android:offset="0" android:color="#FFFFC94D" />
+                <item android:offset="1" android:color="#FFFF8A3D" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

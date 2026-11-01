@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: design/icons/g-sunset-shelf.svg (1024 artboard mapped to the 72dp safe zone). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1536"
+    android:viewportHeight="1536">
+    <group
+        android:translateX="256"
+        android:translateY="256">
+
+        <!-- Shelf glow: circle squashed into an ellipse (rx 300, ry 105). -->
+        <group
+            android:pivotX="512"
+            android:pivotY="782"
+            android:scaleY="0.35">
+            <path android:pathData="M212,782 A300,300 0 1,1 812,782 A300,300 0 1,1 212,782 Z">
+                <aapt:attr name="android:fillColor">
+                    <gradient
+                        android:type="radial"
+                        android:centerX="512"
+                        android:centerY="782"
+                        android:gradientRadius="300">
+                        <item android:offset="0" android:color="#CCFFFFFF" />
+                        <item android:offset="1" android:color="#00FFFFFF" />
+                    </gradient>
+                </aapt:attr>
+            </path>
+        </group>
+
+        <!-- Shelf bar -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M300,770 H724 A13,13 0 0 1 724,796 H300 A13,13 0 0 1 300,770 Z" />
+
+        <!-- Back card: link -->
+        <group
+            android:pivotX="512"
+            android:pivotY="860"
+            android:rotation="-13">
+            <path
+                android:fillAlpha="0.55"
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M402,250 H622 A50,50 0 0 1 672,300 V640 A50,50 0 0 1 622,690 H402 A50,50 0 0 1 352,640 V300 A50,50 0 0 1 402,250 Z" />
+        </group>
+
+        <!-- Middle card: image -->
+        <group
+            android:pivotX="512"
+            android:pivotY="860"
+            android:rotation="13">
+            <path
+                android:fillAlpha="0.75"
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M402,250 H622 A50,50 0 0 1 672,300 V640 A50,50 0 0 1 622,690 H402 A50,50 0 0 1 352,640 V300 A50,50 0 0 1 402,250 Z" />
+        </group>
+
+        <!-- Front card: text + image -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M402,230 H622 A50,50 0 0 1 672,280 V640 A50,50 0 0 1 622,690 H402 A50,50 0 0 1 352,640 V280 A50,50 0 0 1 402,230 Z" />
+        <path
+            android:fillColor="#FFFF8A3D"
+            android:pathData="M410,284 H546 A12,12 0 0 1 546,308 H410 A12,12 0 0 1 410,284 Z" />
+        <path
+            android:fillColor="#FFFFD9B8"
+            android:pathData="M410,332 H614 A12,12 0 0 1 614,356 H410 A12,12 0 0 1 410,332 Z" />
+        <path
+            android:fillColor="#FFFFD9B8"
+            android:pathData="M410,380 H580 A12,12 0 0 1 580,404 H410 A12,12 0 0 1 410,380 Z" />
+        <path
+            android:fillColor="#FFFFF1E0"
+            android:pathData="M428,436 H596 A30,30 0 0 1 626,466 V612 A30,30 0 0 1 596,642 H428 A30,30 0 0 1 398,612 V466 A30,30 0 0 1 428,436 Z" />
+        <path
+            android:fillColor="#FFFFB547"
+            android:pathData="M420,620 L492,532 L540,590 L572,556 L608,620 Z" />
+        <path
+            android:fillColor="#FFFF8A3D"
+            android:pathData="M564,484 A18,18 0 1,1 600,484 A18,18 0 1,1 564,484 Z" />
+    </group>
+</vector>
