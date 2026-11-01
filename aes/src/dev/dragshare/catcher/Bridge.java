@@ -65,12 +65,14 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.animation.DecelerateInterpolator;
 import android.webkit.ValueCallback;
 import android.webkit.WebView;
+import android.webkit.MimeTypeMap;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -85,6 +87,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.URLConnection;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -92,6 +95,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Minimal Plan-B bridge for the AES 5.1.7 PoC.
@@ -911,6 +916,13 @@ public final class Bridge {
                     return file;
                 }
             }
+            if (isWeChat(view)) {
+                Bundle wechatFile = extractWeChatFile(view);
+                if (wechatFile != null && isBundleMeaningful(wechatFile)) {
+                    Log.i(TAG, "preExtract hit WeChat file: " + wechatFile.getString("fileName"));
+                    return wechatFile;
+                }
+            }
             if (!isPlausibleContentHost(view)) {
                 return null;
             }
@@ -1417,15 +1429,15 @@ public final class Bridge {
 
     private static boolean isBundleMeaningful(Bundle bundle) {
         if (bundle == null) return false;
-        String text = bundle.getString("viewContent");
-        if (!TextUtils.isEmpty(text)) {
-            return isMeaningfulUserText(text);
+        if (bundle.getParcelable("filePfd") != null) {
+            return true;
         }
         if (bundle.getParcelable("viewBitmap") != null) {
             return true;
         }
-        if (bundle.getParcelable("filePfd") != null) {
-            return true;
+        String text = bundle.getString("viewContent");
+        if (!TextUtils.isEmpty(text)) {
+            return isMeaningfulUserText(text);
         }
         if (!TextUtils.isEmpty(bundle.getString("imgUrl"))) {
             return true;
@@ -1515,6 +1527,462 @@ public final class Bridge {
         return null;
     }
 
+    // =========================================================================
+    // ColorOS-Parity WeChat File Extraction (OplusFileViewDragProcessor port)
+    // =========================================================================
+
+    private static boolean isWeChat(View view) {
+        if (view == null) return false;
+        Context ctx = view.getContext();
+        if (ctx == null) return false;
+        return "com.tencent.mm".equals(ctx.getPackageName());
+    }
+
+    private static Bundle extractWeChatFile(View view) {
+        try {
+            if (view == null) return null;
+            Context ctx = view.getContext();
+            if (ctx == null) return null;
+
+            // 1. Locate message XML metadata from view/tag hierarchy
+            String xml = findWeChatMsgXml(view);
+            if (TextUtils.isEmpty(xml)) {
+                return null;
+            }
+
+            // 2. Parse XML fields
+            String title = extractXmlTag(xml, "title");
+            String ext = extractXmlTag(xml, "fileext");
+            String totalLenStr = extractXmlTag(xml, "totallen");
+            long totalLen = -1;
+            if (!TextUtils.isEmpty(totalLenStr)) {
+                try {
+                    totalLen = Long.parseLong(totalLenStr.trim());
+                } catch (Throwable ignored) {}
+            }
+            String md5 = extractXmlTag(xml, "md5");
+
+            // Ignore non-file messages (e.g. plain text chat)
+            if (TextUtils.isEmpty(title) || (TextUtils.isEmpty(ext) && TextUtils.isEmpty(md5) && totalLen <= 0)) {
+                return null;
+            }
+
+            if (TextUtils.isEmpty(ext) && title.contains(".")) {
+                ext = title.substring(title.lastIndexOf('.') + 1);
+            }
+
+            Log.i(TAG, "extractWeChatFile meta: title=" + title + " ext=" + ext + " len=" + totalLen + " md5=" + md5);
+
+            // 3. Search for physical file in WeChat internal and external storage
+            File file = findWeChatPhysicalFile(ctx, title, ext, totalLen, md5);
+            if (file == null || !file.isFile() || file.length() <= 0) {
+                Log.w(TAG, "extractWeChatFile: physical file not found on disk for title=" + title);
+                sMainHandler.post(() -> {
+                    try {
+                        Toast.makeText(ctx, "请先在微信中下载该文件", Toast.LENGTH_SHORT).show();
+                    } catch (Throwable ignored) {}
+                });
+                return null;
+            }
+
+            Log.i(TAG, "extractWeChatFile hit file=" + file.getAbsolutePath() + " (" + file.length() + " bytes)");
+
+            // 4. Open ParcelFileDescriptor
+            ParcelFileDescriptor pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+            if (pfd == null) {
+                return null;
+            }
+
+            // 5. Construct Bundle
+            String mime = null;
+            if (!TextUtils.isEmpty(ext)) {
+                mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(Locale.US));
+            }
+            if (TextUtils.isEmpty(mime)) {
+                mime = URLConnection.guessContentTypeFromName(title);
+            }
+            if (TextUtils.isEmpty(mime)) {
+                mime = "application/octet-stream";
+            }
+
+            Bundle bundle = new Bundle();
+            bundle.putParcelable("filePfd", pfd);
+            bundle.putString("fileName", title);
+            bundle.putString("mimeType", mime);
+            bundle.putLong("fileSize", file.length());
+            bundle.putInt("catchType", 2);
+            bundle.putString("viewContent", title);
+
+            // Visual snapshot of the message bubble for drag card shadow
+            try {
+                View bubble = findWeChatBubbleView(view);
+                if (bubble == null) bubble = view;
+                Bitmap preview = viewToBitmap(bubble);
+                if (preview == null) {
+                    preview = extractImageBitmap(bubble);
+                }
+                if (preview != null) {
+                    bundle.putParcelable("viewBitmap", scaleDown(toSoftwareBitmap(preview), 720));
+                }
+            } catch (Throwable ignored) {}
+
+            return bundle;
+        } catch (Throwable t) {
+            Log.w(TAG, "extractWeChatFile failed", t);
+            return null;
+        }
+    }
+
+    private static String findWeChatMsgXml(View view) {
+        if (view == null) return null;
+        View current = view;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            Object tag = current.getTag();
+            if (tag != null) {
+                String xml = resolveWeChatXmlFromObject(tag);
+                if (xml != null && (xml.contains("<msg") || xml.contains("<appmsg"))) {
+                    return xml;
+                }
+            }
+            String xml = resolveWeChatXmlFromView(current);
+            if (xml != null && (xml.contains("<msg") || xml.contains("<appmsg"))) {
+                return xml;
+            }
+            ViewParent parent = current.getParent();
+            current = (parent instanceof View) ? (View) parent : null;
+        }
+        return null;
+    }
+
+    private static String resolveWeChatXmlFromObject(Object obj) {
+        if (obj == null) return null;
+        // 1. ColorOS standard hook: tag.c() returns MsgInfo
+        Object msgInfo = tryInvokeNoArg(obj, "c");
+        if (msgInfo != null) {
+            String xml = extractXmlFromMsgInfo(msgInfo);
+            if (xml != null) return xml;
+        }
+        // 2. Direct MsgInfo check
+        String xml = extractXmlFromMsgInfo(obj);
+        if (xml != null) return xml;
+
+        // 3. Inspect fields
+        for (Class<?> c = obj.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                try {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    Object val = f.get(obj);
+                    if (val == null) continue;
+                    if (val instanceof String) {
+                        String s = (String) val;
+                        if (s.contains("<msg") || s.contains("<appmsg")) {
+                            return s;
+                        }
+                    } else {
+                        String subXml = extractXmlFromMsgInfo(val);
+                        if (subXml != null) return subXml;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private static String resolveWeChatXmlFromView(View v) {
+        if (v == null) return null;
+        for (Class<?> c = v.getClass(); c != null && c != View.class && c != ViewGroup.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                try {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    String fname = f.getName().toLowerCase(Locale.US);
+                    if (!fname.contains("msg") && !fname.contains("tag") && !fname.contains("item")) continue;
+                    f.setAccessible(true);
+                    Object val = f.get(v);
+                    if (val != null) {
+                        String xml = resolveWeChatXmlFromObject(val);
+                        if (xml != null) return xml;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private static String extractXmlFromMsgInfo(Object msgInfo) {
+        if (msgInfo == null) return null;
+        String[] methods = {"S1", "m57129S1", "j", "mo57172j", "getContent"};
+        for (String m : methods) {
+            Object res = tryInvokeNoArg(msgInfo, m);
+            if (res instanceof String) {
+                String s = (String) res;
+                if (s.contains("<msg") || s.contains("<appmsg")) {
+                    return s;
+                }
+            }
+        }
+        for (Class<?> c = msgInfo.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                try {
+                    String fname = f.getName();
+                    if ("field_content".equals(fname) || "content".equals(fname)) {
+                        f.setAccessible(true);
+                        Object val = f.get(msgInfo);
+                        if (val instanceof String) {
+                            String s = (String) val;
+                            if (s.contains("<msg") || s.contains("<appmsg")) {
+                                return s;
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private static Object tryInvokeNoArg(Object obj, String methodName) {
+        if (obj == null || TextUtils.isEmpty(methodName)) return null;
+        for (Class<?> c = obj.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                Method m = c.getDeclaredMethod(methodName);
+                m.setAccessible(true);
+                return m.invoke(obj);
+            } catch (NoSuchMethodException ignored) {
+            } catch (Throwable ignored) {
+                break;
+            }
+        }
+        return null;
+    }
+
+    private static String extractXmlTag(String xml, String tag) {
+        if (xml == null || tag == null) return null;
+        Pattern p = Pattern.compile("<" + tag + ">(.*?)</" + tag + ">", Pattern.DOTALL);
+        Matcher m = p.matcher(xml);
+        if (m.find()) {
+            String val = m.group(1).trim();
+            if (val.startsWith("<![CDATA[") && val.endsWith("]]>")) {
+                val = val.substring(9, val.length() - 3).trim();
+            }
+            return val;
+        }
+        return null;
+    }
+
+    private static File findWeChatPhysicalFile(Context ctx, String title, String ext, long totalLen, String md5) {
+        List<File> searchDirs = collectWeChatSearchDirs(ctx);
+        if (searchDirs.isEmpty()) {
+            return null;
+        }
+
+        // Fast path: Direct file check
+        for (File dir : searchDirs) {
+            if (!dir.isDirectory()) continue;
+            File direct = new File(dir, title);
+            if (isCandidateMatched(direct, totalLen, md5)) {
+                return direct;
+            }
+            File ref = new File(dir, title + "\u2316");
+            if (isCandidateMatched(ref, totalLen, md5)) {
+                return ref;
+            }
+            File pref1 = new File(dir, "1_" + title);
+            if (isCandidateMatched(pref1, totalLen, md5)) {
+                return pref1;
+            }
+            File pref2 = new File(dir, "2_" + title);
+            if (isCandidateMatched(pref2, totalLen, md5)) {
+                return pref2;
+            }
+        }
+
+        // BFS / Directory scan with scoring
+        File bestFile = null;
+        int bestScore = -1;
+
+        for (File dir : searchDirs) {
+            if (!dir.isDirectory()) continue;
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File f : files) {
+                if (!f.isFile() || f.length() <= 0) continue;
+                int score = scoreWeChatCandidate(f, title, ext, totalLen, md5);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestFile = f;
+                    if (score >= 120) {
+                        return bestFile;
+                    }
+                }
+            }
+        }
+
+        if (bestScore >= 70) {
+            return bestFile;
+        }
+        return null;
+    }
+
+    private static boolean isCandidateMatched(File f, long totalLen, String md5) {
+        if (f == null || !f.isFile() || f.length() <= 0) return false;
+        if (totalLen > 0 && f.length() != totalLen) return false;
+        if (!TextUtils.isEmpty(md5)) {
+            String fMd5 = calculateFileMd5(f);
+            if (!TextUtils.isEmpty(fMd5) && !md5.equalsIgnoreCase(fMd5)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int scoreWeChatCandidate(File file, String title, String ext, long totalLen, String md5) {
+        if (file == null || !file.isFile() || file.length() <= 0) return -1;
+        String name = file.getName();
+
+        // Check ext
+        if (!TextUtils.isEmpty(ext)) {
+            String lowerName = name.toLowerCase(Locale.US);
+            String lowerExt = ext.toLowerCase(Locale.US);
+            if (!lowerName.endsWith("." + lowerExt) && !lowerName.endsWith("." + lowerExt + "\u2316")) {
+                return -1;
+            }
+        }
+
+        // MD5 match
+        if (!TextUtils.isEmpty(md5) && totalLen > 0 && file.length() == totalLen) {
+            String fMd5 = calculateFileMd5(file);
+            if (!TextUtils.isEmpty(fMd5) && md5.equalsIgnoreCase(fMd5)) {
+                return 200;
+            }
+        }
+
+        int score = 0;
+        if (!TextUtils.isEmpty(title)) {
+            String cleanName = name.endsWith("\u2316") ? name.substring(0, name.length() - 1) : name;
+            if (cleanName.equalsIgnoreCase(title)) {
+                score += 100;
+            } else if (cleanName.toLowerCase(Locale.US).contains(title.toLowerCase(Locale.US))
+                    || title.toLowerCase(Locale.US).contains(cleanName.toLowerCase(Locale.US))) {
+                score += 45;
+            }
+        }
+        if (!TextUtils.isEmpty(ext)) {
+            score += 30;
+        }
+        if (totalLen > 0) {
+            long len = file.length();
+            if (len == totalLen) {
+                score += 45;
+            } else if (Math.abs(len - totalLen) <= 1024) {
+                score += 20;
+            } else if (len / 1024 == totalLen / 1024) {
+                score += 10;
+            }
+        }
+        return score;
+    }
+
+    private static List<File> collectWeChatSearchDirs(Context ctx) {
+        List<File> dirs = new ArrayList<>();
+        // 1. Data dir accounts (/data/data/com.tencent.mm/MicroMsg/<hash>/attachment/)
+        try {
+            File dataDir = ctx.getDataDir();
+            if (dataDir != null) {
+                File mm = new File(dataDir, "MicroMsg");
+                if (mm.isDirectory()) {
+                    File[] subs = mm.listFiles();
+                    if (subs != null) {
+                        for (File s : subs) {
+                            if (s.isDirectory() && s.getName().length() == 32) {
+                                File attach = new File(s, "attachment");
+                                if (attach.isDirectory()) dirs.add(attach);
+                                File video = new File(s, "video");
+                                if (video.isDirectory()) dirs.add(video);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 2. External storage accounts (/sdcard/Android/data/com.tencent.mm/MicroMsg/)
+        try {
+            File ext = ctx.getExternalFilesDir(null);
+            File extMm = ext != null ? new File(ext.getParentFile(), "MicroMsg") : null;
+            if (extMm == null || !extMm.isDirectory()) {
+                extMm = new File(Environment.getExternalStorageDirectory(), "Android/data/com.tencent.mm/MicroMsg");
+            }
+            if (extMm.isDirectory()) {
+                File dl = new File(extMm, "Download");
+                if (dl.isDirectory()) dirs.add(dl);
+                File[] subs = extMm.listFiles();
+                if (subs != null) {
+                    for (File s : subs) {
+                        if (s.isDirectory() && s.getName().length() == 32) {
+                            File attach = new File(s, "attachment");
+                            if (attach.isDirectory()) dirs.add(attach);
+                            File video = new File(s, "video");
+                            if (video.isDirectory()) dirs.add(video);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 3. Public Download / WeiXin
+        try {
+            File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WeiXin");
+            if (pub.isDirectory()) dirs.add(pub);
+        } catch (Throwable ignored) {}
+
+        return dirs;
+    }
+
+    private static String calculateFileMd5(File file) {
+        if (file == null || !file.isFile() || file.length() <= 0) return null;
+        try (FileInputStream in = new FileInputStream(file)) {
+            MessageDigest digest = MessageDigest.getInstance("MD5");
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = in.read(buf)) > 0) {
+                digest.update(buf, 0, read);
+            }
+            byte[] hash = digest.digest();
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static View findWeChatBubbleView(View view) {
+        View current = view;
+        for (int depth = 0; current != null && depth < 6; depth++) {
+            if (current.isLongClickable()) {
+                return current;
+            }
+            ViewParent p = current.getParent();
+            current = (p instanceof View) ? (View) p : null;
+        }
+        return view;
+    }
+
+    private static Bitmap viewToBitmap(View view) {
+        if (view == null || view.getWidth() <= 0 || view.getHeight() <= 0) return null;
+        try {
+            Bitmap bmp = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bmp);
+            view.draw(canvas);
+            return bmp;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static Bundle extractContentColorOS(View view, int flags) {
         if (view == null) {
             return null;
@@ -1528,6 +1996,15 @@ public final class Bridge {
         Bundle tg = extractTelegramContent(view, rawX, rawY, wantText, wantBitmap);
         if (tg != null) {
             return tg;
+        }
+
+        // 0.1 WeChat Chatting Item File extraction
+        if (isWeChat(view)) {
+            Bundle wechatFile = extractWeChatFile(view);
+            if (wechatFile != null && isBundleMeaningful(wechatFile)) {
+                Log.i(TAG, "extractContentColorOS: WeChat file hit: " + wechatFile.getString("fileName"));
+                return wechatFile;
+            }
         }
 
         // 0.5 Original file / content Uri (Weibo's LargeImageView2 and similar
@@ -4475,7 +4952,7 @@ public final class Bridge {
         if (TextUtils.isEmpty(name)) {
             name = "drag_" + SystemClock.uptimeMillis() + suffix;
         }
-        name = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        name = name.replaceAll("[/\\\\\\x00-\\x1f]", "_");
         Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
         try (OutputStream output = context.getContentResolver().openOutputStream(target, "w");
              InputStream input = new FileInputStream(pfd.getFileDescriptor())) {
@@ -4604,12 +5081,15 @@ public final class Bridge {
             if (lower.endsWith(".bmp")) return "image/bmp";
             if (lower.endsWith(".heic")) return "image/heic";
             if (lower.endsWith(".heif")) return "image/heif";
+            int dot = lower.lastIndexOf('.');
+            if (dot >= 0) {
+                String ext = lower.substring(dot + 1);
+                String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+                if (!TextUtils.isEmpty(mime)) return mime;
+            }
         }
         if (TextUtils.isEmpty(fallback)) {
             return null;
-        }
-        if ("application/octet-stream".equalsIgnoreCase(fallback)) {
-            return "image/png";
         }
         return fallback;
     }
@@ -5134,15 +5614,22 @@ public final class Bridge {
                 }
                 String mime = mimeForUri(imageUri, imageMime);
                 if (TextUtils.isEmpty(mime)) {
-                    mime = "image/png";
+                    mime = "application/octet-stream";
                 }
-                // Keep image/* as the primary type for generic drag consumers; carry the
-                // exact MIME as the secondary type for decoders that need it.
-                ClipDescription description = new ClipDescription("image",
-                        new String[]{"image/*", mime, ClipDescription.MIMETYPE_TEXT_URILIST, "application/x-dragshare"});
-                ClipData.Item item = new ClipData.Item(imageUri.toString(), null, null, imageUri);
+                List<String> mimeList = new ArrayList<>();
+                mimeList.add(mime);
+                if (mime.startsWith("image/")) {
+                    mimeList.add("image/*");
+                } else {
+                    mimeList.add("*/*");
+                }
+                mimeList.add(ClipDescription.MIMETYPE_TEXT_URILIST);
+                mimeList.add("application/x-dragshare");
+                String clipLabel = !TextUtils.isEmpty(text) ? text : "drag_file";
+                ClipDescription description = new ClipDescription(clipLabel, mimeList.toArray(new String[0]));
+                ClipData.Item item = new ClipData.Item(clipLabel, null, null, imageUri);
                 clip = new ClipData(description, item);
-                Log.i(TAG, "startSystemDrag: dragging image URI " + imageUri + " mime=" + mime);
+                Log.i(TAG, "startSystemDrag: dragging URI " + imageUri + " mime=" + mime + " label=" + clipLabel);
             } else {
                 ClipDescription description = new ClipDescription("content",
                         new String[]{"text/plain", "application/x-dragshare"});

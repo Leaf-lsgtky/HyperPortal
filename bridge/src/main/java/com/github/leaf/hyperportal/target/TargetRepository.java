@@ -35,6 +35,7 @@ public final class TargetRepository {
         Map<String, MutableTarget> byKey = new LinkedHashMap<>();
         queryMime(context, pm, "text/plain", true, false, byKey);
         queryMime(context, pm, "image/*", false, true, byKey);
+        queryMime(context, pm, "*/*", false, true, byKey);
 
         List<ShareTargetEntry> result = new ArrayList<>();
         for (MutableTarget target : byKey.values()) {

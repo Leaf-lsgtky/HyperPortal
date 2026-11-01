@@ -209,6 +209,14 @@ public class PortalFileProvider extends ContentProvider {
                 if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
                 if (lower.endsWith(".webp")) return "image/webp";
                 if (lower.endsWith(".gif")) return "image/gif";
+                int dot = lower.lastIndexOf('.');
+                if (dot >= 0) {
+                    String ext = lower.substring(dot + 1);
+                    String mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+                    if (mime != null) return mime;
+                }
+                String guess = java.net.URLConnection.guessContentTypeFromName(name);
+                if (guess != null) return guess;
             }
         }
         return "application/octet-stream";
