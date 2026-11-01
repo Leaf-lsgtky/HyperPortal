@@ -2196,7 +2196,17 @@ public final class Bridge {
                         }
                     } else if (w >= dp(view.getContext(), 140)) {
                         bestBubble = vg;
+                        if (vg.getBackground() != null) {
+                            return vg;
+                        }
                         if (vg.getChildCount() >= 2 && hasDescendantImageView(vg)) {
+                            ViewParent p = vg.getParent();
+                            if (p instanceof ViewGroup) {
+                                ViewGroup pvg = (ViewGroup) p;
+                                if (pvg.getWidth() < screenW * 0.90f && pvg.getBackground() != null) {
+                                    return pvg;
+                                }
+                            }
                             return vg;
                         }
                     }
@@ -6703,11 +6713,19 @@ public final class Bridge {
                 float scale = getImageScale(areaPx, density);
                 int scaledW = Math.round(bitmap.getWidth() * scale);
                 int scaledH = Math.round(bitmap.getHeight() * scale);
-                if (scaledW < dp(76) || scaledH < dp(76)) {
-                    float minScale = Math.max((float) dp(76) / bitmap.getWidth(), (float) dp(76) / bitmap.getHeight());
+                // Only scale up if both dimensions are genuinely tiny (< 60dp)
+                if (scaledW < dp(60) && scaledH < dp(60)) {
+                    float minScale = Math.max((float) dp(60) / bitmap.getWidth(), (float) dp(60) / bitmap.getHeight());
                     scale = Math.max(scale, minScale);
                     scaledW = Math.round(bitmap.getWidth() * scale);
                     scaledH = Math.round(bitmap.getHeight() * scale);
+                }
+                // Cap maximum card width at 75% screen width
+                int maxAllowedW = (int) (screenWidth * 0.75f);
+                if (scaledW > maxAllowedW) {
+                    float down = (float) maxAllowedW / scaledW;
+                    scaledW = maxAllowedW;
+                    scaledH = Math.round(scaledH * down);
                 }
                 width = scaledW;
                 height = scaledH;
@@ -6791,6 +6809,12 @@ public final class Bridge {
             float radius = dp(12) + (dp(16) - dp(12)) * p;
 
             if (bitmap != null) {
+                // 1. Solid card background (White)
+                Paint cardBg = new Paint(Paint.ANTI_ALIAS_FLAG);
+                cardBg.setColor(Color.WHITE);
+                canvas.drawRoundRect(boxRect, radius, radius, cardBg);
+
+                // 2. Draw bitmap content clipped to rounded card
                 Path clip = new Path();
                 clip.addRoundRect(boxRect, radius, radius, Path.Direction.CW);
                 canvas.save();
@@ -6802,6 +6826,13 @@ public final class Bridge {
                 canvas.scale(scale, scale);
                 canvas.drawBitmap(bitmap, 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
                 canvas.restore();
+
+                // 3. Subtle card outline border
+                Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
+                border.setStyle(Paint.Style.STROKE);
+                border.setStrokeWidth(dp(1));
+                border.setColor(Color.argb(30, 0, 0, 0));
+                canvas.drawRoundRect(boxRect, radius, radius, border);
                 return;
             }
 
