@@ -126,8 +126,15 @@ def build_aes(clean=False, version_code=1000000045):
     for old_dex in dex_dir.glob("*.dex"):
         old_dex.unlink()
 
-    class_files = list(classes_dir.rglob("*.class"))
-    d8_cmd = f'{cfg.D8_CMD} --min-api 29 --lib "{cfg.ANDROID_JAR}" --output "{dex_dir}" ' + " ".join(f'"{str(cf)}"' for cf in class_files)
+    bridge_jar = a_cache / "bridge_compiled.jar"
+    if bridge_jar.exists():
+        bridge_jar.unlink()
+    with zipfile.ZipFile(bridge_jar, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cf in sorted(classes_dir.rglob("*.class")):
+            arcname = cf.relative_to(classes_dir).as_posix()
+            zf.write(cf, arcname)
+
+    d8_cmd = f'{cfg.D8_CMD} --min-api 29 --lib "{cfg.ANDROID_JAR}" --output "{dex_dir}" "{bridge_jar}"'
     run_cmd(d8_cmd)
 
     classes2_dex = dex_dir / "classes.dex"
