@@ -2182,40 +2182,48 @@ public final class Bridge {
     private static View findWeChatBubbleView(View view) {
         if (view == null) return null;
         int screenW = view.getResources().getDisplayMetrics().widthPixels;
-        View bestBubble = null;
-        View current = view;
-        for (int depth = 0; current != null && depth < 8; depth++) {
-            if (current instanceof ViewGroup) {
-                ViewGroup vg = (ViewGroup) current;
+
+        // Diagnostic log: inspect the hierarchy chain
+        View cur = view;
+        for (int d = 0; cur != null && d < 8; d++) {
+            Drawable bg = cur.getBackground();
+            Log.i(TAG, "wechat hierarchy [" + d + "] " + cur.getClass().getName()
+                    + " " + cur.getWidth() + "x" + cur.getHeight()
+                    + " bg=" + (bg != null ? bg.getClass().getSimpleName() : "null")
+                    + " pad=" + cur.getPaddingLeft() + "," + cur.getPaddingTop()
+                    + "," + cur.getPaddingRight() + "," + cur.getPaddingBottom());
+            ViewParent p = cur.getParent();
+            cur = (p instanceof View) ? (View) p : null;
+        }
+
+        View bestWithBg = null;
+        View bestAny = null;
+        cur = view;
+        for (int depth = 0; cur != null && depth < 8; depth++) {
+            if (cur instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) cur;
                 int w = vg.getWidth();
                 int h = vg.getHeight();
                 if (w > 0 && h > 0) {
                     if (w >= screenW * 0.90f) {
-                        if (bestBubble != null) {
-                            return bestBubble;
-                        }
-                    } else if (w >= dp(view.getContext(), 140)) {
-                        bestBubble = vg;
+                        break;
+                    }
+                    if (w >= dp(view.getContext(), 140)) {
+                        bestAny = vg;
                         if (vg.getBackground() != null) {
-                            return vg;
-                        }
-                        if (vg.getChildCount() >= 2 && hasDescendantImageView(vg)) {
-                            ViewParent p = vg.getParent();
-                            if (p instanceof ViewGroup) {
-                                ViewGroup pvg = (ViewGroup) p;
-                                if (pvg.getWidth() < screenW * 0.90f && pvg.getBackground() != null) {
-                                    return pvg;
-                                }
-                            }
-                            return vg;
+                            bestWithBg = vg;
                         }
                     }
                 }
             }
-            ViewParent p = current.getParent();
-            current = (p instanceof View) ? (View) p : null;
+            ViewParent p = cur.getParent();
+            cur = (p instanceof View) ? (View) p : null;
         }
-        return bestBubble != null ? bestBubble : view;
+
+        if (bestWithBg != null) {
+            return bestWithBg;
+        }
+        return bestAny != null ? bestAny : view;
     }
 
     private static boolean hasDescendantImageView(ViewGroup group) {
@@ -6809,12 +6817,6 @@ public final class Bridge {
             float radius = dp(12) + (dp(16) - dp(12)) * p;
 
             if (bitmap != null) {
-                // 1. Solid card background (White)
-                Paint cardBg = new Paint(Paint.ANTI_ALIAS_FLAG);
-                cardBg.setColor(Color.WHITE);
-                canvas.drawRoundRect(boxRect, radius, radius, cardBg);
-
-                // 2. Draw bitmap content clipped to rounded card
                 Path clip = new Path();
                 clip.addRoundRect(boxRect, radius, radius, Path.Direction.CW);
                 canvas.save();
@@ -6826,13 +6828,6 @@ public final class Bridge {
                 canvas.scale(scale, scale);
                 canvas.drawBitmap(bitmap, 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
                 canvas.restore();
-
-                // 3. Subtle card outline border
-                Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
-                border.setStyle(Paint.Style.STROKE);
-                border.setStrokeWidth(dp(1));
-                border.setColor(Color.argb(30, 0, 0, 0));
-                canvas.drawRoundRect(boxRect, radius, radius, border);
                 return;
             }
 
