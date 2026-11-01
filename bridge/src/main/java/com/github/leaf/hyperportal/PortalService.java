@@ -565,6 +565,7 @@ public class PortalService extends Service {
             }
             if (mDockBar != null) {
                 if (mDockBar.getVisibility() != View.VISIBLE) {
+                    mDockBar.resetScroll();
                     mDockBar.setVisibility(View.VISIBLE);
                     if (isRight) {
                         mDockBar.setTranslationX(dp(60));

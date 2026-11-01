@@ -91,6 +91,9 @@ public class ColorOSDockBar extends FrameLayout {
     private boolean mScrollFast = false;
     private long mHoverStartTime = 0L;
     private boolean mAutoScrollRunning = false;
+    private long mLastScrollTickTime = 0L;
+    private float mLastRawX = -1f;
+    private float mLastRawY = -1f;
 
     // Fisheye bloom animation state (prevents abrupt jumping when dock opens)
     private float mExpansionProgress = 1.0f;
@@ -106,8 +109,12 @@ public class ColorOSDockBar extends FrameLayout {
                 return;
             }
             long now = SystemClock.uptimeMillis();
-            if (now - mHoverStartTime >= 60L) { // 60ms delay, smooth & responsive
-                int step = mScrollFast ? dp(8) : dp(4);
+            if (now - mHoverStartTime >= 50L) { // 50ms hover delay
+                long dt = Math.min(32, Math.max(8, now - mLastScrollTickTime));
+                mLastScrollTickTime = now;
+                float speedDpPerSec = mScrollFast ? 420f : 200f;
+                int step = Math.max(1, Math.round(dp(speedDpPerSec * dt / 1000f)));
+
                 if (mOrientation == ORIENTATION_VERTICAL) {
                     if (mVerticalScrollView != null && mRow != null) {
                         int currentScroll = mVerticalScrollView.getScrollY();
@@ -118,14 +125,14 @@ public class ColorOSDockBar extends FrameLayout {
                                 return;
                             }
                             int actualStep = Math.min(step, currentScroll);
-                            mVerticalScrollView.smoothScrollBy(0, -actualStep);
+                            mVerticalScrollView.scrollBy(0, -actualStep);
                         } else if (mScrollDirection > 0) {
                             if (currentScroll >= maxScroll) {
                                 stopAutoScroll();
                                 return;
                             }
                             int actualStep = Math.min(step, maxScroll - currentScroll);
-                            mVerticalScrollView.smoothScrollBy(0, actualStep);
+                            mVerticalScrollView.scrollBy(0, actualStep);
                         }
                     }
                 } else {
@@ -138,19 +145,23 @@ public class ColorOSDockBar extends FrameLayout {
                                 return;
                             }
                             int actualStep = Math.min(step, currentScroll);
-                            mScrollView.smoothScrollBy(-actualStep, 0);
+                            mScrollView.scrollBy(-actualStep, 0);
                         } else if (mScrollDirection > 0) {
                             if (currentScroll >= maxScroll) {
                                 stopAutoScroll();
                                 return;
                             }
                             int actualStep = Math.min(step, maxScroll - currentScroll);
-                            mScrollView.smoothScrollBy(actualStep, 0);
+                            mScrollView.scrollBy(actualStep, 0);
                         }
                     }
                 }
+            } else {
+                mLastScrollTickTime = now;
             }
-            postOnAnimationDelayed(this, 16);
+            if (mAutoScrollRunning) {
+                postOnAnimation(this);
+            }
         }
     };
 
@@ -204,12 +215,18 @@ public class ColorOSDockBar extends FrameLayout {
                 protected void onSizeChanged(int w, int h, int oldw, int oldh) {
                     super.onSizeChanged(w, h, oldw, oldh);
                     if (h > 0 && mRow != null) {
-                        int topBlank = (int) (h * 0.30f);
-                        int bottomBlank = (int) (h * 0.25f);
+                        int topBlank = (int) (h * 0.20f);
+                        int bottomBlank = (int) (h * 0.20f);
                         if (mRow.getPaddingTop() != topBlank || mRow.getPaddingBottom() != bottomBlank) {
                             mRow.setPadding(0, topBlank, 0, bottomBlank);
                         }
                     }
+                }
+
+                @Override
+                protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+                    super.onScrollChanged(l, t, oldl, oldt);
+                    updateFisheyeDuringScroll();
                 }
             };
             mVerticalScrollView.setVerticalScrollBarEnabled(false);
@@ -223,8 +240,8 @@ public class ColorOSDockBar extends FrameLayout {
             addView(mVerticalScrollView, scrollParams);
 
             int screenH = getContext().getResources().getDisplayMetrics().heightPixels;
-            int topBlank = (int) (screenH * 0.30f);
-            int bottomBlank = (int) (screenH * 0.25f);
+            int topBlank = (int) (screenH * 0.20f);
+            int bottomBlank = (int) (screenH * 0.20f);
 
             mRow = new LinearLayout(getContext());
             mRow.setOrientation(LinearLayout.VERTICAL);
@@ -255,6 +272,12 @@ public class ColorOSDockBar extends FrameLayout {
                             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
                         }
                     }
+                }
+
+                @Override
+                protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+                    super.onScrollChanged(l, t, oldl, oldt);
+                    updateFisheyeDuringScroll();
                 }
             };
             mScrollView.setHorizontalScrollBarEnabled(false);
@@ -439,6 +462,29 @@ public class ColorOSDockBar extends FrameLayout {
         return iconDrawable;
     }
 
+    public void resetScroll() {
+        if (mVerticalScrollView != null) {
+            mVerticalScrollView.scrollTo(0, 0);
+        }
+        if (mScrollView != null) {
+            mScrollView.scrollTo(0, 0);
+        }
+        stopAutoScroll();
+    }
+
+    private void updateFisheyeDuringScroll() {
+        if (mLastRawX < 0 || mLastRawY < 0 || mRow == null || mRow.getChildCount() == 0) {
+            return;
+        }
+        int[] rowScreenLoc = new int[2];
+        mRow.getLocationOnScreen(rowScreenLoc);
+        float rowTouchX = mLastRawX - rowScreenLoc[0];
+        float rowTouchY = mLastRawY - rowScreenLoc[1];
+        mLastTouchX = rowTouchX;
+        mLastTouchY = rowTouchY;
+        applyFisheye(rowTouchX, rowTouchY);
+    }
+
     /**
      * Starts smooth blooming animation from flat icons (1.0) to full fisheye wave.
      * Prevents abrupt scale jumping when the dock bar slides onto screen.
@@ -448,12 +494,6 @@ public class ColorOSDockBar extends FrameLayout {
     }
 
     public void startEnterAnimation(float rawX, float rawY) {
-        if (mVerticalScrollView != null) {
-            mVerticalScrollView.scrollTo(0, 0);
-        }
-        if (mScrollView != null) {
-            mScrollView.scrollTo(0, 0);
-        }
         if (mEnterAnimator != null) {
             mEnterAnimator.cancel();
         }
@@ -464,6 +504,8 @@ public class ColorOSDockBar extends FrameLayout {
             mRow.getLocationOnScreen(rowScreenLoc);
             mLastTouchX = rawX - rowScreenLoc[0];
             mLastTouchY = rawY - rowScreenLoc[1];
+            mLastRawX = rawX;
+            mLastRawY = rawY;
         }
         mEnterAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f);
         mEnterAnimator.setDuration(260);
@@ -498,6 +540,9 @@ public class ColorOSDockBar extends FrameLayout {
             return;
         }
 
+        mLastRawX = rawX;
+        mLastRawY = rawY;
+
         // Measure finger coordinates directly in mRow's coordinate space!
         int[] rowScreenLoc = new int[2];
         mRow.getLocationOnScreen(rowScreenLoc);
@@ -528,8 +573,8 @@ public class ColorOSDockBar extends FrameLayout {
                 stopAutoScroll();
             }
 
-            // Boundary check: if finger moves too far left of dock or far beyond top/bottom
-            if (rowTouchX < -dp(60) || rowTouchY < -dp(40) || rowTouchY > mRow.getHeight() + dp(40)) {
+            // Boundary check: if finger moves too far left of dock (into screen interior)
+            if (rowTouchX < -dp(80) || rowTouchX > dp(120)) {
                 resetMagnification(true);
                 return;
             }
@@ -611,18 +656,24 @@ public class ColorOSDockBar extends FrameLayout {
             float v2 = offset * 0.13f;
             float centerScale = 1.23f - Math.abs(v2);
 
+            // Proximity factor: smoothly falls off if finger is far from all items (e.g. in top/bottom blank space)
+            float proximity = 1.0f;
+            if (minDist > itemStep * 0.5f) {
+                proximity = Math.max(0.0f, 1.0f - (minDist - itemStep * 0.5f) / (itemStep * 1.0f));
+            }
+
             for (int i = 0; i < count; i++) {
                 float targetScale;
                 if (i == closestIdx) {
-                    targetScale = centerScale;
+                    targetScale = 1.0f + (centerScale - 1.0f) * proximity;
                 } else if (i < closestIdx) {
                     int delta = closestIdx - i;
-                    targetScale = 1.23f - delta * 0.13f - v2;
-                    targetScale = Math.max(1.0f, targetScale);
+                    float base = Math.max(1.0f, 1.23f - delta * 0.13f - v2);
+                    targetScale = 1.0f + (base - 1.0f) * proximity;
                 } else {
                     int delta = i - closestIdx;
-                    targetScale = 1.23f - delta * 0.13f + v2;
-                    targetScale = Math.max(1.0f, targetScale);
+                    float base = Math.max(1.0f, 1.23f - delta * 0.13f + v2);
+                    targetScale = 1.0f + (base - 1.0f) * proximity;
                 }
 
                 float scale = 1.0f + (targetScale - 1.0f) * mExpansionProgress;
@@ -680,18 +731,24 @@ public class ColorOSDockBar extends FrameLayout {
             float v2 = offset * 0.13f;
             float centerScale = 1.23f - Math.abs(v2);
 
+            // Proximity factor: smoothly falls off if finger is far from all items
+            float proximity = 1.0f;
+            if (minDist > itemStep * 0.5f) {
+                proximity = Math.max(0.0f, 1.0f - (minDist - itemStep * 0.5f) / (itemStep * 1.0f));
+            }
+
             for (int i = 0; i < count; i++) {
                 float targetScale;
                 if (i == closestIdx) {
-                    targetScale = centerScale;
+                    targetScale = 1.0f + (centerScale - 1.0f) * proximity;
                 } else if (i < closestIdx) {
                     int delta = closestIdx - i;
-                    targetScale = 1.23f - delta * 0.13f - v2;
-                    targetScale = Math.max(1.0f, targetScale);
+                    float base = Math.max(1.0f, 1.23f - delta * 0.13f - v2);
+                    targetScale = 1.0f + (base - 1.0f) * proximity;
                 } else {
                     int delta = i - closestIdx;
-                    targetScale = 1.23f - delta * 0.13f + v2;
-                    targetScale = Math.max(1.0f, targetScale);
+                    float base = Math.max(1.0f, 1.23f - delta * 0.13f + v2);
+                    targetScale = 1.0f + (base - 1.0f) * proximity;
                 }
 
                 // Apply expansion bloom smoothly: (targetScale - 1.0) * mExpansionProgress
