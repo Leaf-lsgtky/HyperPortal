@@ -587,6 +587,11 @@ public final class PortalSystemUiModule {
         private void buildViewHierarchy() {
             mContainer = new FrameLayout(mContext);
             mContainer.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
+            mContainer.setFitsSystemWindows(false);
+            mContainer.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
 
             int navBarHeight = dp(24);
             try {
@@ -691,10 +696,17 @@ public final class PortalSystemUiModule {
                     TYPE_NAVIGATION_BAR_PANEL, // SystemUI native window
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
                             | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                     PixelFormat.TRANSLUCENT);
+            if (Build.VERSION.SDK_INT >= 28) {
+                mParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            }
             mParams.gravity = targetGravity;
+            mParams.x = 0;
+            mParams.y = 0;
             updateDockConfiguration(isRight);
         }
 
@@ -705,6 +717,11 @@ public final class PortalSystemUiModule {
             if (mParams.height != targetHeight || mParams.gravity != targetGravity) {
                 mParams.height = targetHeight;
                 mParams.gravity = targetGravity;
+                mParams.x = 0;
+                mParams.y = 0;
+                if (Build.VERSION.SDK_INT >= 28) {
+                    mParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                }
                 if (mShowing && mContainer != null) {
                     try {
                         mWindowManager.updateViewLayout(mContainer, mParams);
@@ -726,15 +743,17 @@ public final class PortalSystemUiModule {
                 dockParams = (FrameLayout.LayoutParams) lp;
             } else {
                 dockParams = new FrameLayout.LayoutParams(
-                        isRight ? dp(96) : FrameLayout.LayoutParams.MATCH_PARENT,
-                        isRight ? dp(480) : dp(153));
+                        isRight ? dp(88) : FrameLayout.LayoutParams.MATCH_PARENT,
+                        isRight ? FrameLayout.LayoutParams.MATCH_PARENT : dp(153));
             }
             if (isRight) {
-                dockParams.width = dp(96);
-                dockParams.height = dp(480);
-                dockParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-                dockParams.rightMargin = dp(10);
+                dockParams.width = dp(88);
+                dockParams.height = FrameLayout.LayoutParams.MATCH_PARENT;
+                dockParams.gravity = Gravity.END | Gravity.TOP;
+                dockParams.rightMargin = dp(2);
+                dockParams.topMargin = 0;
                 dockParams.bottomMargin = 0;
+                dockParams.leftMargin = 0;
             } else {
                 int navBarHeight = dp(24);
                 try {
@@ -749,6 +768,8 @@ public final class PortalSystemUiModule {
                 dockParams.gravity = Gravity.BOTTOM;
                 dockParams.bottomMargin = Math.max(0, navBarHeight + dp(20) - 50);
                 dockParams.rightMargin = 0;
+                dockParams.leftMargin = 0;
+                dockParams.topMargin = 0;
             }
             mDockBar.setLayoutParams(dockParams);
         }
@@ -1455,9 +1476,9 @@ public final class PortalSystemUiModule {
                     mTargetTouchY = mCurrentTouchY;
                 }
 
-                mCurrentTouchY += (mTargetTouchY - mCurrentTouchY) * 0.28f;
-                mCurrentScaleX += (mTargetScaleX - mCurrentScaleX) * 0.22f;
-                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * 0.22f;
+                mCurrentTouchY += (mTargetTouchY - mCurrentTouchY) * 0.48f;
+                mCurrentScaleX += (mTargetScaleX - mCurrentScaleX) * 0.35f;
+                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * 0.35f;
 
                 if (mCurrentAlpha <= 0.01f) return;
 
@@ -1467,7 +1488,7 @@ public final class PortalSystemUiModule {
 
                 if (mHonorGlowBmp != null && !mHonorGlowBmp.isRecycled()) {
                     float glowWidth = dp(115) * mCurrentScaleX;
-                    float glowHeight = h;
+                    float glowHeight = Math.max(h, dp(800)) * 1.35f;
                     float top = mCurrentTouchY - (glowHeight * 0.5f);
                     float bottom = mCurrentTouchY + (glowHeight * 0.5f);
                     float right = w;
@@ -1482,7 +1503,7 @@ public final class PortalSystemUiModule {
                     float cx = w;
                     float cy = mCurrentTouchY;
                     float rx = dp(115) * mCurrentScaleX;
-                    float ry = h * 0.45f;
+                    float ry = Math.max(h, dp(800)) * 0.55f;
                     canvas.save();
                     canvas.translate(cx, cy);
                     canvas.scale(rx / dp(200), ry / dp(200));
@@ -1500,7 +1521,7 @@ public final class PortalSystemUiModule {
                     canvas.restore();
                 }
 
-                if (mCurrentAlpha > 0.05f) {
+                if (mCurrentAlpha > 0.02f || Math.abs(mTargetTouchY - mCurrentTouchY) > 0.5f || Math.abs(mTargetScaleX - mCurrentScaleX) > 0.01f) {
                     postInvalidateOnAnimation();
                 }
                 return;

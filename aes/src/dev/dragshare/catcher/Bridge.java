@@ -5826,7 +5826,7 @@ public final class Bridge {
             }
             if (state == 1 && sLastNotifiedState == 1) {
                 float dist = (float) Math.hypot(x - sLastNotifiedX, y - sLastNotifiedY);
-                if (now - sLastNotifyTime < 40 || dist < 12f) {
+                if (now - sLastNotifyTime < 12 || dist < 2f) {
                     return;
                 }
             }
@@ -6027,7 +6027,7 @@ public final class Bridge {
                                 lastNotifiedMotionY = screenY;
                             } else if (!inHotZone) {
                                 float dist = (float) Math.hypot(screenX - lastNotifiedMotionX, screenY - lastNotifiedMotionY);
-                                if (dist > 18.0f) {
+                                if (dist > 2.0f) {
                                     lastNotifiedMotionX = screenX;
                                     lastNotifiedMotionY = screenY;
                                     notifyPortalDragState(v.getContext(), 1, screenX, screenY);

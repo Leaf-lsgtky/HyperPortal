@@ -985,10 +985,10 @@ public class PortalService extends Service {
                     isRight ? dp(480) : dp(153));
         }
         if (isRight) {
-            dockParams.width = dp(96);
-            dockParams.height = dp(480);
-            dockParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-            dockParams.rightMargin = dp(10);
+            dockParams.width = dp(88);
+            dockParams.height = FrameLayout.LayoutParams.MATCH_PARENT;
+            dockParams.gravity = Gravity.END | Gravity.TOP;
+            dockParams.rightMargin = dp(2);
             dockParams.bottomMargin = 0;
             dockParams.leftMargin = 0;
             dockParams.topMargin = 0;
@@ -1722,9 +1722,9 @@ public class PortalService extends Service {
                     mTargetTouchY = mCurrentTouchY;
                 }
 
-                mCurrentTouchY += (mTargetTouchY - mCurrentTouchY) * 0.28f;
-                mCurrentScaleX += (mTargetScaleX - mCurrentScaleX) * 0.22f;
-                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * 0.22f;
+                mCurrentTouchY += (mTargetTouchY - mCurrentTouchY) * 0.48f;
+                mCurrentScaleX += (mTargetScaleX - mCurrentScaleX) * 0.35f;
+                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * 0.35f;
 
                 if (mCurrentAlpha <= 0.01f) return;
 
@@ -1734,7 +1734,7 @@ public class PortalService extends Service {
 
                 if (mHonorGlowBmp != null && !mHonorGlowBmp.isRecycled()) {
                     float glowWidth = dp(115) * mCurrentScaleX;
-                    float glowHeight = h;
+                    float glowHeight = Math.max(h, dp(800)) * 1.35f;
                     float top = mCurrentTouchY - (glowHeight * 0.5f);
                     float bottom = mCurrentTouchY + (glowHeight * 0.5f);
                     float right = w;
@@ -1748,7 +1748,7 @@ public class PortalService extends Service {
                     float cx = w;
                     float cy = mCurrentTouchY;
                     float rx = dp(115) * mCurrentScaleX;
-                    float ry = h * 0.45f;
+                    float ry = Math.max(h, dp(800)) * 0.55f;
                     canvas.save();
                     canvas.translate(cx, cy);
                     canvas.scale(rx / dp(200), ry / dp(200));
@@ -1766,7 +1766,7 @@ public class PortalService extends Service {
                     canvas.restore();
                 }
 
-                if (mCurrentAlpha > 0.05f) {
+                if (mCurrentAlpha > 0.02f || Math.abs(mTargetTouchY - mCurrentTouchY) > 0.5f || Math.abs(mTargetScaleX - mCurrentScaleX) > 0.01f) {
                     postInvalidateOnAnimation();
                 }
                 return;

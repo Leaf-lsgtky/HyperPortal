@@ -189,31 +189,25 @@ public class ColorOSDockBar extends FrameLayout {
 
         ViewGroup.LayoutParams existingLp = getLayoutParams();
         if (existingLp instanceof ViewGroup.MarginLayoutParams) {
-            existingLp.width = mOrientation == ORIENTATION_VERTICAL ? dp(96) : ViewGroup.LayoutParams.MATCH_PARENT;
-            existingLp.height = mOrientation == ORIENTATION_VERTICAL ? ViewGroup.LayoutParams.WRAP_CONTENT : dp(153);
+            existingLp.width = mOrientation == ORIENTATION_VERTICAL ? dp(88) : ViewGroup.LayoutParams.MATCH_PARENT;
+            existingLp.height = mOrientation == ORIENTATION_VERTICAL ? ViewGroup.LayoutParams.MATCH_PARENT : dp(153);
             setLayoutParams(existingLp);
         } else {
             setLayoutParams(new FrameLayout.LayoutParams(
-                    mOrientation == ORIENTATION_VERTICAL ? dp(96) : FrameLayout.LayoutParams.MATCH_PARENT,
-                    mOrientation == ORIENTATION_VERTICAL ? FrameLayout.LayoutParams.WRAP_CONTENT : dp(153)));
+                    mOrientation == ORIENTATION_VERTICAL ? dp(88) : FrameLayout.LayoutParams.MATCH_PARENT,
+                    mOrientation == ORIENTATION_VERTICAL ? FrameLayout.LayoutParams.MATCH_PARENT : dp(153)));
         }
 
         if (mOrientation == ORIENTATION_VERTICAL) {
             mVerticalScrollView = new ScrollView(getContext()) {
                 @Override
-                protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-                    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
-                    if (mRow != null) {
-                        int scrollH = getMeasuredHeight();
-                        int rowH = mRow.getMeasuredHeight();
-                        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mRow.getLayoutParams();
-                        int targetGravity = (rowH < scrollH)
-                                ? (Gravity.CENTER_VERTICAL | Gravity.CENTER_HORIZONTAL)
-                                : (Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-                        if (lp.gravity != targetGravity) {
-                            lp.gravity = targetGravity;
-                            mRow.setLayoutParams(lp);
-                            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+                    super.onSizeChanged(w, h, oldw, oldh);
+                    if (h > 0 && mRow != null) {
+                        int topBlank = (int) (h * 0.30f);
+                        int bottomBlank = (int) (h * 0.25f);
+                        if (mRow.getPaddingTop() != topBlank || mRow.getPaddingBottom() != bottomBlank) {
+                            mRow.setPadding(0, topBlank, 0, bottomBlank);
                         }
                     }
                 }
@@ -225,18 +219,22 @@ public class ColorOSDockBar extends FrameLayout {
             mVerticalScrollView.setClipToPadding(false);
 
             FrameLayout.LayoutParams scrollParams = new FrameLayout.LayoutParams(
-                    dp(96), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER);
+                    dp(88), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END | Gravity.TOP);
             addView(mVerticalScrollView, scrollParams);
+
+            int screenH = getContext().getResources().getDisplayMetrics().heightPixels;
+            int topBlank = (int) (screenH * 0.30f);
+            int bottomBlank = (int) (screenH * 0.25f);
 
             mRow = new LinearLayout(getContext());
             mRow.setOrientation(LinearLayout.VERTICAL);
             mRow.setGravity(Gravity.CENTER_HORIZONTAL);
-            mRow.setPadding(0, dp(12), 0, dp(12));
+            mRow.setPadding(0, topBlank, 0, bottomBlank);
             mRow.setClipChildren(false);
             mRow.setClipToPadding(false);
 
             FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
-                    dp(96), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+                    dp(88), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
             mVerticalScrollView.addView(mRow, rowParams);
             mScrollView = null;
         } else {
@@ -450,6 +448,12 @@ public class ColorOSDockBar extends FrameLayout {
     }
 
     public void startEnterAnimation(float rawX, float rawY) {
+        if (mVerticalScrollView != null) {
+            mVerticalScrollView.scrollTo(0, 0);
+        }
+        if (mScrollView != null) {
+            mScrollView.scrollTo(0, 0);
+        }
         if (mEnterAnimator != null) {
             mEnterAnimator.cancel();
         }
