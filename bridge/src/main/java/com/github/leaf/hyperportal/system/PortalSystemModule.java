@@ -775,7 +775,7 @@ public final class PortalSystemModule {
                     // have no surface while WeChat is in the background; they
                     // still remain in mWindowMap and reappear when WeChat
                     // resumes.  Remove them even when currently hidden.
-                    if (type != 1002 // TYPE_APPLICATION_PANEL
+                    if (type != 1000 // TYPE_APPLICATION_PANEL
                             || width < 70 || width > 180
                             || height < 50 || height > 140) {
                         continue;
