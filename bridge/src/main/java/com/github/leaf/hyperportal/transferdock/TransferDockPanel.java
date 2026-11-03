@@ -5,11 +5,13 @@ import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -75,6 +77,7 @@ public class TransferDockPanel extends FrameLayout {
 
     private ValueAnimator mAnim;
     private OnPanelDismissListener mDismissListener;
+    private TransferDockController mController;
     private boolean mIsDismissing = false;
 
     public TransferDockPanel(@NonNull Context context) {
@@ -87,6 +90,10 @@ public class TransferDockPanel extends FrameLayout {
         super(context, attrs);
         mDensity = context.getResources().getDisplayMetrics().density;
         init();
+    }
+
+    public void setController(TransferDockController controller) {
+        this.mController = controller;
     }
 
     private int dp(float value) {
@@ -230,10 +237,21 @@ public class TransferDockPanel extends FrameLayout {
         mContentContainer.addView(mScrollView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // Restore drawer alpha when external drag finishes
+        // Drag listener on window: MUST return true on ACTION_DRAG_STARTED to receive ACTION_DRAG_ENDED
         setOnDragListener((v, event) -> {
-            if (event.getAction() == DragEvent.ACTION_DRAG_ENDED) {
-                mDrawerLayout.animate().alpha(1.0f).setDuration(200).start();
+            int action = event.getAction();
+            if (action == DragEvent.ACTION_DRAG_STARTED) {
+                return true;
+            }
+            if (action == DragEvent.ACTION_DRAG_ENDED) {
+                boolean success = event.getResult();
+                Log.i(TAG, "ACTION_DRAG_ENDED received in TransferDockPanel, success=" + success);
+                if (mController != null) {
+                    mController.onPanelDragEnded(success);
+                } else {
+                    restoreFromDrag();
+                }
+                return true;
             }
             return false;
         });
@@ -243,6 +261,11 @@ public class TransferDockPanel extends FrameLayout {
 
     public void setOnDismissListener(OnPanelDismissListener listener) {
         this.mDismissListener = listener;
+    }
+
+    public void restoreFromDrag() {
+        mBackdropView.setVisibility(View.VISIBLE);
+        mDrawerLayout.animate().alpha(1.0f).setDuration(200).start();
     }
 
     public void reloadItems() {
@@ -361,7 +384,10 @@ public class TransferDockPanel extends FrameLayout {
         if (item.getType() == TransferDockItem.TYPE_IMAGE) {
             Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
             if (uri != null) {
-                clipData = ClipData.newUri(getContext().getContentResolver(), "image", uri);
+                String[] mimeTypes = new String[]{"image/png", "image/*", "text/plain"};
+                ClipDescription desc = new ClipDescription("TransferDock", mimeTypes);
+                ClipData.Item clipItem = new ClipData.Item(item.getTitle(), null, uri);
+                clipData = new ClipData(desc, clipItem);
             } else if (!TextUtils.isEmpty(item.getText())) {
                 clipData = ClipData.newPlainText("TransferDock", item.getText());
             } else {
@@ -380,13 +406,34 @@ public class TransferDockPanel extends FrameLayout {
                 outShadowSize.set(cardView.getWidth(), cardView.getHeight());
                 outShadowTouchPoint.set(cardView.getWidth() / 2, cardView.getHeight() / 2);
             }
+
+            @Override
+            public void onDrawShadow(Canvas canvas) {
+                float prevAlpha = cardView.getAlpha();
+                cardView.setAlpha(1.0f);
+                super.onDrawShadow(canvas);
+                cardView.setAlpha(prevAlpha);
+            }
         };
 
-        // Temporarily fade out the drawer during drag so the target app is visible
-        mDrawerLayout.animate().alpha(0.08f).setDuration(150).start();
+        // Temporarily fade drawer and hide full-screen backdrop
+        mBackdropView.setVisibility(View.GONE);
+        mDrawerLayout.setAlpha(0.12f);
+
+        // Notify controller to make window non-touchable and shrink width so target app receives drop!
+        if (mController != null) {
+            mController.onPanelDragStarted();
+        }
 
         int flags = View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ;
-        cardView.startDragAndDrop(clipData, shadow, item, flags);
+        boolean started = cardView.startDragAndDrop(clipData, shadow, item, flags);
+        if (!started) {
+            if (mController != null) {
+                mController.onPanelDragEnded(false);
+            } else {
+                restoreFromDrag();
+            }
+        }
     }
 
     private void copyItem(TransferDockItem item) {
@@ -458,12 +505,17 @@ public class TransferDockPanel extends FrameLayout {
         TransferDockManager.getInstance(getContext()).clearAll();
         reloadItems();
         Toast.makeText(getContext(), "中转站已清空", Toast.LENGTH_SHORT).show();
+        if (mController != null) {
+            mController.hideFloatBar();
+        }
     }
 
     public void showWithAnim() {
         mIsDismissing = false;
         mDrawerLayout.setTranslationX(dp(146));
         mBackdropView.setAlpha(0f);
+        mBackdropView.setVisibility(View.VISIBLE);
+        mDrawerLayout.setAlpha(1.0f);
         setVisibility(View.VISIBLE);
 
         if (mAnim != null) {

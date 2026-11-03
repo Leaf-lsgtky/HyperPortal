@@ -216,7 +216,10 @@ public class TransferDockController {
 
                 if (mPanelView == null) {
                     mPanelView = new TransferDockPanel(mContext);
+                    mPanelView.setController(this);
                     mPanelView.setOnDismissListener(() -> dismissDrawer());
+                } else {
+                    mPanelView.setController(this);
                 }
 
                 int windowType = resolveWindowType();
@@ -239,11 +242,17 @@ public class TransferDockController {
                                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
                     }
                     mPanelParams.gravity = Gravity.FILL;
+                } else {
+                    mPanelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                    mPanelParams.width = WindowManager.LayoutParams.MATCH_PARENT;
+                    mPanelParams.gravity = Gravity.FILL;
                 }
 
                 if (!mPanelAttached) {
                     mWindowManager.addView(mPanelView, mPanelParams);
                     mPanelAttached = true;
+                } else {
+                    mWindowManager.updateViewLayout(mPanelView, mPanelParams);
                 }
 
                 mPanelView.reloadItems();
@@ -251,6 +260,53 @@ public class TransferDockController {
                 Log.i(TAG, "TransferDock drawer panel opened");
             } catch (Throwable t) {
                 Log.w(TAG, "openDrawer failed", t);
+            }
+        });
+    }
+
+    /**
+     * Called when user starts dragging a card out of the drawer.
+     * Makes the window non-touchable and shrinks to 146dp so underlying apps receive the drop!
+     */
+    public void onPanelDragStarted() {
+        mMainHandler.post(() -> {
+            if (mPanelAttached && mPanelView != null && mPanelParams != null) {
+                try {
+                    mPanelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                    mPanelParams.width = dp(146);
+                    mPanelParams.gravity = Gravity.TOP | Gravity.END;
+                    mWindowManager.updateViewLayout(mPanelView, mPanelParams);
+                    Log.i(TAG, "onPanelDragStarted: window set to NOT_TOUCHABLE, width=146dp");
+                } catch (Throwable t) {
+                    Log.w(TAG, "onPanelDragStarted failed", t);
+                }
+            }
+        });
+    }
+
+    /**
+     * Called when the drag ends (either dropped into an app or cancelled).
+     */
+    public void onPanelDragEnded(boolean success) {
+        mMainHandler.post(() -> {
+            Log.i(TAG, "onPanelDragEnded success=" + success);
+            if (success) {
+                // Drop consumed by target app! Dismiss drawer and return to float bar
+                dismissDrawer();
+                android.widget.Toast.makeText(mContext, "已拖出发送", android.widget.Toast.LENGTH_SHORT).show();
+            } else {
+                // Drag cancelled or dropped nowhere: restore full screen window and restore drawer
+                if (mPanelAttached && mPanelView != null && mPanelParams != null) {
+                    try {
+                        mPanelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                        mPanelParams.width = WindowManager.LayoutParams.MATCH_PARENT;
+                        mPanelParams.gravity = Gravity.FILL;
+                        mWindowManager.updateViewLayout(mPanelView, mPanelParams);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "restore window failed", t);
+                    }
+                    mPanelView.restoreFromDrag();
+                }
             }
         });
     }
