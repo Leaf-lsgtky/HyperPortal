@@ -2,6 +2,7 @@
 package com.github.leaf.hyperportal.transferdock;
 
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -39,11 +40,13 @@ public class TransferDockFloatBarView extends View {
     private float mTouchDownX;
     private float mTouchDownY;
     private boolean mMoved = false;
+    private boolean mNight;
 
     public TransferDockFloatBarView(@NonNull Context context) {
         super(context);
         mDensity = context.getResources().getDisplayMetrics().density;
         mTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        mNight = TransferDockTheme.isNight(context);
         init();
     }
 
@@ -52,12 +55,32 @@ public class TransferDockFloatBarView extends View {
     }
 
     private void init() {
-        mPaint.setColor(Color.parseColor("#992C2C2E"));
         mPaint.setStyle(Paint.Style.FILL);
-
-        mStrokePaint.setColor(Color.parseColor("#33FFFFFF"));
         mStrokePaint.setStyle(Paint.Style.STROKE);
         mStrokePaint.setStrokeWidth(dp(0.8f));
+        applyTheme();
+    }
+
+    private void applyTheme() {
+        mNight = TransferDockTheme.isNight(getContext());
+        if (mNight) {
+            mPaint.setColor(Color.parseColor("#992C2C2E"));
+            mStrokePaint.setColor(Color.parseColor("#33FFFFFF"));
+        } else {
+            mPaint.setColor(Color.parseColor("#66000000"));
+            mStrokePaint.setColor(Color.parseColor("#1A000000"));
+        }
+        invalidate();
+    }
+
+    public void refreshTheme() {
+        applyTheme();
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyTheme();
     }
 
     public void setOnHandleClickListener(OnHandleClickListener listener) {

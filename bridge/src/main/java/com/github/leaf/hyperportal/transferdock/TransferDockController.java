@@ -9,11 +9,23 @@ import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.Toast;
+
+import java.util.function.Consumer;
 
 /**
  * Manages the presentation, lifecycle, and WindowManager integration
  * of ColorOS TransferDock Capsule, FloatBar Handle, and Drawer Panel.
+ *
+ * The drawer is split into two windows:
+ * - a full-screen dim/touch scrim, and
+ * - a bounded 146dp x 578dp panel window with compositor background blur.
+ *
+ * Keeping the panel window bounded is important: Window.setBackgroundBlurRadius
+ * (and WindowManager.LayoutParams.setBlurBehindRadius) blurs behind the whole
+ * window.  A full-screen panel window would therefore blur the whole screen.
  */
 public class TransferDockController {
 
@@ -35,9 +47,19 @@ public class TransferDockController {
     private WindowManager.LayoutParams mPanelParams;
     private boolean mPanelAttached = false;
 
+    private View mScrimView;
+    private WindowManager.LayoutParams mScrimParams;
+    private boolean mScrimAttached = false;
+
+    private boolean mBlurAvailable;
+    private Consumer<Boolean> mBlurEnabledListener;
+    private boolean mBlurListenerRegistered = false;
+
     public TransferDockController(Context context) {
         this.mContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
         this.mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
+        mBlurAvailable = queryBlurAvailable();
+        registerBlurListener();
     }
 
     private int dp(float value) {
@@ -53,6 +75,53 @@ public class TransferDockController {
                 : WindowManager.LayoutParams.TYPE_PHONE;
     }
 
+    private boolean queryBlurAvailable() {
+        if (Build.VERSION.SDK_INT < 31) {
+            return false;
+        }
+        try {
+            return mWindowManager.isCrossWindowBlurEnabled();
+        } catch (Throwable t) {
+            Log.w(TAG, "isCrossWindowBlurEnabled failed", t);
+            return false;
+        }
+    }
+
+    private void registerBlurListener() {
+        if (Build.VERSION.SDK_INT < 31) {
+            return;
+        }
+        mBlurEnabledListener = enabled -> mMainHandler.post(() -> {
+            mBlurAvailable = Boolean.TRUE.equals(enabled);
+            if (mPanelAttached && mPanelView != null && mPanelParams != null) {
+                applyPanelBlur(mPanelParams, mBlurAvailable);
+                mPanelView.setBackdropBlurAvailable(mBlurAvailable);
+                try {
+                    mWindowManager.updateViewLayout(mPanelView, mPanelParams);
+                } catch (Throwable t) {
+                    Log.w(TAG, "update blur layout failed", t);
+                }
+            }
+        });
+        try {
+            mWindowManager.addCrossWindowBlurEnabledListener(mBlurEnabledListener);
+            mBlurListenerRegistered = true;
+        } catch (Throwable t) {
+            Log.w(TAG, "addCrossWindowBlurEnabledListener failed", t);
+        }
+    }
+
+    private void applyPanelBlur(WindowManager.LayoutParams params, boolean enabled) {
+        if (params == null || Build.VERSION.SDK_INT < 31) {
+            return;
+        }
+        try {
+            params.setBlurBehindRadius(enabled ? dp(32) : 0);
+        } catch (Throwable t) {
+            Log.w(TAG, "setBlurBehindRadius failed", t);
+        }
+    }
+
     /**
      * Show the ColorOS TransferDock floating capsule on the right screen edge.
      */
@@ -62,7 +131,6 @@ public class TransferDockController {
                 hideFloatBar();
 
                 if (mPanelAttached && mPanelView != null) {
-                    // Drawer already open, simply refresh contents
                     mPanelView.reloadItems();
                     return;
                 }
@@ -70,15 +138,14 @@ public class TransferDockController {
                 if (mCapsuleView == null) {
                     mCapsuleView = new TransferDockCapsuleView(mContext);
                     mCapsuleView.setListeners(
-                            () -> { // On capsule click
+                            () -> {
                                 dismissCapsule();
                                 openDrawer();
                             },
-                            () -> { // On capsule dismiss
-                                dismissCapsule();
-                            }
+                            () -> dismissCapsule()
                     );
                 }
+                mCapsuleView.refreshTheme();
 
                 DisplayMetrics dm = mContext.getResources().getDisplayMetrics();
                 int windowType = resolveWindowType();
@@ -151,10 +218,9 @@ public class TransferDockController {
 
                 if (mFloatBarView == null) {
                     mFloatBarView = new TransferDockFloatBarView(mContext);
-                    mFloatBarView.setOnHandleClickListener(() -> {
-                        openDrawer();
-                    });
+                    mFloatBarView.setOnHandleClickListener(this::openDrawer);
                 }
+                mFloatBarView.refreshTheme();
 
                 DisplayMetrics dm = mContext.getResources().getDisplayMetrics();
                 int windowType = resolveWindowType();
@@ -182,7 +248,7 @@ public class TransferDockController {
                     mWindowManager.addView(mFloatBarView, mFloatBarParams);
                     mFloatBarAttached = true;
                 }
-                mFloatBarView.setVisibility(android.view.View.VISIBLE);
+                mFloatBarView.setVisibility(View.VISIBLE);
                 Log.i(TAG, "TransferDock FloatBar handle displayed");
             } catch (Throwable t) {
                 Log.w(TAG, "showFloatBar failed", t);
@@ -205,6 +271,42 @@ public class TransferDockController {
         });
     }
 
+    private void ensureScrim() {
+        if (mScrimView == null) {
+            mScrimView = new View(mContext);
+            mScrimView.setOnClickListener(v -> dismissDrawer());
+        }
+        mScrimView.setBackgroundColor(TransferDockTheme.scrimColor(mContext));
+
+        if (mScrimParams == null) {
+            mScrimParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    resolveWindowType(),
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    PixelFormat.TRANSLUCENT
+            );
+            if (Build.VERSION.SDK_INT >= 28) {
+                mScrimParams.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            }
+            mScrimParams.gravity = Gravity.FILL;
+        }
+
+        if (!mScrimAttached) {
+            mScrimView.setAlpha(0f);
+            mWindowManager.addView(mScrimView, mScrimParams);
+            mScrimAttached = true;
+            mScrimView.animate().alpha(1f).setDuration(260).start();
+        } else {
+            mScrimView.setVisibility(View.VISIBLE);
+            mScrimView.animate().alpha(1f).setDuration(160).start();
+        }
+    }
+
     /**
      * Open the TransferDock drawer panel.
      */
@@ -216,37 +318,56 @@ public class TransferDockController {
 
                 if (mPanelView == null) {
                     mPanelView = new TransferDockPanel(mContext);
-                    mPanelView.setController(this);
-                    mPanelView.setOnDismissListener(() -> dismissDrawer());
-                } else {
-                    mPanelView.setController(this);
+                    mPanelView.setOnDismissListener(this::removePanelWindows);
+                }
+                mPanelView.setController(this);
+                mPanelView.setOnThemeChangedListener(night -> {
+                    if (mScrimView != null) {
+                        mScrimView.setBackgroundColor(TransferDockTheme.scrimColor(night));
+                    }
+                });
+                mPanelView.refreshTheme();
+
+                if (!mPanelAttached) {
+                    ensureScrim();
+                } else if (mScrimView != null) {
+                    mScrimView.setVisibility(View.VISIBLE);
+                    mScrimView.setAlpha(1f);
+                    mScrimView.setBackgroundColor(TransferDockTheme.scrimColor(mContext));
                 }
 
-                int windowType = resolveWindowType();
+                mPanelView.setBackdropBlurAvailable(mBlurAvailable);
+
+                DisplayMetrics dm = mContext.getResources().getDisplayMetrics();
+                int panelWidth = mPanelView.getPanelWidthPx();
+                int panelHeight = mPanelView.getPanelHeightPx();
+                int panelTop = Math.max(dp(24), (dm.heightPixels - panelHeight) / 2);
+
+                int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
 
                 if (mPanelParams == null) {
                     mPanelParams = new WindowManager.LayoutParams(
-                            WindowManager.LayoutParams.MATCH_PARENT,
-                            WindowManager.LayoutParams.MATCH_PARENT,
-                            windowType,
-                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                                    | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
-                                    | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                            panelWidth, panelHeight,
+                            resolveWindowType(),
+                            flags,
                             PixelFormat.TRANSLUCENT
                     );
                     if (Build.VERSION.SDK_INT >= 28) {
                         mPanelParams.layoutInDisplayCutoutMode =
                                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
                     }
-                    mPanelParams.gravity = Gravity.FILL;
                 } else {
-                    mPanelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                    mPanelParams.width = WindowManager.LayoutParams.MATCH_PARENT;
-                    mPanelParams.gravity = Gravity.FILL;
+                    mPanelParams.width = panelWidth;
+                    mPanelParams.height = panelHeight;
+                    mPanelParams.flags = flags;
                 }
+                mPanelParams.gravity = Gravity.TOP | Gravity.END;
+                mPanelParams.x = dp(8);
+                mPanelParams.y = panelTop;
+                applyPanelBlur(mPanelParams, mBlurAvailable);
 
                 if (!mPanelAttached) {
                     mWindowManager.addView(mPanelView, mPanelParams);
@@ -266,21 +387,29 @@ public class TransferDockController {
 
     /**
      * Called when user starts dragging a card out of the drawer.
-     * Makes the window non-touchable and shrinks to 146dp so underlying apps receive the drop!
+     * Both the panel and the scrim become non-touchable so the target app
+     * below can receive the drop.
      */
     public void onPanelDragStarted() {
         mMainHandler.post(() -> {
             if (mPanelAttached && mPanelView != null && mPanelParams != null) {
                 try {
                     mPanelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                    mPanelParams.width = dp(146);
-                    mPanelParams.gravity = Gravity.TOP | Gravity.END;
                     mWindowManager.updateViewLayout(mPanelView, mPanelParams);
-                    Log.i(TAG, "onPanelDragStarted: window set to NOT_TOUCHABLE, width=146dp");
                 } catch (Throwable t) {
-                    Log.w(TAG, "onPanelDragStarted failed", t);
+                    Log.w(TAG, "onPanelDragStarted panel failed", t);
                 }
             }
+            if (mScrimAttached && mScrimView != null && mScrimParams != null) {
+                try {
+                    mScrimView.setVisibility(View.GONE);
+                    mScrimParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                    mWindowManager.updateViewLayout(mScrimView, mScrimParams);
+                } catch (Throwable t) {
+                    Log.w(TAG, "onPanelDragStarted scrim failed", t);
+                }
+            }
+            Log.i(TAG, "onPanelDragStarted: panel/scrim set to NOT_TOUCHABLE");
         });
     }
 
@@ -291,43 +420,68 @@ public class TransferDockController {
         mMainHandler.post(() -> {
             Log.i(TAG, "onPanelDragEnded success=" + success);
             if (success) {
-                // Drop consumed by target app! Dismiss drawer and return to float bar
                 dismissDrawer();
-                android.widget.Toast.makeText(mContext, "已拖出发送", android.widget.Toast.LENGTH_SHORT).show();
+                Toast.makeText(mContext, "已拖出发送", Toast.LENGTH_SHORT).show();
             } else {
-                // Drag cancelled or dropped nowhere: restore full screen window and restore drawer
                 if (mPanelAttached && mPanelView != null && mPanelParams != null) {
                     try {
                         mPanelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                        mPanelParams.width = WindowManager.LayoutParams.MATCH_PARENT;
-                        mPanelParams.gravity = Gravity.FILL;
                         mWindowManager.updateViewLayout(mPanelView, mPanelParams);
                     } catch (Throwable t) {
-                        Log.w(TAG, "restore window failed", t);
+                        Log.w(TAG, "restore panel failed", t);
                     }
                     mPanelView.restoreFromDrag();
+                }
+                if (mScrimAttached && mScrimView != null && mScrimParams != null) {
+                    try {
+                        mScrimParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                        mWindowManager.updateViewLayout(mScrimView, mScrimParams);
+                        mScrimView.setVisibility(View.VISIBLE);
+                        mScrimView.setAlpha(1f);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "restore scrim failed", t);
+                    }
                 }
             }
         });
     }
 
     /**
-     * Dismiss the TransferDock drawer panel.
+     * Start the panel exit animation.  The panel's dismiss callback removes
+     * both windows once the slide-out has finished.
      */
     public void dismissDrawer() {
         mMainHandler.post(() -> {
             if (mPanelAttached && mPanelView != null) {
-                try {
-                    mWindowManager.removeView(mPanelView);
-                } catch (Throwable ignored) {
+                if (mScrimView != null) {
+                    mScrimView.animate().alpha(0f).setDuration(240).start();
                 }
-                mPanelAttached = false;
-            }
-            if (TransferDockManager.getInstance(mContext).getItemCount() > 0) {
-                showFloatBar();
+                mPanelView.dismissWithAnim();
             } else {
-                hideFloatBar();
+                removePanelWindows();
             }
         });
+    }
+
+    private void removePanelWindows() {
+        if (mPanelAttached && mPanelView != null) {
+            try {
+                mWindowManager.removeView(mPanelView);
+            } catch (Throwable ignored) {
+            }
+            mPanelAttached = false;
+        }
+        if (mScrimAttached && mScrimView != null) {
+            try {
+                mWindowManager.removeView(mScrimView);
+            } catch (Throwable ignored) {
+            }
+            mScrimAttached = false;
+        }
+        if (TransferDockManager.getInstance(mContext).getItemCount() > 0) {
+            showFloatBar();
+        } else {
+            hideFloatBar();
+        }
     }
 }

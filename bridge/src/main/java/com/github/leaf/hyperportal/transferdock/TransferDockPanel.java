@@ -9,12 +9,17 @@ import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.text.TextUtils;
@@ -42,15 +47,18 @@ import androidx.annotation.Nullable;
 import java.util.List;
 
 /**
- * 100% ColorOS TransferDock Panel Drawer (Right side sliding drawer).
+ * ColorOS 17 TransferDock panel (right side drawer).
  *
- * Replicates ColorOS Smart Sidebar TransferDock specifications:
- * - Panel width: 146dp (scene_panel_width)
- * - Card width: 122dp (transfer_dock_item_width), height: 84dp (transfer_dock_item_height)
- * - Card corner radius: 16dp (shape_transfer_dock_item_normal_bg)
- * - Title bar height: 40dp (transfer_dock_title_height)
- * - Ease animation: PathInterpolator(0.3f, 0.0f, 0.1f, 1.0f)
- * - Full drag-out support: long-press cards to start global drag-and-drop into any app!
+ * Reference: com.oplus.smartsidebar 17.9.12 / TransferDockPanel.kt and
+ * res/layout/layout_transfer_panel (y-.xml):
+ * - panel width 146dp, panel height 578dp
+ * - title bar 40dp with 8dp top margin; 14sp title
+ * - card 122dp x 84dp, 17dp radius, 8dp bottom margin
+ * - clear footer 72dp, 114dp x 40dp pill
+ *
+ * The view itself is hosted in a bounded WindowManager window by
+ * {@link TransferDockController}.  That lets the compositor blur only the
+ * rectangle behind the panel instead of blurring the whole screen.
  */
 public class TransferDockPanel extends FrameLayout {
 
@@ -60,35 +68,60 @@ public class TransferDockPanel extends FrameLayout {
         void onPanelDismiss();
     }
 
+    public interface OnThemeChangedListener {
+        void onThemeChanged(boolean night);
+    }
+
     private static final PathInterpolator sEaseInterpolator =
             new PathInterpolator(0.3f, 0.0f, 0.1f, 1.0f);
 
+    private static final int PANEL_WIDTH_DP = 146;
+    private static final int PANEL_HEIGHT_DP = 578;
+    private static final int HEADER_HEIGHT_DP = 40;
+    private static final int FOOTER_HEIGHT_DP = 72;
+    private static final int CARD_WIDTH_DP = 122;
+    private static final int CARD_HEIGHT_DP = 84;
+    private static final int CARD_RADIUS_DP = 17;
+    private static final int PANEL_RADIUS_DP = 20;
+
     private final float mDensity;
-    private View mBackdropView;
+    private final int mPanelHeightPx;
+
     private LinearLayout mDrawerLayout;
     private RelativeLayout mHeaderBar;
     private TextView mTitleView;
-    private ImageView mCloseBtn;
-    private TextView mClearBtn;
+    private ImageView mBackBtn;
+    private ImageView mMoreBtn;
     private FrameLayout mContentContainer;
     private LinearLayout mEmptyView;
+    private ImageView mEmptyIcon;
+    private TextView mEmptyTitle;
+    private TextView mEmptyHint;
     private ScrollView mScrollView;
     private LinearLayout mCardContainer;
+    private FrameLayout mFooter;
+    private TextView mClearBtn;
 
     private ValueAnimator mAnim;
     private OnPanelDismissListener mDismissListener;
+    private OnThemeChangedListener mThemeListener;
     private TransferDockController mController;
+    private TransferDockTheme mTheme;
+    private boolean mBlurAvailable;
     private boolean mIsDismissing = false;
+    private boolean mLastNotifiedNight;
 
     public TransferDockPanel(@NonNull Context context) {
-        super(context);
-        mDensity = context.getResources().getDisplayMetrics().density;
-        init();
+        this(context, null);
     }
 
     public TransferDockPanel(@NonNull Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
         mDensity = context.getResources().getDisplayMetrics().density;
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        mPanelHeightPx = Math.min(dp(PANEL_HEIGHT_DP), Math.max(dp(360), dm.heightPixels - dp(96)));
+        mTheme = TransferDockTheme.resolve(context, false);
+        mLastNotifiedNight = mTheme.night;
         init();
     }
 
@@ -96,148 +129,157 @@ public class TransferDockPanel extends FrameLayout {
         this.mController = controller;
     }
 
+    public void setOnDismissListener(OnPanelDismissListener listener) {
+        this.mDismissListener = listener;
+    }
+
+    public void setOnThemeChangedListener(OnThemeChangedListener listener) {
+        this.mThemeListener = listener;
+    }
+
+    public int getPanelHeightPx() {
+        return mPanelHeightPx;
+    }
+
+    public int getPanelWidthPx() {
+        return dp(PANEL_WIDTH_DP);
+    }
+
     private int dp(float value) {
         return (int) (value * mDensity + 0.5f);
     }
 
     private void init() {
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        int screenH = dm.heightPixels;
+        setClipChildren(false);
+        setBackgroundColor(Color.TRANSPARENT);
 
-        // 1. Semi-transparent backdrop for dismissing when tapping outside
-        mBackdropView = new View(getContext());
-        mBackdropView.setBackgroundColor(Color.parseColor("#4D000000"));
-        mBackdropView.setOnClickListener(v -> dismissWithAnim());
-        addView(mBackdropView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-
-        // 2. Right-docked drawer panel (width 146dp)
-        int panelHeight = Math.min((int) (screenH * 0.72f), dp(560));
+        // 1. The panel itself.  The window is exactly this size, so the
+        // background blur applied by TransferDockController is local.
         mDrawerLayout = new LinearLayout(getContext());
         mDrawerLayout.setOrientation(LinearLayout.VERTICAL);
+        mDrawerLayout.setClipToOutline(true);
+        mDrawerLayout.setBackground(buildPanelBackground());
+        addView(mDrawerLayout, new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        GradientDrawable drawerBg = new GradientDrawable();
-        drawerBg.setColor(Color.parseColor("#F21C1C1E"));
-        drawerBg.setCornerRadii(new float[]{
-                dp(22), dp(22), // top-left
-                0, 0,           // top-right
-                0, 0,           // bottom-right
-                dp(22), dp(22)  // bottom-left
-        });
-        drawerBg.setStroke(dp(0.8f), Color.parseColor("#26FFFFFF"));
-        mDrawerLayout.setBackground(drawerBg);
-        mDrawerLayout.setElevation(dp(16));
-
-        LayoutParams drawerLp = new LayoutParams(dp(146), panelHeight);
-        drawerLp.gravity = Gravity.CENTER_VERTICAL | Gravity.END;
-        addView(mDrawerLayout, drawerLp);
-
-        // 3. Header Bar (40dp)
+        // 2. Header: back / centered title / overflow, matching layout_transfer_panel.
         mHeaderBar = new RelativeLayout(getContext());
         LinearLayout.LayoutParams headerLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(40));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(HEADER_HEIGHT_DP));
+        headerLp.topMargin = dp(8);
         mDrawerLayout.addView(mHeaderBar, headerLp);
 
-        // Close button on left
-        mCloseBtn = new ImageView(getContext());
-        mCloseBtn.setImageDrawable(TransferDockRes.getCloseIcon(getContext(), mDensity));
-        mCloseBtn.setPadding(dp(4), dp(4), dp(4), dp(4));
-        RelativeLayout.LayoutParams closeLp = new RelativeLayout.LayoutParams(dp(28), dp(28));
-        closeLp.addRule(RelativeLayout.ALIGN_PARENT_START);
-        closeLp.addRule(RelativeLayout.CENTER_VERTICAL);
-        closeLp.leftMargin = dp(8);
-        mCloseBtn.setOnClickListener(v -> dismissWithAnim());
-        mHeaderBar.addView(mCloseBtn, closeLp);
+        mBackBtn = new ImageView(getContext());
+        mBackBtn.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mBackBtn.setPadding(dp(8), dp(8), dp(8), dp(8));
+        mBackBtn.setContentDescription("关闭");
+        mBackBtn.setOnClickListener(v -> dismissWithAnim());
+        RelativeLayout.LayoutParams backLp = new RelativeLayout.LayoutParams(dp(40), dp(40));
+        backLp.addRule(RelativeLayout.ALIGN_PARENT_START);
+        backLp.addRule(RelativeLayout.CENTER_VERTICAL);
+        backLp.leftMargin = dp(4);
+        mHeaderBar.addView(mBackBtn, backLp);
 
-        // Title in center
         mTitleView = new TextView(getContext());
         mTitleView.setText("中转站");
-        mTitleView.setTextColor(Color.WHITE);
         mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        mTitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        mTitleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        mTitleView.setGravity(Gravity.CENTER);
+        mTitleView.setSingleLine(true);
+        mTitleView.setIncludeFontPadding(false);
         RelativeLayout.LayoutParams titleLp = new RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.WRAP_CONTENT,
-                RelativeLayout.LayoutParams.WRAP_CONTENT);
+                RelativeLayout.LayoutParams.MATCH_PARENT);
         titleLp.addRule(RelativeLayout.CENTER_IN_PARENT);
         mHeaderBar.addView(mTitleView, titleLp);
 
-        // Clear button on right
-        mClearBtn = new TextView(getContext());
-        mClearBtn.setText("清空");
-        mClearBtn.setTextColor(Color.parseColor("#80FFFFFF"));
-        mClearBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        mClearBtn.setGravity(Gravity.CENTER);
-        RelativeLayout.LayoutParams clearLp = new RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.WRAP_CONTENT, dp(28));
-        clearLp.addRule(RelativeLayout.ALIGN_PARENT_END);
-        clearLp.addRule(RelativeLayout.CENTER_VERTICAL);
-        clearLp.rightMargin = dp(8);
-        mClearBtn.setPadding(dp(6), dp(4), dp(6), dp(4));
-        mClearBtn.setOnClickListener(v -> clearTransferDock());
-        mHeaderBar.addView(mClearBtn, clearLp);
+        mMoreBtn = new ImageView(getContext());
+        mMoreBtn.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mMoreBtn.setPadding(dp(8), dp(8), dp(8), dp(8));
+        mMoreBtn.setContentDescription("更多");
+        mMoreBtn.setOnClickListener(v -> showOverflowMenu());
+        RelativeLayout.LayoutParams moreLp = new RelativeLayout.LayoutParams(dp(40), dp(40));
+        moreLp.addRule(RelativeLayout.ALIGN_PARENT_END);
+        moreLp.addRule(RelativeLayout.CENTER_VERTICAL);
+        moreLp.rightMargin = dp(4);
+        mHeaderBar.addView(mMoreBtn, moreLp);
 
-        // Divider
-        View divider = new View(getContext());
-        divider.setBackgroundColor(Color.parseColor("#15FFFFFF"));
-        mDrawerLayout.addView(divider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(0.6f)));
-
-        // 4. Content Area
+        // 3. Scrollable list.
         mContentContainer = new FrameLayout(getContext());
         LinearLayout.LayoutParams contentLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.0f);
         mDrawerLayout.addView(mContentContainer, contentLp);
 
-        // Empty state view
         mEmptyView = new LinearLayout(getContext());
         mEmptyView.setOrientation(LinearLayout.VERTICAL);
         mEmptyView.setGravity(Gravity.CENTER);
         mEmptyView.setPadding(dp(12), dp(20), dp(12), dp(20));
 
-        ImageView emptyIcon = new ImageView(getContext());
-        emptyIcon.setImageDrawable(TransferDockRes.getFileDockIcon(getContext()));
-        emptyIcon.setColorFilter(Color.parseColor("#40FFFFFF"));
-        mEmptyView.addView(emptyIcon, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        mEmptyIcon = new ImageView(getContext());
+        mEmptyIcon.setImageDrawable(TransferDockRes.getFileDockIcon(getContext()));
+        mEmptyView.addView(mEmptyIcon, new LinearLayout.LayoutParams(dp(36), dp(36)));
 
-        TextView emptyTitle = new TextView(getContext());
-        emptyTitle.setText("暂无内容");
-        emptyTitle.setTextColor(Color.parseColor("#75FFFFFF"));
-        emptyTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        emptyTitle.setGravity(Gravity.CENTER);
+        mEmptyTitle = new TextView(getContext());
+        mEmptyTitle.setText("暂无内容");
+        mEmptyTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        mEmptyTitle.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams emptyTitleLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         emptyTitleLp.topMargin = dp(8);
-        mEmptyView.addView(emptyTitle, emptyTitleLp);
+        mEmptyView.addView(mEmptyTitle, emptyTitleLp);
 
-        TextView emptyHint = new TextView(getContext());
-        emptyHint.setText("拖入图文随时存");
-        emptyHint.setTextColor(Color.parseColor("#45FFFFFF"));
-        emptyHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
-        emptyHint.setGravity(Gravity.CENTER);
+        mEmptyHint = new TextView(getContext());
+        mEmptyHint.setText("拖入图文随时存");
+        mEmptyHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+        mEmptyHint.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams emptyHintLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         emptyHintLp.topMargin = dp(3);
-        mEmptyView.addView(emptyHint, emptyHintLp);
+        mEmptyView.addView(mEmptyHint, emptyHintLp);
 
         mContentContainer.addView(mEmptyView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // Scrollable Card List
         mScrollView = new ScrollView(getContext());
         mScrollView.setVerticalScrollBarEnabled(false);
-        mScrollView.setOverScrollMode(OVER_SCROLL_IF_CONTENT_SCROLLS);
-        mScrollView.setPadding(dp(12), dp(8), dp(12), dp(8));
+        mScrollView.setOverScrollMode(OVER_SCROLL_NEVER);
         mScrollView.setClipToPadding(false);
+        mScrollView.setPadding(dp(8), dp(6), dp(8), dp(6));
 
         mCardContainer = new LinearLayout(getContext());
         mCardContainer.setOrientation(LinearLayout.VERTICAL);
-        mCardContainer.setGravity(Gravity.CENTER_HORIZONTAL);
+        mCardContainer.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         mScrollView.addView(mCardContainer, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
 
         mContentContainer.addView(mScrollView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // Drag listener on window: MUST return true on ACTION_DRAG_STARTED to receive ACTION_DRAG_ENDED
+        // 4. Bottom clear button: 72dp footer, 114dp x 40dp pill.
+        mFooter = new FrameLayout(getContext());
+        LinearLayout.LayoutParams footerLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(FOOTER_HEIGHT_DP));
+        mDrawerLayout.addView(mFooter, footerLp);
+
+        mClearBtn = new TextView(getContext());
+        mClearBtn.setText("清空");
+        mClearBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        mClearBtn.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        mClearBtn.setGravity(Gravity.CENTER);
+        mClearBtn.setIncludeFontPadding(false);
+        mClearBtn.setOnClickListener(v -> clearTransferDock());
+        FrameLayout.LayoutParams clearLp = new FrameLayout.LayoutParams(dp(114), dp(40));
+        clearLp.gravity = Gravity.CENTER;
+        mFooter.addView(mClearBtn, clearLp);
+
+        View footerDivider = new View(getContext());
+        FrameLayout.LayoutParams dividerLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(0.5f)));
+        dividerLp.gravity = Gravity.TOP;
+        mFooter.addView(footerDivider, dividerLp);
+        mFooter.setTag(footerDivider);
+
+        // 5. Drag listener: MUST return true on ACTION_DRAG_STARTED to receive ACTION_DRAG_ENDED.
         setOnDragListener((v, event) -> {
             int action = event.getAction();
             if (action == DragEvent.ACTION_DRAG_STARTED) {
@@ -256,16 +298,116 @@ public class TransferDockPanel extends FrameLayout {
             return false;
         });
 
+        applyTheme();
         reloadItems();
     }
 
-    public void setOnDismissListener(OnPanelDismissListener listener) {
-        this.mDismissListener = listener;
+    private Drawable buildPanelBackground() {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(mTheme.panelFill);
+        bg.setCornerRadius(dp(PANEL_RADIUS_DP));
+        bg.setStroke(Math.max(1, dp(0.6f)), mTheme.panelStroke);
+        return bg;
+    }
+
+    private Drawable buildCardBackground() {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(mTheme.cardBackground);
+        bg.setCornerRadius(dp(CARD_RADIUS_DP));
+        bg.setStroke(Math.max(1, dp(0.5f)), mTheme.cardStroke);
+        return bg;
+    }
+
+    private Drawable buildCardOutline() {
+        GradientDrawable outline = new GradientDrawable();
+        outline.setColor(Color.TRANSPARENT);
+        outline.setCornerRadius(dp(CARD_RADIUS_DP));
+        outline.setStroke(Math.max(1, dp(0.6f)), mTheme.cardStroke);
+        return outline;
+    }
+
+    private Drawable buildIconBackground() {
+        GradientDrawable pressed = new GradientDrawable();
+        pressed.setColor(mTheme.pressedOverlay);
+        pressed.setCornerRadius(dp(20));
+
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed}, pressed);
+        states.addState(new int[]{}, new GradientDrawable());
+        return states;
+    }
+
+    private Drawable buildFooterBackground() {
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(mTheme.footerBackground);
+        shape.setCornerRadius(dp(20));
+        shape.setStroke(Math.max(1, dp(0.5f)), mTheme.footerStroke);
+        return new RippleDrawable(ColorStateList.valueOf(mTheme.pressedOverlay), shape, null);
+    }
+
+    private void applyTheme() {
+        mTheme = TransferDockTheme.resolve(getContext(), mBlurAvailable);
+
+        mDrawerLayout.setBackground(buildPanelBackground());
+        mTitleView.setTextColor(mTheme.primaryText);
+        mBackBtn.setImageDrawable(TransferDockRes.getBackIcon(
+                getContext(), mDensity, mTheme.primaryText));
+        mMoreBtn.setImageDrawable(TransferDockRes.getMoreIcon(
+                getContext(), mDensity, mTheme.primaryText));
+        mBackBtn.setBackground(buildIconBackground());
+        mMoreBtn.setBackground(buildIconBackground());
+
+        mEmptyIcon.setColorFilter(mTheme.emptyIcon);
+        mEmptyTitle.setTextColor(mTheme.secondaryText);
+        mEmptyHint.setTextColor(mTheme.secondaryText);
+        mEmptyHint.setAlpha(0.72f);
+
+        mClearBtn.setTextColor(mTheme.footerText);
+        mClearBtn.setBackground(buildFooterBackground());
+
+        Object tag = mFooter.getTag();
+        if (tag instanceof View) {
+            ((View) tag).setBackgroundColor(mTheme.divider);
+        }
+
+        if (mThemeListener != null && mLastNotifiedNight != mTheme.night) {
+            mLastNotifiedNight = mTheme.night;
+            mThemeListener.onThemeChanged(mTheme.night);
+        }
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyTheme();
+        reloadItems();
+    }
+
+    /**
+     * Called by the controller when the compositor blur state changes.
+     * The panel keeps a readable translucent fallback when blur is disabled.
+     */
+    /**
+     * Re-resolve the system night mode.  A detached View does not receive
+     * onConfigurationChanged(), so the controller calls this before every open.
+     */
+    public void refreshTheme() {
+        applyTheme();
+        reloadItems();
+    }
+
+    public void setBackdropBlurAvailable(boolean available) {
+        if (mBlurAvailable == available) {
+            return;
+        }
+        mBlurAvailable = available;
+        applyTheme();
+        reloadItems();
     }
 
     public void restoreFromDrag() {
-        mBackdropView.setVisibility(View.VISIBLE);
-        mDrawerLayout.animate().alpha(1.0f).setDuration(200).start();
+        mDrawerLayout.animate().cancel();
+        mDrawerLayout.animate().alpha(1.0f).setDuration(180).start();
     }
 
     public void reloadItems() {
@@ -273,37 +415,36 @@ public class TransferDockPanel extends FrameLayout {
         List<TransferDockItem> list = mgr.getItems();
         mCardContainer.removeAllViews();
 
-        if (list.isEmpty()) {
-            mEmptyView.setVisibility(View.VISIBLE);
-            mScrollView.setVisibility(View.GONE);
-            mClearBtn.setVisibility(View.INVISIBLE);
-        } else {
-            mEmptyView.setVisibility(View.GONE);
-            mScrollView.setVisibility(View.VISIBLE);
-            mClearBtn.setVisibility(View.VISIBLE);
+        boolean empty = list.isEmpty();
+        mEmptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
+        mScrollView.setVisibility(empty ? View.GONE : View.VISIBLE);
+        mFooter.setVisibility(empty ? View.GONE : View.VISIBLE);
+        mMoreBtn.setEnabled(!empty);
+        mMoreBtn.setAlpha(empty ? 0.42f : 1.0f);
 
-            for (TransferDockItem item : list) {
-                View card = createCardView(item);
-                mCardContainer.addView(card);
-            }
+        if (empty) {
+            return;
         }
+
+        for (TransferDockItem item : list) {
+            mCardContainer.addView(createCardView(item));
+        }
+        mScrollView.scrollTo(0, 0);
     }
 
     private View createCardView(TransferDockItem item) {
         FrameLayout card = new FrameLayout(getContext());
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(dp(122), dp(84));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                dp(CARD_WIDTH_DP), dp(CARD_HEIGHT_DP));
+        cardLp.gravity = Gravity.CENTER_HORIZONTAL;
         cardLp.bottomMargin = dp(8);
         card.setLayoutParams(cardLp);
-
-        GradientDrawable cardBg = new GradientDrawable();
-        cardBg.setColor(Color.parseColor("#323235"));
-        cardBg.setCornerRadius(dp(16));
-        cardBg.setStroke(dp(0.6f), Color.parseColor("#1FFFFFFF"));
-        card.setBackground(cardBg);
+        card.setBackground(buildCardBackground());
+        card.setForeground(buildCardOutline());
         card.setClipToOutline(true);
+        card.setContentDescription(item.getTitle());
 
         if (item.getType() == TransferDockItem.TYPE_IMAGE && item.getThumbnailPath() != null) {
-            // Image card
             ImageView thumbView = new ImageView(getContext());
             thumbView.setScaleType(ImageView.ScaleType.CENTER_CROP);
             Bitmap bmp = BitmapFactory.decodeFile(item.getThumbnailPath());
@@ -312,39 +453,15 @@ public class TransferDockPanel extends FrameLayout {
             }
             card.addView(thumbView, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-
-            // Bottom gradient overlay with detail
-            View gradientOverlay = new View(getContext());
-            GradientDrawable overlayGrad = new GradientDrawable(
-                    GradientDrawable.Orientation.BOTTOM_TOP,
-                    new int[]{Color.parseColor("#B3000000"), Color.TRANSPARENT});
-            gradientOverlay.setBackground(overlayGrad);
-            FrameLayout.LayoutParams gradLp = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, dp(26));
-            gradLp.gravity = Gravity.BOTTOM;
-            card.addView(gradientOverlay, gradLp);
-
-            TextView detailView = new TextView(getContext());
-            detailView.setText(item.getDetail());
-            detailView.setTextColor(Color.parseColor("#E0FFFFFF"));
-            detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);
-            detailView.setSingleLine(true);
-            detailView.setEllipsize(TextUtils.TruncateAt.END);
-            detailView.setPadding(dp(6), 0, dp(6), dp(4));
-            FrameLayout.LayoutParams detailLp = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
-            detailLp.gravity = Gravity.BOTTOM;
-            card.addView(detailView, detailLp);
         } else {
-            // Text or file card
             LinearLayout textLayout = new LinearLayout(getContext());
             textLayout.setOrientation(LinearLayout.VERTICAL);
-            textLayout.setPadding(dp(9), dp(8), dp(9), dp(6));
+            textLayout.setPadding(dp(10), dp(9), dp(10), dp(8));
 
             TextView titleView = new TextView(getContext());
             titleView.setText(item.getTitle());
-            titleView.setTextColor(Color.WHITE);
-            titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+            titleView.setTextColor(mTheme.cardText);
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
             titleView.setMaxLines(3);
             titleView.setEllipsize(TextUtils.TruncateAt.END);
             titleView.setLineSpacing(dp(1.5f), 1.0f);
@@ -354,9 +471,10 @@ public class TransferDockPanel extends FrameLayout {
 
             TextView timeView = new TextView(getContext());
             timeView.setText(item.getDetail());
-            timeView.setTextColor(Color.parseColor("#70FFFFFF"));
-            timeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);
+            timeView.setTextColor(mTheme.cardSecondaryText);
+            timeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
             timeView.setSingleLine(true);
+            timeView.setEllipsize(TextUtils.TruncateAt.END);
             LinearLayout.LayoutParams timeLp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             textLayout.addView(timeView, timeLp);
@@ -365,15 +483,28 @@ public class TransferDockPanel extends FrameLayout {
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         }
 
-        // Long press -> Start drag-and-drop out!
+        card.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_DOWN) {
+                v.animate().cancel();
+                v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(90).start();
+            } else if (action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                v.animate().cancel();
+                v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).start();
+            }
+            return false;
+        });
+
         card.setOnLongClickListener(v -> {
+            v.animate().cancel();
+            v.setScaleX(1.0f);
+            v.setScaleY(1.0f);
             startDragOut(card, item);
             return true;
         });
 
-        // Click -> Quick options
         card.setOnClickListener(v -> showItemOptions(item));
-
         return card;
     }
 
@@ -402,7 +533,7 @@ public class TransferDockPanel extends FrameLayout {
         View.DragShadowBuilder shadow = new View.DragShadowBuilder(cardView) {
             @Override
             public void onProvideShadowMetrics(android.graphics.Point outShadowSize,
-                                              android.graphics.Point outShadowTouchPoint) {
+                                               android.graphics.Point outShadowTouchPoint) {
                 outShadowSize.set(cardView.getWidth(), cardView.getHeight());
                 outShadowTouchPoint.set(cardView.getWidth() / 2, cardView.getHeight() / 2);
             }
@@ -416,11 +547,9 @@ public class TransferDockPanel extends FrameLayout {
             }
         };
 
-        // Temporarily fade drawer and hide full-screen backdrop
-        mBackdropView.setVisibility(View.GONE);
+        mDrawerLayout.animate().cancel();
         mDrawerLayout.setAlpha(0.12f);
 
-        // Notify controller to make window non-touchable and shrink width so target app receives drop!
         if (mController != null) {
             mController.onPanelDragStarted();
         }
@@ -458,9 +587,9 @@ public class TransferDockPanel extends FrameLayout {
                     getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert);
             builder.setTitle(item.getTitle());
             builder.setItems(options, (dialog, which) -> {
-                if (which == 0) { // 复制
+                if (which == 0) {
                     copyItem(item);
-                } else if (which == 1) { // 分享
+                } else if (which == 1) {
                     Intent shareIntent = new Intent(Intent.ACTION_SEND);
                     if (item.getType() == TransferDockItem.TYPE_IMAGE) {
                         Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
@@ -471,14 +600,15 @@ public class TransferDockPanel extends FrameLayout {
                         }
                     } else {
                         shareIntent.setType("text/plain");
-                        shareIntent.putExtra(Intent.EXTRA_TEXT, item.getText() != null ? item.getText() : item.getTitle());
+                        shareIntent.putExtra(Intent.EXTRA_TEXT,
+                                item.getText() != null ? item.getText() : item.getTitle());
                     }
                     shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     Intent chooser = Intent.createChooser(shareIntent, "分享到");
                     chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     getContext().startActivity(chooser);
                     dismissWithAnim();
-                } else if (which == 2) { // 删除
+                } else if (which == 2) {
                     TransferDockManager.getInstance(getContext()).removeItem(item.getId());
                     reloadItems();
                     Toast.makeText(getContext(), "已删除", Toast.LENGTH_SHORT).show();
@@ -486,19 +616,44 @@ public class TransferDockPanel extends FrameLayout {
             });
             builder.setNegativeButton("取消", null);
             android.app.AlertDialog dialog = builder.create();
-            int alertWindowType = "com.android.systemui".equals(getContext().getPackageName())
-                    ? 2024 /* TYPE_NAVIGATION_BAR_PANEL */
-                    : (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                            : WindowManager.LayoutParams.TYPE_PHONE);
             if (dialog.getWindow() != null) {
-                dialog.getWindow().setType(alertWindowType);
+                dialog.getWindow().setType(resolveDialogWindowType());
             }
             dialog.show();
         } catch (Throwable t) {
             Log.w(TAG, "showItemOptions dialog failed, fallback to copy", t);
             copyItem(item);
         }
+    }
+
+    private void showOverflowMenu() {
+        if (TransferDockManager.getInstance(getContext()).getItemCount() == 0) {
+            return;
+        }
+        try {
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(
+                    getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert);
+            builder.setTitle("中转站");
+            builder.setItems(new String[]{"清空中转站"}, (dialog, which) -> clearTransferDock());
+            builder.setNegativeButton("取消", null);
+            android.app.AlertDialog dialog = builder.create();
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setType(resolveDialogWindowType());
+            }
+            dialog.show();
+        } catch (Throwable t) {
+            Log.w(TAG, "showOverflowMenu failed", t);
+            clearTransferDock();
+        }
+    }
+
+    private int resolveDialogWindowType() {
+        if ("com.android.systemui".equals(getContext().getPackageName())) {
+            return 2024; // TYPE_NAVIGATION_BAR_PANEL
+        }
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
     }
 
     private void clearTransferDock() {
@@ -512,23 +667,29 @@ public class TransferDockPanel extends FrameLayout {
 
     public void showWithAnim() {
         mIsDismissing = false;
-        mDrawerLayout.setTranslationX(dp(146));
-        mBackdropView.setAlpha(0f);
-        mBackdropView.setVisibility(View.VISIBLE);
-        mDrawerLayout.setAlpha(1.0f);
-        setVisibility(View.VISIBLE);
-
         if (mAnim != null) {
             mAnim.removeAllListeners();
             mAnim.cancel();
         }
+        mDrawerLayout.animate().cancel();
+        mDrawerLayout.setAlpha(1.0f);
+        mDrawerLayout.setTranslationX(0f);
+        mDrawerLayout.setPivotX(getPanelWidthPx());
+        mDrawerLayout.setPivotY(mPanelHeightPx / 2f);
+        mDrawerLayout.setScaleX(0.94f);
+        mDrawerLayout.setScaleY(0.97f);
+        setVisibility(View.VISIBLE);
+
+        // COUI reveal is a spring-like growth anchored to the right edge.
         mAnim = ValueAnimator.ofFloat(0f, 1f);
-        mAnim.setDuration(300);
+        mAnim.setDuration(280);
         mAnim.setInterpolator(sEaseInterpolator);
         mAnim.addUpdateListener(animation -> {
             float frac = animation.getAnimatedFraction();
-            mDrawerLayout.setTranslationX(dp(146) * (1f - frac));
-            mBackdropView.setAlpha(frac);
+            float scaleX = 0.94f + 0.06f * frac;
+            float scaleY = 0.97f + 0.03f * frac;
+            mDrawerLayout.setScaleX(scaleX);
+            mDrawerLayout.setScaleY(scaleY);
         });
         mAnim.start();
     }
@@ -541,13 +702,18 @@ public class TransferDockPanel extends FrameLayout {
             mAnim.removeAllListeners();
             mAnim.cancel();
         }
+        mDrawerLayout.animate().cancel();
+        final float startScaleX = mDrawerLayout.getScaleX();
+        final float startScaleY = mDrawerLayout.getScaleY();
+        final float startAlpha = mDrawerLayout.getAlpha();
         mAnim = ValueAnimator.ofFloat(0f, 1f);
-        mAnim.setDuration(250);
+        mAnim.setDuration(200);
         mAnim.setInterpolator(sEaseInterpolator);
         mAnim.addUpdateListener(animation -> {
             float frac = animation.getAnimatedFraction();
-            mDrawerLayout.setTranslationX(dp(146) * frac);
-            mBackdropView.setAlpha(1f - frac);
+            mDrawerLayout.setScaleX(startScaleX - 0.06f * frac);
+            mDrawerLayout.setScaleY(startScaleY - 0.03f * frac);
+            mDrawerLayout.setAlpha(startAlpha * (1.0f - 0.35f * frac));
         });
         mAnim.addListener(new AnimatorListenerAdapter() {
             @Override
@@ -559,5 +725,16 @@ public class TransferDockPanel extends FrameLayout {
             }
         });
         mAnim.start();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (mAnim != null) {
+            mAnim.removeAllListeners();
+            mAnim.cancel();
+            mAnim = null;
+        }
+        mDrawerLayout.animate().cancel();
+        super.onDetachedFromWindow();
     }
 }

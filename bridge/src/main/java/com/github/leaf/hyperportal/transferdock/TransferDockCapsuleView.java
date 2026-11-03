@@ -5,6 +5,7 @@ import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -57,6 +58,7 @@ public class TransferDockCapsuleView extends FrameLayout {
     private RelativeLayout mContentView;
     private TextView mTitleView;
     private ImageView mIconView;
+    private boolean mNight;
 
     private RelativeLayout mPreviewLayout;
     private TransferDockStackView mStackView;
@@ -84,6 +86,7 @@ public class TransferDockCapsuleView extends FrameLayout {
         super(context);
         mDensity = context.getResources().getDisplayMetrics().density;
         mTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        mNight = TransferDockTheme.isNight(context);
         initView();
     }
 
@@ -91,11 +94,27 @@ public class TransferDockCapsuleView extends FrameLayout {
         super(context, attrs);
         mDensity = context.getResources().getDisplayMetrics().density;
         mTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        mNight = TransferDockTheme.isNight(context);
         initView();
     }
 
     private int dp(float value) {
         return (int) (value * mDensity + 0.5f);
+    }
+
+    public void refreshTheme() {
+        boolean night = TransferDockTheme.isNight(getContext());
+        if (night != mNight) {
+            mNight = night;
+            mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity, mNight));
+            mTitleView.setTextColor(mNight ? Color.WHITE : Color.argb(230, 0, 0, 0));
+        }
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        refreshTheme();
     }
 
     private void initView() {
@@ -104,7 +123,7 @@ public class TransferDockCapsuleView extends FrameLayout {
         // 1. Background image (ColorOS recept_panel_right_bg with programmatic fallback)
         mBgView = new ImageView(getContext());
         mBgView.setScaleType(ImageView.ScaleType.FIT_XY);
-        mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity));
+        mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity, mNight));
         LayoutParams bgLp = new LayoutParams(dp(166), dp(172));
         addView(mBgView, bgLp);
 
@@ -120,7 +139,7 @@ public class TransferDockCapsuleView extends FrameLayout {
         mTitleView.setId(View.generateViewId());
         mTitleView.setText("中转站");
         mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        mTitleView.setTextColor(Color.WHITE);
+        mTitleView.setTextColor(mNight ? Color.WHITE : Color.argb(230, 0, 0, 0));
         mTitleView.setTypeface(Typeface.DEFAULT_BOLD);
         mTitleView.setGravity(Gravity.CENTER);
 
@@ -197,11 +216,11 @@ public class TransferDockCapsuleView extends FrameLayout {
             TextView cardText = new TextView(getContext());
             cardText.setText(item.getTitle());
             cardText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-            cardText.setTextColor(Color.WHITE);
+            cardText.setTextColor(mNight ? Color.WHITE : Color.argb(230, 0, 0, 0));
             cardText.setMaxLines(3);
             cardText.setEllipsize(TextUtils.TruncateAt.END);
             cardText.setPadding(dp(8), dp(8), dp(8), dp(8));
-            cardText.setBackgroundColor(Color.parseColor("#383838"));
+            cardText.setBackgroundColor(mNight ? Color.parseColor("#383838") : Color.WHITE);
             mStackView.setTopCustomView(cardText, totalCount);
         }
 

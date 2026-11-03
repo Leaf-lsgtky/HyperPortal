@@ -38,21 +38,28 @@ public final class TransferDockRes {
     }
 
     public static Drawable getCapsuleBg(Context ctx, float density) {
-        try {
-            Context hyper = getHyperContext(ctx);
-            int id = hyper.getResources().getIdentifier("recept_panel_right_bg", "drawable", "com.github.leaf.hyperportal");
-            if (id != 0) {
-                Drawable d = ContextCompat.getDrawable(hyper, id);
-                if (d != null) return d;
+        return getCapsuleBg(ctx, density, TransferDockTheme.isNight(ctx));
+    }
+
+    public static Drawable getCapsuleBg(Context ctx, float density, boolean night) {
+        if (night) {
+            try {
+                Context hyper = getHyperContext(ctx);
+                int id = hyper.getResources().getIdentifier("recept_panel_right_bg", "drawable", "com.github.leaf.hyperportal");
+                if (id != 0) {
+                    Drawable d = ContextCompat.getDrawable(hyper, id);
+                    if (d != null) return d;
+                }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
         }
         int r = (int) (22 * density + 0.5f);
         int stroke = (int) (0.8f * density + 0.5f);
         GradientDrawable shape = new GradientDrawable();
-        shape.setColor(Color.parseColor("#E6202022"));
+        shape.setColor(night ? Color.parseColor("#E6202022") : Color.parseColor("#F2F7F7F7"));
         shape.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
-        shape.setStroke(Math.max(1, stroke), Color.parseColor("#33FFFFFF"));
+        shape.setStroke(Math.max(1, stroke),
+                night ? Color.parseColor("#33FFFFFF") : Color.parseColor("#1F000000"));
         int insetL = (int) (14 * density + 0.5f);
         int insetT = (int) (22 * density + 0.5f);
         int insetB = (int) (22 * density + 0.5f);
@@ -86,6 +93,109 @@ public final class TransferDockRes {
         bg.setColor(Color.parseColor("#3696FE"));
         bg.setCornerRadius(10f * density);
         return bg;
+    }
+
+    /**
+     * 24dp COUI-style back chevron used by the transfer panel title bar.
+     */
+    public static Drawable getBackIcon(Context ctx, float density, int color) {
+        final float strokeWidth = 2.0f * density;
+        return new Drawable() {
+            private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            {
+                mPaint.setColor(color);
+                mPaint.setStyle(Paint.Style.STROKE);
+                mPaint.setStrokeWidth(strokeWidth);
+                mPaint.setStrokeCap(Paint.Cap.ROUND);
+                mPaint.setStrokeJoin(Paint.Join.ROUND);
+            }
+
+            @Override
+            public int getIntrinsicWidth() {
+                return (int) (24 * density + 0.5f);
+            }
+
+            @Override
+            public int getIntrinsicHeight() {
+                return (int) (24 * density + 0.5f);
+            }
+
+            @Override
+            public void draw(@NonNull Canvas canvas) {
+                Rect b = getBounds();
+                float inset = b.width() * 0.30f;
+                float midY = b.exactCenterY();
+                canvas.drawLine(b.left + inset, midY, b.right - inset, midY, mPaint);
+                canvas.drawLine(b.left + inset, midY, b.left + inset * 1.75f, b.top + inset, mPaint);
+                canvas.drawLine(b.left + inset, midY, b.left + inset * 1.75f, b.bottom - inset, mPaint);
+            }
+
+            @Override
+            public void setAlpha(int alpha) {
+                mPaint.setAlpha(alpha);
+            }
+
+            @Override
+            public void setColorFilter(@Nullable ColorFilter colorFilter) {
+                mPaint.setColorFilter(colorFilter);
+            }
+
+            @Override
+            public int getOpacity() {
+                return PixelFormat.TRANSLUCENT;
+            }
+        };
+    }
+
+    /**
+     * Vertical three-dot overflow icon used by the reference transfer panel.
+     */
+    public static Drawable getMoreIcon(Context ctx, float density, int color) {
+        return new Drawable() {
+            private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            {
+                mPaint.setColor(color);
+                mPaint.setStyle(Paint.Style.FILL);
+            }
+
+            @Override
+            public int getIntrinsicWidth() {
+                return (int) (24 * density + 0.5f);
+            }
+
+            @Override
+            public int getIntrinsicHeight() {
+                return (int) (24 * density + 0.5f);
+            }
+
+            @Override
+            public void draw(@NonNull Canvas canvas) {
+                Rect b = getBounds();
+                float cx = b.exactCenterX();
+                float radius = 1.75f * density;
+                float gap = 5.0f * density;
+                canvas.drawCircle(cx, b.exactCenterY() - gap, radius, mPaint);
+                canvas.drawCircle(cx, b.exactCenterY(), radius, mPaint);
+                canvas.drawCircle(cx, b.exactCenterY() + gap, radius, mPaint);
+            }
+
+            @Override
+            public void setAlpha(int alpha) {
+                mPaint.setAlpha(alpha);
+            }
+
+            @Override
+            public void setColorFilter(@Nullable ColorFilter colorFilter) {
+                mPaint.setColorFilter(colorFilter);
+            }
+
+            @Override
+            public int getOpacity() {
+                return PixelFormat.TRANSLUCENT;
+            }
+        };
     }
 
     public static Drawable getCloseIcon(Context ctx, float density) {
