@@ -2,6 +2,7 @@
 package com.github.leaf.hyperportal.transferdock;
 
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
@@ -93,14 +94,8 @@ public class TransferDockController {
         }
         mBlurEnabledListener = enabled -> mMainHandler.post(() -> {
             mBlurAvailable = Boolean.TRUE.equals(enabled);
-            if (mPanelAttached && mPanelView != null && mPanelParams != null) {
-                applyPanelBlur(mPanelParams, mBlurAvailable);
+            if (mPanelAttached && mPanelView != null) {
                 mPanelView.setBackdropBlurAvailable(mBlurAvailable);
-                try {
-                    mWindowManager.updateViewLayout(mPanelView, mPanelParams);
-                } catch (Throwable t) {
-                    Log.w(TAG, "update blur layout failed", t);
-                }
             }
         });
         try {
@@ -111,14 +106,17 @@ public class TransferDockController {
         }
     }
 
-    private void applyPanelBlur(WindowManager.LayoutParams params, boolean enabled) {
+    private void clearNativePanelBlur(WindowManager.LayoutParams params) {
         if (params == null || Build.VERSION.SDK_INT < 31) {
             return;
         }
         try {
-            params.setBlurBehindRadius(enabled ? dp(32) : 0);
+            // Window-level blur is full-display on this HyperOS build.  The
+            // panel uses BackgroundBlurDrawable instead for a local region.
+            params.setBlurBehindRadius(0);
+            params.flags &= ~WindowManager.LayoutParams.FLAG_BLUR_BEHIND;
         } catch (Throwable t) {
-            Log.w(TAG, "setBlurBehindRadius failed", t);
+            Log.w(TAG, "clear native blur failed", t);
         }
     }
 
@@ -241,7 +239,7 @@ public class TransferDockController {
                     }
                     mFloatBarParams.gravity = Gravity.TOP | Gravity.END;
                     mFloatBarParams.x = 0;
-                    mFloatBarParams.y = (int) (dm.heightPixels * 0.38f);
+                    mFloatBarParams.y = (int) (dm.heightPixels * 0.25f);
                 }
 
                 if (!mFloatBarAttached) {
@@ -367,7 +365,7 @@ public class TransferDockController {
                 mPanelParams.gravity = Gravity.TOP | Gravity.END;
                 mPanelParams.x = dp(8);
                 mPanelParams.y = panelTop;
-                applyPanelBlur(mPanelParams, mBlurAvailable);
+                clearNativePanelBlur(mPanelParams);
 
                 if (!mPanelAttached) {
                     mWindowManager.addView(mPanelView, mPanelParams);
@@ -391,6 +389,7 @@ public class TransferDockController {
      * below can receive the drop.
      */
     public void onPanelDragStarted() {
+        notifyTransferDockDragState(true);
         mMainHandler.post(() -> {
             if (mPanelAttached && mPanelView != null && mPanelParams != null) {
                 try {
@@ -417,6 +416,7 @@ public class TransferDockController {
      * Called when the drag ends (either dropped into an app or cancelled).
      */
     public void onPanelDragEnded(boolean success) {
+        notifyTransferDockDragState(false);
         mMainHandler.post(() -> {
             Log.i(TAG, "onPanelDragEnded success=" + success);
             if (success) {
@@ -463,7 +463,20 @@ public class TransferDockController {
         });
     }
 
+    private void notifyTransferDockDragState(boolean dragging) {
+        TransferDockDragGuard.setDragging(dragging);
+        try {
+            Intent intent = new Intent(TransferDockDragGuard.ACTION_STATE);
+            intent.setPackage("com.android.systemui");
+            intent.putExtra("state", dragging ? 1 : 0);
+            mContext.sendBroadcast(intent);
+        } catch (Throwable t) {
+            Log.w(TAG, "notify transfer dock drag state failed", t);
+        }
+    }
+
     private void removePanelWindows() {
+        notifyTransferDockDragState(false);
         if (mPanelAttached && mPanelView != null) {
             try {
                 mWindowManager.removeView(mPanelView);

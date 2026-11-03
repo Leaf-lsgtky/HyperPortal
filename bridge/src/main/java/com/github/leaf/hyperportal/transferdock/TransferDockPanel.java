@@ -18,6 +18,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
@@ -44,6 +45,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.lang.reflect.Method;
 import java.util.List;
 
 /**
@@ -110,6 +112,10 @@ public class TransferDockPanel extends FrameLayout {
     private boolean mBlurAvailable;
     private boolean mIsDismissing = false;
     private boolean mLastNotifiedNight;
+    private Drawable mLocalBlurDrawable;
+    private Method mBlurSetRadius;
+    private Method mBlurSetCorner;
+    private Method mBlurSetColor;
 
     public TransferDockPanel(@NonNull Context context) {
         this(context, null);
@@ -306,7 +312,6 @@ public class TransferDockPanel extends FrameLayout {
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(mTheme.panelFill);
         bg.setCornerRadius(dp(PANEL_RADIUS_DP));
-        bg.setStroke(Math.max(1, dp(0.6f)), mTheme.panelStroke);
         return bg;
     }
 
@@ -314,16 +319,7 @@ public class TransferDockPanel extends FrameLayout {
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(mTheme.cardBackground);
         bg.setCornerRadius(dp(CARD_RADIUS_DP));
-        bg.setStroke(Math.max(1, dp(0.5f)), mTheme.cardStroke);
         return bg;
-    }
-
-    private Drawable buildCardOutline() {
-        GradientDrawable outline = new GradientDrawable();
-        outline.setColor(Color.TRANSPARENT);
-        outline.setCornerRadius(dp(CARD_RADIUS_DP));
-        outline.setStroke(Math.max(1, dp(0.6f)), mTheme.cardStroke);
-        return outline;
     }
 
     private Drawable buildIconBackground() {
@@ -341,14 +337,18 @@ public class TransferDockPanel extends FrameLayout {
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(mTheme.footerBackground);
         shape.setCornerRadius(dp(20));
-        shape.setStroke(Math.max(1, dp(0.5f)), mTheme.footerStroke);
         return new RippleDrawable(ColorStateList.valueOf(mTheme.pressedOverlay), shape, null);
     }
 
     private void applyTheme() {
         mTheme = TransferDockTheme.resolve(getContext(), mBlurAvailable);
 
-        mDrawerLayout.setBackground(buildPanelBackground());
+        if (mLocalBlurDrawable != null && configureLocalBlur()) {
+            mDrawerLayout.setBackground(buildLocalBlurBackground());
+        } else {
+            mDrawerLayout.setBackground(buildPanelBackground());
+        }
+        mTitleView.setText("中转站");
         mTitleView.setTextColor(mTheme.primaryText);
         mBackBtn.setImageDrawable(TransferDockRes.getBackIcon(
                 getContext(), mDensity, mTheme.primaryText));
@@ -397,12 +397,87 @@ public class TransferDockPanel extends FrameLayout {
     }
 
     public void setBackdropBlurAvailable(boolean available) {
-        if (mBlurAvailable == available) {
+        // Once the local BackgroundBlurDrawable is installed it is independent
+        // of the cross-window blur switch.  Do not downgrade it.
+        if (mLocalBlurDrawable != null || mBlurAvailable == available) {
             return;
         }
         mBlurAvailable = available;
         applyTheme();
         reloadItems();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        // The platform BackgroundBlurDrawable is local: it records a blur
+        // region around this view's render node instead of the whole display.
+        mDrawerLayout.post(this::installLocalBlur);
+    }
+
+    private void installLocalBlur() {
+        if (mLocalBlurDrawable != null || !isAttachedToWindow()) {
+            return;
+        }
+        try {
+            Method getViewRootImpl = View.class.getDeclaredMethod("getViewRootImpl");
+            getViewRootImpl.setAccessible(true);
+            Object viewRoot = getViewRootImpl.invoke(mDrawerLayout);
+            if (viewRoot == null) {
+                throw new IllegalStateException("ViewRootImpl is null");
+            }
+            Method create = viewRoot.getClass().getMethod("createBackgroundBlurDrawable");
+            Object drawable = create.invoke(viewRoot);
+            if (!(drawable instanceof Drawable)) {
+                throw new IllegalStateException("no BackgroundBlurDrawable");
+            }
+            mLocalBlurDrawable = (Drawable) drawable;
+            mBlurSetRadius = drawable.getClass().getMethod("setBlurRadius", int.class);
+            mBlurSetCorner = drawable.getClass().getMethod("setCornerRadius", float.class);
+            mBlurSetColor = drawable.getClass().getMethod("setColor", int.class);
+            if (!configureLocalBlur()) {
+                throw new IllegalStateException("cannot configure BackgroundBlurDrawable");
+            }
+            mBlurAvailable = true;
+            mDrawerLayout.setBackground(buildLocalBlurBackground());
+            applyTheme();
+            Log.i(TAG, "local BackgroundBlurDrawable installed");
+        } catch (Throwable t) {
+            mLocalBlurDrawable = null;
+            mBlurSetRadius = null;
+            mBlurSetCorner = null;
+            mBlurSetColor = null;
+            mBlurAvailable = false;
+            mDrawerLayout.setBackground(buildPanelBackground());
+            applyTheme();
+            Log.w(TAG, "local blur unavailable, using translucent panel", t);
+        }
+    }
+
+    private boolean configureLocalBlur() {
+        if (mLocalBlurDrawable == null || mBlurSetRadius == null
+                || mBlurSetCorner == null || mBlurSetColor == null) {
+            return false;
+        }
+        try {
+            mBlurSetRadius.invoke(mLocalBlurDrawable, dp(32));
+            mBlurSetCorner.invoke(mLocalBlurDrawable, (float) dp(PANEL_RADIUS_DP));
+            // The tint is a separate layer below the content so the blur
+            // drawable can remain transparent and the panel keeps its color.
+            mBlurSetColor.invoke(mLocalBlurDrawable, Color.TRANSPARENT);
+            mLocalBlurDrawable.invalidateSelf();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "configure local blur failed", t);
+            return false;
+        }
+    }
+
+    private Drawable buildLocalBlurBackground() {
+        GradientDrawable tint = new GradientDrawable();
+        tint.setColor(mTheme.panelFill);
+        tint.setCornerRadius(dp(PANEL_RADIUS_DP));
+        return new LayerDrawable(new Drawable[]{mLocalBlurDrawable, tint});
     }
 
     public void restoreFromDrag() {
@@ -440,7 +515,6 @@ public class TransferDockPanel extends FrameLayout {
         cardLp.bottomMargin = dp(8);
         card.setLayoutParams(cardLp);
         card.setBackground(buildCardBackground());
-        card.setForeground(buildCardOutline());
         card.setClipToOutline(true);
         card.setContentDescription(item.getTitle());
 
@@ -735,6 +809,10 @@ public class TransferDockPanel extends FrameLayout {
             mAnim = null;
         }
         mDrawerLayout.animate().cancel();
+        mLocalBlurDrawable = null;
+        mBlurSetRadius = null;
+        mBlurSetCorner = null;
+        mBlurSetColor = null;
         super.onDetachedFromWindow();
     }
 }

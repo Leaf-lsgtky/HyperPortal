@@ -34,7 +34,7 @@ final class TransferDockTheme {
     private TransferDockTheme(boolean night, boolean blurAvailable) {
         this.night = night;
         if (night) {
-            panelFill = Color.argb(blurAvailable ? 230 : 242, 28, 28, 30);
+            panelFill = Color.argb(blurAvailable ? 180 : 242, 28, 28, 30);
             panelStroke = Color.argb(38, 255, 255, 255);
             primaryText = Color.argb(242, 255, 255, 255);
             secondaryText = Color.argb(140, 255, 255, 255);
@@ -49,7 +49,7 @@ final class TransferDockTheme {
             emptyIcon = Color.argb(64, 255, 255, 255);
             pressedOverlay = Color.argb(36, 255, 255, 255);
         } else {
-            panelFill = Color.argb(blurAvailable ? 230 : 247, 242, 242, 242);
+            panelFill = Color.argb(blurAvailable ? 180 : 247, 242, 242, 242);
             panelStroke = Color.argb(26, 0, 0, 0);
             primaryText = Color.argb(230, 0, 0, 0);
             secondaryText = Color.argb(153, 0, 0, 0);

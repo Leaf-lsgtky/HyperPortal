@@ -64,6 +64,7 @@ import com.github.leaf.hyperportal.target.BuiltInIconDrawable;
 import com.github.leaf.hyperportal.target.TargetRepository;
 import com.github.leaf.hyperportal.target.TargetRuleStore;
 import com.github.leaf.hyperportal.transferdock.TransferDockController;
+import com.github.leaf.hyperportal.transferdock.TransferDockDragGuard;
 import com.github.leaf.hyperportal.transferdock.TransferDockItem;
 import com.github.leaf.hyperportal.transferdock.TransferDockManager;
 import com.github.leaf.hyperportal.util.QrCodeScanner;
@@ -202,6 +203,7 @@ public final class PortalSystemUiModule {
         private ColorOSDockBar mDockBar;
         private final List<AppTarget> mTargets = new ArrayList<>();
         private boolean mShowing = false;
+        private boolean mTransferDockBroadcastDragging = false;
         private long mLastHapticTime = 0L;
         private float mTriggerThreshold = 0.76f;
         private String mTriggerPosition = "bottom";
@@ -802,6 +804,10 @@ public final class PortalSystemUiModule {
             mContainer.setOnDragListener((v, event) -> {
                 int action = event.getAction();
                 if (action == DragEvent.ACTION_DRAG_STARTED) {
+                    if (TransferDockDragGuard.isDragging() || mTransferDockBroadcastDragging) {
+                        handleDragStateChanged(0, 0f);
+                        return false;
+                    }
                     return isMasterEnabled();
                 } else if (action == DragEvent.ACTION_DRAG_LOCATION) {
                     if (event.getX() == 0f && event.getY() == 0f) {
@@ -971,6 +977,7 @@ public final class PortalSystemUiModule {
             filter.addAction(ACTION_DRAG_STATE);
             filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
+            filter.addAction(TransferDockDragGuard.ACTION_STATE);
             filter.addAction("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK");
             filter.addAction("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
             filter.addAction(Intent.ACTION_USER_UNLOCKED);
@@ -1041,6 +1048,13 @@ public final class PortalSystemUiModule {
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            if (TransferDockDragGuard.ACTION_STATE.equals(action)) {
+                mTransferDockBroadcastDragging = intent.getIntExtra("state", 0) == 1;
+                if (mTransferDockBroadcastDragging) {
+                    handleDragStateChanged(0, 0f);
+                }
+                return;
+            }
             if ("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK".equals(action)) {
                 if (mTransferDockController == null) {
                     mTransferDockController = new TransferDockController(mContext);
@@ -1139,6 +1153,9 @@ public final class PortalSystemUiModule {
         public void handleDragStateChanged(int state, float x, float y) {
             if (Looper.myLooper() != Looper.getMainLooper()) {
                 sHandler.post(() -> handleDragStateChanged(state, x, y));
+                return;
+            }
+            if (state > 0 && (TransferDockDragGuard.isDragging() || mTransferDockBroadcastDragging)) {
                 return;
             }
 
