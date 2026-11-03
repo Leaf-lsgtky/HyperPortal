@@ -28,6 +28,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -106,6 +107,8 @@ public final class PortalSystemModule {
     private static volatile Context sSystemContext;
     private static volatile float sTriggerThreshold = 0.76f;
     private static volatile boolean sReceiverRegistered = false;
+    private static volatile Object sWms;
+    private static volatile String sDragSourcePackage;
 
     private static final Handler sHandler = new Handler(Looper.getMainLooper());
     private static final Runnable sTicker = new Runnable() {
@@ -425,6 +428,14 @@ public final class PortalSystemModule {
                     windowArg = arg;
                 }
             }
+            Object controller = chain.getThisObject();
+            Object wms = null;
+            try {
+                wms = getField(controller, "mService");
+                sWms = wms;
+            } catch (Throwable ignored) {
+            }
+            sDragSourcePackage = resolveDragSourcePackage(wms, windowArg);
             if (clip != null && clip.getDescription().hasMimeType(DRAG_MIME)) {
                 sDragActive = true;
                 sDragStartX = -1f;
@@ -436,8 +447,6 @@ public final class PortalSystemModule {
                 sLastNotifiedX = -1f;
                 sLastNotifiedY = -1f;
 
-                Object controller = chain.getThisObject();
-                Object wms = getField(controller, "mService");
                 try {
                     Object ctx = getField(wms, "mContext");
                     if (ctx instanceof Context) {
@@ -469,6 +478,36 @@ public final class PortalSystemModule {
             log(Log.WARN, TAG, "onPerformDrag inspect failed", throwable);
         }
         return chain.proceed();
+    }
+
+    private static String resolveDragSourcePackage(Object wms, Object windowArg) {
+        if (wms == null || windowArg == null) {
+            return null;
+        }
+        try {
+            Method windowForClient = null;
+            for (Method method : wms.getClass().getDeclaredMethods()) {
+                if ("windowForClient".equals(method.getName())
+                        && method.getParameterTypes().length == 2) {
+                    windowForClient = method;
+                    break;
+                }
+            }
+            if (windowForClient == null) {
+                return null;
+            }
+            windowForClient.setAccessible(true);
+            Object callingWin = windowForClient.invoke(wms, null, windowArg);
+            if (callingWin == null) {
+                return null;
+            }
+            Object attrs = getField(callingWin, "mAttrs");
+            Object pkg = getField(attrs, "packageName");
+            return pkg == null ? null : String.valueOf(pkg);
+        } catch (Throwable throwable) {
+            log(Log.DEBUG, TAG, "resolveDragSourcePackage failed: " + throwable);
+            return null;
+        }
     }
 
     /**
@@ -686,7 +725,80 @@ public final class PortalSystemModule {
             }, 300);
             log(Log.INFO, TAG, "our drag closed, restoring");
         }
-        return chain.proceed();
+        Object result = chain.proceed();
+        try {
+            dismissWeChatHandleWindows(sWms, sDragSourcePackage);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "dismissWeChatHandleWindows failed: " + throwable);
+        }
+        sDragSourcePackage = null;
+        return result;
+    }
+
+    /**
+     * WeChat's NativeSelectableLayout puts its two green selection handles in
+     * TYPE_APPLICATION_PANEL windows.  When a system drag consumes the touch
+     * stream, WeChat never gets ACTION_UP and leaves both windows visible.
+     * Remove only the two matching 112x92 dp panel windows after the drag
+     * closes.  This runs in the existing system_server drag hook; WeChat is not
+     * hooked or modified.
+     */
+    private static void dismissWeChatHandleWindows(Object wms, String sourcePackage) {
+        if (wms == null || (sourcePackage != null && !"com.tencent.mm".equals(sourcePackage))) {
+            return;
+        }
+        try {
+            Object mapObject = getField(wms, "mWindowMap");
+            if (!(mapObject instanceof Map)) {
+                return;
+            }
+            List<Object> targets = new ArrayList<>();
+            for (Object value : new ArrayList<>(((Map<?, ?>) mapObject).values())) {
+                try {
+                    Object attrs = getField(value, "mAttrs");
+                    Object pkg = getField(attrs, "packageName");
+                    if (pkg == null || !"com.tencent.mm".equals(String.valueOf(pkg))) {
+                        continue;
+                    }
+                    int type = ((Number) getField(attrs, "type")).intValue();
+                    int width = ((Number) getField(attrs, "width")).intValue();
+                    int height = ((Number) getField(attrs, "height")).intValue();
+                    Object visible = getField(value, "mViewVisibility");
+                    Object hasSurface = getField(value, "mHasSurface");
+                    if (type != 1002 // TYPE_APPLICATION_PANEL
+                            || width < 70 || width > 180
+                            || height < 50 || height > 140
+                            || !(visible instanceof Integer) || ((Integer) visible) != 0
+                            || !(hasSurface instanceof Boolean) || !((Boolean) hasSurface)) {
+                        continue;
+                    }
+                    targets.add(value);
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!targets.isEmpty()) {
+                log(Log.INFO, TAG, "WeChat panel candidates=" + targets.size()
+                        + " source=" + sourcePackage);
+            }
+            // The two handles appear as an adjacent pair.  Do not touch a
+            // single unrelated WeChat popup.
+            if (targets.size() != 2) {
+                return;
+            }
+            for (Object target : targets) {
+                try {
+                    Object session = getField(target, "mSession");
+                    Object client = getField(target, "mClient");
+                    Object binder = invoke(client, "asBinder");
+                    invoke(session, "remove", binder);
+                    log(Log.INFO, TAG, "removed stale WeChat selection handle window");
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "remove WeChat handle failed: " + throwable);
+                }
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "dismissWeChatHandleWindows inspect failed: " + throwable);
+        }
     }
 
     private static void notifyPortalState(int state, float x, float y) {

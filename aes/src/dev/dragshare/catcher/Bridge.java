@@ -6361,7 +6361,6 @@ public final class Bridge {
             }
             List<TextView> candidates = new ArrayList<>();
             for (View candidateRoot : roots) {
-                clearNativeSelectableLayouts(candidateRoot, 0);
                 collectSelectedTextViews(candidateRoot, candidates, 0);
             }
             for (TextView textView : candidates) {
@@ -6390,51 +6389,6 @@ public final class Bridge {
         } catch (Throwable ignored) {
         }
         return roots;
-    }
-
-    /**
-     * WeChat 8.0.78 renders chat text in a NativeSelectableLayout.  Unlike a
-     * normal TextView it owns two standalone SelectionHandleView popup windows
-     * (the green half-circle handles) and a selection overlay.  Its d(reason)
-     * method is the app's own "dismiss selection" path: it clears both
-     * endpoints, removes the overlay, and dismisses both handle popups.
-     */
-    private static void clearNativeSelectableLayouts(View view, int depth) {
-        if (view == null || depth > 80) {
-            return;
-        }
-        try {
-            String name = view.getClass().getName();
-            if (name.endsWith(".NativeSelectableLayout")) {
-                Method clear = null;
-                for (Method method : view.getClass().getDeclaredMethods()) {
-                    if ("d".equals(method.getName())
-                            && method.getParameterTypes().length == 1
-                            && method.getParameterTypes()[0].isEnum()) {
-                        clear = method;
-                        break;
-                    }
-                }
-                if (clear != null) {
-                    Class<?> reasonType = clear.getParameterTypes()[0];
-                    Object[] reasons = reasonType.getEnumConstants();
-                    if (reasons != null && reasons.length > 0) {
-                        clear.setAccessible(true);
-                        clear.invoke(view, reasons[0]);
-                        Log.i(TAG, "cleared NativeSelectableLayout selection");
-                    }
-                }
-            }
-            if (view instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) view;
-                for (int i = 0; i < group.getChildCount(); i++) {
-                    clearNativeSelectableLayouts(group.getChildAt(i), depth + 1);
-                }
-            }
-        } catch (Throwable throwable) {
-            Log.w(TAG, "clearNativeSelectableLayouts failed: "
-                    + throwable.getClass().getName());
-        }
     }
 
     private static void collectSelectedTextViews(View view, List<TextView> out, int depth) {
