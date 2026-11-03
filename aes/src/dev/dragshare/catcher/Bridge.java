@@ -41,12 +41,15 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.text.Layout;
+import android.text.Selection;
+import android.text.Spannable;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.ActionMode;
 import android.view.Display;
 import android.view.DragEvent;
 import android.view.Gravity;
@@ -506,6 +509,11 @@ public final class Bridge {
             if (touchTarget.isAttachedToWindow()) {
                 sLastTouchView = touchTarget;
             }
+            // Dismiss the app's text selection UI as soon as our long-press
+            // enters drag mode.  WeChat's custom markdown selector otherwise
+            // leaves its two green handle popups behind even if the drag never
+            // reaches startSystemDrag().
+            dismissTextSelectionUi(touchTarget);
             if (sMovedSinceDown) {
                 sGestureState.set(STATE_DRAGGING);
                 forwardToPortal(content, null);
@@ -5174,6 +5182,7 @@ public final class Bridge {
                 sPendingPayload = payload;
                 sPendingContent = content;
                 sPendingGeneration = sGestureGeneration;
+                dismissTextSelectionUi(sLastTouchView);
                 Log.i(TAG, "long press preview only; drag waits for real move");
                 forwardToPortal(payload, content);
             }
@@ -5873,6 +5882,8 @@ public final class Bridge {
                 Log.i(TAG, "system drag skipped: no attached view");
                 return false;
             }
+            Log.i(TAG, "startSystemDrag enter target=" + view.getClass().getName()
+                    + " roots=" + getGlobalRootViews().size());
             if (context == null) {
                 context = view.getContext();
             }
@@ -5966,6 +5977,7 @@ public final class Bridge {
                         if (action == DragEvent.ACTION_DRAG_STARTED) {
                             sDragStartY = -1f;
                             sDragStartX = -1f;
+                            dismissTextSelectionUi(v);
                             notifyPortalDragState(v.getContext(), 1, 0f, 0f);
                             return true;
                         }
@@ -6047,6 +6059,7 @@ public final class Bridge {
                         if (action == DragEvent.ACTION_DRAG_ENDED) {
                             sDragStartY = -1f;
                             sDragStartX = -1f;
+                            dismissTextSelectionUi(v);
                             cancelShadowMorphAnimator();
                             sShadowMorphProgress = 0f;
                             sActiveShadowSquare = false;
@@ -6074,6 +6087,15 @@ public final class Bridge {
             cancelShadowMorphAnimator();
             boolean started = target.startDragAndDrop(clip, shadow, null,
                     View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ | View.DRAG_FLAG_GLOBAL_URI_WRITE);
+            // ColorOS parity: Editor.startDragAndDrop() calls
+            // stopTextActionMode() immediately after TextView.startDragAndDrop().
+            // Do this even when start failed: cancelAppLongPress() has already
+            // interrupted WeChat, and its selection handles would otherwise stay
+            // in a separate overlay window until the process is killed.
+            dismissTextSelectionUi(target);
+            final View cleanupRoot = target;
+            sMainHandler.postDelayed(() -> dismissTextSelectionUi(cleanupRoot), 120);
+            sMainHandler.postDelayed(() -> dismissTextSelectionUi(cleanupRoot), 350);
             if (!started) {
                 sActiveDragView = null;
                 sActiveDragText = null;
@@ -6307,6 +6329,275 @@ public final class Bridge {
             }
         } catch (Throwable throwable) {
             Log.w(TAG, "cancelAppLongPress failed", throwable);
+        }
+    }
+
+    /**
+     * Android's own text drag path (Editor.startDragAndDrop) finishes the text
+     * action mode right after the drag starts.  We start the drag ourselves from
+     * an arbitrary view, so apps such as WeChat keep their selection handles in
+     * a separate overlay window forever.  Mirror that cleanup here.
+     */
+    private static void dismissTextSelectionUi(View rootOrTarget) {
+        if (rootOrTarget == null) {
+            return;
+        }
+        try {
+            List<View> roots = new ArrayList<>();
+            View root = rootOrTarget.getRootView();
+            if (root != null && !roots.contains(root)) {
+                roots.add(root);
+            }
+            if (!roots.contains(rootOrTarget)) {
+                roots.add(rootOrTarget);
+            }
+            // Selection handles can live in a PopupWindow owned by another
+            // ViewRootImpl.  Walk all roots in this process, not just the app's
+            // main decor view.
+            for (View globalRoot : getGlobalRootViews()) {
+                if (globalRoot != null && !roots.contains(globalRoot)) {
+                    roots.add(globalRoot);
+                }
+            }
+            List<TextView> candidates = new ArrayList<>();
+            for (View candidateRoot : roots) {
+                clearNativeSelectableLayouts(candidateRoot, 0);
+                collectSelectedTextViews(candidateRoot, candidates, 0);
+            }
+            for (TextView textView : candidates) {
+                dismissTextSelectionUi(textView);
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "dismissTextSelectionUi failed", throwable);
+        }
+    }
+
+    private static List<View> getGlobalRootViews() {
+        List<View> roots = new ArrayList<>();
+        try {
+            Class<?> globalClass = Class.forName("android.view.WindowManagerGlobal");
+            Object global = globalClass.getMethod("getInstance").invoke(null);
+            Field viewsField = globalClass.getDeclaredField("mViews");
+            viewsField.setAccessible(true);
+            Object value = viewsField.get(global);
+            if (value instanceof List) {
+                for (Object item : (List<?>) value) {
+                    if (item instanceof View) {
+                        roots.add((View) item);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return roots;
+    }
+
+    /**
+     * WeChat 8.0.78 renders chat text in a NativeSelectableLayout.  Unlike a
+     * normal TextView it owns two standalone SelectionHandleView popup windows
+     * (the green half-circle handles) and a selection overlay.  Its d(reason)
+     * method is the app's own "dismiss selection" path: it clears both
+     * endpoints, removes the overlay, and dismisses both handle popups.
+     */
+    private static void clearNativeSelectableLayouts(View view, int depth) {
+        if (view == null || depth > 80) {
+            return;
+        }
+        try {
+            String name = view.getClass().getName();
+            if (name.endsWith(".NativeSelectableLayout")) {
+                Method clear = null;
+                for (Method method : view.getClass().getDeclaredMethods()) {
+                    if ("d".equals(method.getName())
+                            && method.getParameterTypes().length == 1
+                            && method.getParameterTypes()[0].isEnum()) {
+                        clear = method;
+                        break;
+                    }
+                }
+                if (clear != null) {
+                    Class<?> reasonType = clear.getParameterTypes()[0];
+                    Object[] reasons = reasonType.getEnumConstants();
+                    if (reasons != null && reasons.length > 0) {
+                        clear.setAccessible(true);
+                        clear.invoke(view, reasons[0]);
+                        Log.i(TAG, "cleared NativeSelectableLayout selection");
+                    }
+                }
+            }
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    clearNativeSelectableLayouts(group.getChildAt(i), depth + 1);
+                }
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "clearNativeSelectableLayouts failed: "
+                    + throwable.getClass().getName());
+        }
+    }
+
+    private static void collectSelectedTextViews(View view, List<TextView> out, int depth) {
+        if (view == null || depth > 80 || out.size() >= 24) {
+            return;
+        }
+        try {
+            if (view instanceof TextView) {
+                TextView textView = (TextView) view;
+                boolean selected;
+                try {
+                    selected = textView.hasSelection();
+                } catch (Throwable ignored) {
+                    selected = false;
+                }
+                if (selected || textView.isFocused() || hasTextActionMode(textView)) {
+                    if (!out.contains(textView)) {
+                        out.add(textView);
+                    }
+                }
+            }
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    collectSelectedTextViews(group.getChildAt(i), out, depth + 1);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static boolean hasTextActionMode(TextView textView) {
+        try {
+            Object editor = getField(textView, "mEditor");
+            return editor != null && getField(editor, "mTextActionMode") != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean stopEditorTextActionMode(TextView textView) {
+        try {
+            Object editor = getField(textView, "mEditor");
+            return editor != null && invokeNoArg(editor, "stopTextActionMode");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean hideEditorHandles(TextView textView) {
+        try {
+            Object editor = getField(textView, "mEditor");
+            if (editor == null) {
+                return false;
+            }
+            boolean hidden = false;
+            Object selectionController = getField(editor, "mSelectionModifierCursorController");
+            if (selectionController == null) {
+                selectionController = getField(editor, "mSelectionController");
+            }
+            if (selectionController != null) {
+                hidden = invokeNoArg(selectionController, "hide");
+            }
+            try {
+                Object insertionController = getField(editor, "mInsertionController");
+                if (insertionController != null) {
+                    hidden = invokeNoArg(insertionController, "hide") || hidden;
+                }
+            } catch (Throwable ignored) {
+            }
+            return hidden;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean finishTextActionMode(TextView textView) {
+        try {
+            Object editor = getField(textView, "mEditor");
+            Object mode = editor == null ? null : getField(editor, "mTextActionMode");
+            if (mode instanceof ActionMode) {
+                ((ActionMode) mode).finish();
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static void dismissTextSelectionUi(TextView textView) {
+        if (textView == null) {
+            return;
+        }
+        boolean hadSelection = false;
+        boolean hadActionMode = false;
+        try {
+            hadSelection = textView.hasSelection();
+            hadActionMode = hasTextActionMode(textView);
+        } catch (Throwable ignored) {
+        }
+        // Hide both the selection handles and the insertion (cursor) handle.
+        // A focused input can own a cursor handle even when hasSelection() is
+        // false, and that is exactly the state left behind by some app editors.
+        boolean handlesHidden = hideEditorHandles(textView);
+        if (!hadSelection && !hadActionMode) {
+            return;
+        }
+        boolean stopped = invokeNoArg(textView, "stopTextActionMode");
+        if (!stopped) {
+            stopped = stopEditorTextActionMode(textView);
+        }
+        if (!stopped) {
+            stopped = finishTextActionMode(textView);
+        }
+        handlesHidden = hideEditorHandles(textView) || handlesHidden;
+        if (!stopped && !handlesHidden) {
+            // Public fallback: Editor.onFocusChanged(false) hides the cursor and
+            // span controllers and finishes the text action mode.
+            try {
+                textView.clearFocus();
+            } catch (Throwable ignored) {
+            }
+        }
+        boolean stillSelected = false;
+        try {
+            stillSelected = textView.hasSelection();
+        } catch (Throwable ignored) {
+        }
+        if (hadSelection && stillSelected) {
+            try {
+                textView.performAccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_CLEAR_SELECTION, null);
+            } catch (Throwable ignored) {
+            }
+            try {
+                CharSequence text = textView.getText();
+                if (text instanceof Spannable) {
+                    Selection.removeSelection((Spannable) text);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.i(TAG, "text selection ui dismissed selection=" + hadSelection
+                + " actionMode=" + hadActionMode + " stopped=" + stopped
+                + " handlesHidden=" + handlesHidden
+                + " view=" + textView.getClass().getName());
+    }
+
+    private static boolean invokeNoArg(Object target, String name) {
+        if (target == null) {
+            return false;
+        }
+        try {
+            Method method = findMethod(target.getClass(), name);
+            if (method == null) {
+                return false;
+            }
+            method.setAccessible(true);
+            method.invoke(target);
+            return true;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "invokeNoArg " + name + " failed: " + throwable.getClass().getName());
+            return false;
         }
     }
 
