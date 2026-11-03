@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -55,19 +56,47 @@ public final class TargetRuleStore {
         public final String category;
         public final String label;
         public final int priority;
+        /** Empty = generic app rule; non-empty = only eligible for these semantic kinds. */
+        public final Set<String> contentKinds;
+        /** send / view / dial / mail / sms / search. Empty means send. */
+        public final String action;
+        public final String deeplink;
+        /** App-level rule that may not expose an ACTION_SEND activity. */
+        public final boolean explicit;
 
         Rule(String packageName, String activityContains, String labelContains,
              String category, String label, int priority) {
+            this(packageName, activityContains, labelContains, category, label, priority,
+                    Collections.emptySet(), "", null, false);
+        }
+
+        Rule(String packageName, String activityContains, String labelContains,
+             String category, String label, int priority, Set<String> contentKinds,
+             String action, String deeplink, boolean explicit) {
             this.packageName = packageName == null ? "" : packageName;
             this.activityContains = activityContains == null ? "" : activityContains;
             this.labelContains = labelContains == null ? "" : labelContains;
             this.category = category == null ? "other" : category;
             this.label = label == null ? "" : label;
             this.priority = priority;
+            this.contentKinds = contentKinds == null
+                    ? Collections.emptySet() : Collections.unmodifiableSet(contentKinds);
+            this.action = action == null ? "" : action;
+            this.deeplink = deeplink;
+            this.explicit = explicit;
         }
 
         public boolean isSpecific() {
             return !activityContains.isEmpty() || !labelContains.isEmpty();
+        }
+
+        int specificity() {
+            int score = 0;
+            if (!packageName.isEmpty()) score += 2;
+            if (!activityContains.isEmpty()) score += 4;
+            if (!labelContains.isEmpty()) score += 2;
+            if (!contentKinds.isEmpty()) score += 1;
+            return score;
         }
 
         boolean matches(String pkg, String activity, String targetLabel) {
@@ -98,7 +127,10 @@ public final class TargetRuleStore {
               List<Rule> rules, Map<String, Map<String, Integer>> categoryScores) {
             this.defaultLimit = defaultLimit;
             this.defaultPinned = defaultPinned;
-            this.rules = rules;
+            List<Rule> ordered = new ArrayList<>(rules);
+            // A package-only rule must never shadow a more specific activity rule.
+            ordered.sort(Comparator.comparingInt(Rule::specificity).reversed());
+            this.rules = ordered;
             this.categoryScores = categoryScores;
         }
 
@@ -118,6 +150,16 @@ public final class TargetRuleStore {
             }
             Integer score = scores == null ? null : scores.get(category);
             return score == null ? 0 : score;
+        }
+
+        public int score(Set<String> contentKinds, String category) {
+            int best = 0;
+            if (contentKinds != null) {
+                for (String kind : contentKinds) {
+                    best = Math.max(best, score(kind, category));
+                }
+            }
+            return best;
         }
     }
 
@@ -201,7 +243,11 @@ public final class TargetRuleStore {
                             item.optString("labelContains", ""),
                             item.optString("category", "other"),
                             item.optString("label", ""),
-                            item.optInt("priority", 0)
+                            item.optInt("priority", 0),
+                            stringSet(item.optJSONArray("contentKinds")),
+                            item.optString("action", "").toLowerCase(Locale.US),
+                            item.optString("deeplink", ""),
+                            item.optBoolean("explicit", false)
                     ));
                 }
             }
@@ -216,17 +262,10 @@ public final class TargetRuleStore {
         InputStream input = null;
         String apkPath = sModuleApkPath;
         if (apkPath != null && new File(apkPath).isFile()) {
-            try {
-                ZipFile zip = new ZipFile(apkPath);
-                try {
-                    ZipEntry entry = zip.getEntry("assets/" + ASSET_NAME);
-                    if (entry != null) {
-                        input = zip.getInputStream(entry);
-                    }
-                } finally {
-                    if (input == null) {
-                        zip.close();
-                    }
+            try (ZipFile zip = new ZipFile(apkPath)) {
+                ZipEntry entry = zip.getEntry("assets/" + ASSET_NAME);
+                if (entry != null) {
+                    return readStream(zip.getInputStream(entry));
                 }
             } catch (Throwable ignored) {
             }
@@ -256,6 +295,10 @@ public final class TargetRuleStore {
         if (input == null) {
             return "{}";
         }
+        return readStream(input);
+    }
+
+    private static String readStream(InputStream input) throws Exception {
         try (InputStream stream = input;
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[4096];
@@ -280,6 +323,19 @@ public final class TargetRuleStore {
         return result;
     }
 
+    private static Set<String> stringSet(JSONArray array) {
+        Set<String> result = new HashSet<>();
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) {
+                String value = array.optString(i, "");
+                if (!value.isEmpty()) {
+                    result.add(value.toLowerCase(Locale.US));
+                }
+            }
+        }
+        return result;
+    }
+
     public static List<String> defaultPinnedKeys() {
         return new ArrayList<>(Arrays.asList(
                 "builtin:copy", "builtin:save", "builtin:segment", "builtin:share", "builtin:search"));
@@ -288,19 +344,35 @@ public final class TargetRuleStore {
     private static Rules fallback() {
         Map<String, Map<String, Integer>> scores = fallbackScores();
         List<Rule> rules = new ArrayList<>();
-        rules.add(new Rule("com.autonavi.minimap", "", "", "map", "高德地图", 120));
-        rules.add(new Rule("com.baidu.BaiduMap", "", "", "map", "百度地图", 118));
-        rules.add(new Rule("com.tencent.map", "", "", "map", "腾讯地图", 116));
-        rules.add(new Rule("com.google.android.apps.maps", "", "", "map", "Google 地图", 110));
+        Set<String> address = Collections.singleton("address");
+        Set<String> url = Collections.singleton("url");
+        Set<String> phone = Collections.singleton("phone");
+        Set<String> email = Collections.singleton("email");
+        rules.add(new Rule("com.autonavi.minimap", "", "", "map", "搜索地址", 120,
+                address, ShareTargetEntry.ACTION_VIEW,
+                "amapuri://search/general?sourceApplication=hyperportal&keyword={text}", true));
+        rules.add(new Rule("com.baidu.BaiduMap", "", "", "map", "搜索地址", 118,
+                address, ShareTargetEntry.ACTION_VIEW,
+                "baidumap://map/place/search?src=hyperportal&query={text}", true));
+        rules.add(new Rule("com.tencent.map", "", "", "map", "搜索地址", 116,
+                address, ShareTargetEntry.ACTION_VIEW,
+                "qqmap://map/search?keyword={text}", true));
+        rules.add(new Rule("com.google.android.apps.maps", "", "", "map", "搜索地址", 110,
+                address, ShareTargetEntry.ACTION_VIEW, "geo:0,0?q={text}", true));
         rules.add(new Rule("com.tencent.mobileqq", "qzone", "", "social", "QQ空间", 104));
         rules.add(new Rule("com.tencent.mobileqq", "", "", "chat", "QQ", 98));
         rules.add(new Rule("com.tencent.mm", "timeline", "", "social", "朋友圈", 105));
         rules.add(new Rule("com.tencent.mm", "", "", "chat", "微信", 100));
-        rules.add(new Rule("com.android.chrome", "", "", "browser", "Chrome", 100));
-        rules.add(new Rule("com.quark.browser", "", "", "browser", "夸克", 100));
+        rules.add(new Rule("com.android.chrome", "", "", "browser", "打开网页", 100,
+                url, ShareTargetEntry.ACTION_VIEW, "", true));
+        rules.add(new Rule("com.quark.browser", "", "", "browser", "打开网页", 100,
+                url, ShareTargetEntry.ACTION_VIEW, "", true));
         rules.add(new Rule("com.miui.gallery", "", "", "gallery", "相册", 100));
         rules.add(new Rule("com.miui.notes", "", "", "notes", "笔记", 100));
-        rules.add(new Rule("com.google.android.gm", "", "", "mail", "Gmail", 100));
+        rules.add(new Rule("com.google.android.gm", "", "", "mail", "写邮件", 100,
+                email, ShareTargetEntry.ACTION_MAIL, "", true));
+        rules.add(new Rule("com.android.contacts", "", "", "dialer", "拨号", 100,
+                phone, ShareTargetEntry.ACTION_DIAL, "", true));
         return new Rules(DEFAULT_LIMIT, defaultPinnedKeys(), rules, scores);
     }
 

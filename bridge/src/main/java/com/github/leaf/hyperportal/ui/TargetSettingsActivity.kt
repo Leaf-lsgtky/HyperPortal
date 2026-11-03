@@ -265,6 +265,14 @@ private fun TargetSettingsScreen(onClose: () -> Unit) {
                         onChanged = { refreshConfigAndPinned() },
                     )
                     BuiltInPinRow(
+                        target = builtInMap["builtin:transfer_dock"],
+                        title = "存入中转站",
+                        summary = "把拖拽内容保存到中转站，可随时取回",
+                        key = "builtin:transfer_dock",
+                        config = config,
+                        onChanged = { refreshConfigAndPinned() },
+                    )
+                    BuiltInPinRow(
                         target = builtInMap["builtin:save"],
                         title = "保存原图",
                         summary = "图片拖拽时保存到相册",

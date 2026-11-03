@@ -74,6 +74,7 @@ import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.util.Patterns;
@@ -241,7 +242,7 @@ public final class PortalSystemUiModule {
         private void buildTargets(boolean isImage) {
             mTargets.clear();
             TargetConfig config = TargetConfig.fromProvider(mContext);
-            String contentKind = TargetRepository.contentKind(mText, isImage);
+            Set<String> contentKinds = TargetRepository.contentKinds(mText, isImage, mImageMime);
             List<ShareTargetEntry> candidates = new ArrayList<>();
             candidates.addAll(TargetRepository.builtInEntries(isImage));
             long now = SystemClock.uptimeMillis();
@@ -251,12 +252,12 @@ public final class PortalSystemUiModule {
             }
             candidates.addAll(mCachedShareTargets);
             List<ShareTargetEntry> ordered = TargetRanker.rank(
-                    mContext, candidates, contentKind, config);
+                    mContext, candidates, contentKinds, config);
             for (ShareTargetEntry entry : ordered) {
                 mTargets.add(new AppTarget(entry, createTargetAction(entry)));
             }
             mAppTargetsResolved = !ordered.isEmpty();
-            Log.i(TAG, "targets rebuilt kind=" + contentKind
+            Log.i(TAG, "targets rebuilt kinds=" + contentKinds
                     + " candidates=" + candidates.size()
                     + " shown=" + ordered.size()
                     + " limit=" + config.limit);
@@ -324,6 +325,11 @@ public final class PortalSystemUiModule {
                     return;
                 }
 
+                if (!ShareTargetEntry.ACTION_SEND.equals(entry.action)) {
+                    dispatchRuleAction(ctx, entry, text);
+                    return;
+                }
+
                 if (uri != null || bmp != null) {
                     Uri shareUri = uri;
                     if (shareUri == null) {
@@ -364,6 +370,125 @@ public final class PortalSystemUiModule {
                     }
                 }
             };
+        }
+
+        /**
+         * Starts a target that is not a normal ACTION_SEND share activity:
+         * map deeplinks, browser URL opens, dialer, SMS and mail clients.
+         */
+        private void dispatchRuleAction(Context ctx, ShareTargetEntry entry, String text) {
+            try {
+                String action = entry.action == null ? ShareTargetEntry.ACTION_SEND : entry.action;
+                if (ShareTargetEntry.ACTION_VIEW.equals(action)) {
+                    String target = expandDeeplink(entry.deeplink, text);
+                    if (TextUtils.isEmpty(target)) {
+                        target = extractUrl(text);
+                    }
+                    if (TextUtils.isEmpty(target)) {
+                        toast("没有可打开的链接或地址");
+                        return;
+                    }
+                    if (!target.contains("://") && !target.startsWith("geo:")
+                            && !target.startsWith("mailto:") && !target.startsWith("tel:")) {
+                        target = "https://" + target;
+                    }
+                    Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(target));
+                    view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (!TextUtils.isEmpty(entry.packageName)) {
+                        view.setPackage(entry.packageName);
+                    }
+                    ctx.startActivity(view);
+                    toast("已打开 " + entry.label);
+                    return;
+                }
+                if (ShareTargetEntry.ACTION_DIAL.equals(action)) {
+                    String number = normalizePhone(text);
+                    if (TextUtils.isEmpty(number)) {
+                        toast("没有可拨打的号码");
+                        return;
+                    }
+                    Intent dial = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + number));
+                    dial.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (!TextUtils.isEmpty(entry.packageName)) {
+                        dial.setPackage(entry.packageName);
+                    }
+                    ctx.startActivity(dial);
+                    return;
+                }
+                if (ShareTargetEntry.ACTION_SMS.equals(action)) {
+                    String number = normalizePhone(text);
+                    if (TextUtils.isEmpty(number)) {
+                        toast("没有可发送的号码");
+                        return;
+                    }
+                    Intent sms = new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + number));
+                    sms.putExtra("sms_body", text == null ? "" : text);
+                    sms.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (!TextUtils.isEmpty(entry.packageName)) {
+                        sms.setPackage(entry.packageName);
+                    }
+                    ctx.startActivity(sms);
+                    return;
+                }
+                if (ShareTargetEntry.ACTION_MAIL.equals(action)) {
+                    Intent mail = new Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:"));
+                    mail.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+                    mail.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (!TextUtils.isEmpty(entry.packageName)) {
+                        mail.setPackage(entry.packageName);
+                    }
+                    ctx.startActivity(mail);
+                    return;
+                }
+                if (ShareTargetEntry.ACTION_SEARCH.equals(action)) {
+                    Intent search = new Intent(Intent.ACTION_WEB_SEARCH);
+                    search.putExtra(SearchManager.QUERY, text == null ? "" : text);
+                    search.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ctx.startActivity(search);
+                    return;
+                }
+                toast("无法打开 " + entry.label);
+            } catch (Throwable throwable) {
+                Log.w(TAG, "rule action failed action=" + entry.action
+                        + " target=" + entry.packageName, throwable);
+                toast("无法打开 " + entry.label);
+            }
+        }
+
+        private String expandDeeplink(String template, String text) {
+            if (TextUtils.isEmpty(template)) {
+                return "";
+            }
+            String encoded = Uri.encode(text == null ? "" : text);
+            if (template.contains("{text}")) {
+                return template.replace("{text}", encoded);
+            }
+            if (template.contains("{url}")) {
+                return template.replace("{url}", encoded);
+            }
+            if (template.endsWith("=") || template.endsWith("?") || template.endsWith("&")) {
+                return template + encoded;
+            }
+            return template;
+        }
+
+        private String extractUrl(String text) {
+            if (TextUtils.isEmpty(text)) {
+                return "";
+            }
+            java.util.regex.Matcher matcher = Patterns.WEB_URL.matcher(text);
+            return matcher.find() ? matcher.group() : text.trim();
+        }
+
+        private String normalizePhone(String text) {
+            if (TextUtils.isEmpty(text)) {
+                return "";
+            }
+            String digits = text.replaceAll("[^0-9+]", "");
+            if (digits.startsWith("00")) {
+                digits = "+" + digits.substring(2);
+            }
+            return digits;
         }
 
         private void updateDockTargets() {

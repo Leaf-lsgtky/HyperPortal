@@ -9,43 +9,63 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.text.TextUtils;
+import android.util.Patterns;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Discovers one entry per exported share Activity and applies local rules. */
 public final class TargetRepository {
 
-    private static final Pattern URL = Pattern.compile("^(https?://|www\\.).*", Pattern.CASE_INSENSITIVE);
-    private static final Pattern EMAIL = Pattern.compile("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
-    private static final Pattern PHONE = Pattern.compile("^[+]?[0-9\\s\\-()]{5,20}$");
-    private static final Pattern ADDRESS = Pattern.compile(
-            ".*(省|市|区|县|路|街|号|大厦|广场|小区|园区|楼|室|镇|村).*");
+    private static final Pattern EMAIL = Pattern.compile(
+            "[^\\s@]+@[^\\s@]+\\.[^\\s@]+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PHONE = Pattern.compile("[+]?[0-9][0-9\\s\\-()]{6,19}");
+    private static final Pattern ADDRESS_REGION = Pattern.compile("[省市区县]");
+    private static final Pattern ADDRESS_ROAD = Pattern.compile("[路街道镇乡村]");
+    private static final Pattern ADDRESS_NUMBER = Pattern.compile("[号弄栋楼室]");
+    private static final Pattern ADDRESS_BUILDING = Pattern.compile(
+            "[大厦广场小区园区花园公寓中心]");
 
     private TargetRepository() {
     }
 
     public static List<ShareTargetEntry> queryShareTargets(Context context) {
         PackageManager pm = context.getPackageManager();
+        TargetRuleStore.Rules rules = TargetRuleStore.get(context);
         Map<String, MutableTarget> byKey = new LinkedHashMap<>();
         queryMime(context, pm, "text/plain", true, false, byKey);
         queryMime(context, pm, "image/*", false, true, byKey);
-        queryMime(context, pm, "*/*", false, true, byKey);
+        // "*/*" means the activity can accept arbitrary files; treat it as
+        // both text and image-capable rather than incorrectly classifying a
+        // PDF as an image.
+        queryMime(context, pm, "*/*", true, true, byKey);
 
         List<ShareTargetEntry> result = new ArrayList<>();
+        Set<String> discoveredTextPackages = new HashSet<>();
         for (MutableTarget target : byKey.values()) {
-            TargetRuleStore.Rule rule = TargetRuleStore.get(context)
-                    .match(target.packageName, target.activityName, target.rawLabel);
+            if (target.supportsText) {
+                discoveredTextPackages.add(target.packageName);
+            }
+            TargetRuleStore.Rule rule = rules.match(
+                    target.packageName, target.activityName, target.rawLabel);
+            // Do not replace the activity's original label with a rule label.
+            // A package such as QQ has several share activities; using "QQ"
+            // for all of them produces duplicate, indistinguishable entries.
             String label = target.rawLabel;
             if (TextUtils.isEmpty(label)) {
-                label = target.appName != null && !target.appName.isEmpty() ? target.appName : target.packageName;
+                label = target.appName != null && !target.appName.isEmpty()
+                        ? target.appName : target.packageName;
             }
-            String appName = target.appName != null && !target.appName.isEmpty() ? target.appName : target.packageName;
+            String appName = target.appName != null && !target.appName.isEmpty()
+                    ? target.appName : target.packageName;
             result.add(new ShareTargetEntry(
                     target.key,
                     label,
@@ -58,9 +78,62 @@ public final class TargetRepository {
                     rule == null ? "other" : rule.category,
                     rule == null ? 0 : rule.priority,
                     target.supportsText,
-                    target.supportsImage));
+                    target.supportsImage,
+                    rule == null || TextUtils.isEmpty(rule.action)
+                            ? ShareTargetEntry.ACTION_SEND : rule.action,
+                    rule == null ? null : rule.deeplink,
+                    rule == null ? Collections.emptySet() : rule.contentKinds));
+        }
+
+        // Rules may describe explicit app targets that never publish an
+        // ACTION_SEND activity (maps, browsers, dialers, mail clients).
+        // Add those only when the package is not already represented, so they
+        // do not create duplicate rows for ordinary share apps.
+        for (TargetRuleStore.Rule rule : rules.rules) {
+            if (!rule.explicit || rule.packageName.isEmpty()) {
+                continue;
+            }
+            if (discoveredTextPackages.contains(rule.packageName)
+                    || context.getPackageName().equals(rule.packageName)) {
+                continue;
+            }
+            if (!isInstalled(pm, rule.packageName)) {
+                continue;
+            }
+            String appName = loadAppLabel(pm, rule.packageName);
+            Drawable icon = loadAppIcon(pm, rule.packageName);
+            String label = TextUtils.isEmpty(rule.label) ? appName : rule.label;
+            boolean supportsImage = rule.contentKinds.contains("image");
+            boolean supportsText = !supportsImage || rule.contentKinds.size() > 1;
+            String key = "explicit:" + rule.packageName;
+            result.add(new ShareTargetEntry(
+                    key,
+                    label,
+                    appName,
+                    rule.packageName,
+                    "",
+                    icon,
+                    null,
+                    ShareTargetEntry.KIND_SHARE,
+                    rule.category,
+                    rule.priority,
+                    supportsText,
+                    supportsImage,
+                    TextUtils.isEmpty(rule.action)
+                            ? ShareTargetEntry.ACTION_SEND : rule.action,
+                    rule.deeplink,
+                    rule.contentKinds));
         }
         return result;
+    }
+
+    private static boolean isInstalled(PackageManager pm, String packageName) {
+        try {
+            pm.getApplicationInfo(packageName, 0);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static void queryMime(Context context, PackageManager pm, String mime,
@@ -245,27 +318,73 @@ public final class TargetRepository {
         return result;
     }
 
+    /**
+     * Returns every semantic kind that applies to the payload. OPPO's engine
+     * keeps a set of detected types, so a single string may be both a URL and
+     * an address (for example a map link with a place name). Returning a set
+     * also lets the ranker filter a target such as a map to address-only.
+     */
+    public static Set<String> contentKinds(String text, boolean image, String mime) {
+        LinkedHashSet<String> kinds = new LinkedHashSet<>();
+        boolean imagePayload = image || (!TextUtils.isEmpty(mime) && mime.startsWith("image/"));
+        if (imagePayload) {
+            kinds.add("image");
+        } else if (!TextUtils.isEmpty(mime)) {
+            String lower = mime.toLowerCase(Locale.US);
+            if (!lower.startsWith("text/") && !"application/x-dragshare".equals(lower)) {
+                kinds.add("file");
+            }
+        }
+
+        if (!TextUtils.isEmpty(text)) {
+            String value = text.trim();
+            if (Patterns.WEB_URL.matcher(value).find()) {
+                kinds.add("url");
+            }
+            if (EMAIL.matcher(value).find()) {
+                kinds.add("email");
+            }
+            String digits = value.replaceAll("[^0-9+]", "");
+            if (PHONE.matcher(value).find() && digits.length() >= 7 && digits.length() <= 15) {
+                kinds.add("phone");
+            }
+            if (isAddressLike(value)) {
+                kinds.add("address");
+            }
+            if (!imagePayload) {
+                kinds.add("text");
+            }
+        }
+
+        if (kinds.isEmpty()) {
+            kinds.add("text");
+        }
+        return kinds;
+    }
+
     public static String contentKind(String text, boolean image) {
-        if (image) {
-            return "image";
-        }
-        if (TextUtils.isEmpty(text)) {
-            return "text";
-        }
-        String value = text.trim();
-        if (URL.matcher(value).matches()) {
-            return "url";
-        }
-        if (EMAIL.matcher(value).matches()) {
-            return "email";
-        }
-        if (PHONE.matcher(value).matches()) {
-            return "phone";
-        }
-        if (value.length() >= 4 && ADDRESS.matcher(value).matches()) {
-            return "address";
+        Set<String> kinds = contentKinds(text, image, null);
+        for (String preferred : new String[]{"image", "url", "address", "phone", "email", "file", "text"}) {
+            if (kinds.contains(preferred)) {
+                return preferred;
+            }
         }
         return "text";
+    }
+
+    private static boolean isAddressLike(String value) {
+        if (value.length() < 4 || value.length() > 160) {
+            return false;
+        }
+        int signals = 0;
+        if (ADDRESS_REGION.matcher(value).find()) signals++;
+        if (ADDRESS_ROAD.matcher(value).find()) signals++;
+        if (ADDRESS_NUMBER.matcher(value).find()) signals++;
+        if (ADDRESS_BUILDING.matcher(value).find()) signals++;
+        if (value.startsWith("地址") || value.contains("地址：") || value.contains("地址:")) {
+            signals++;
+        }
+        return signals >= 2;
     }
 
     private static final class MutableTarget {

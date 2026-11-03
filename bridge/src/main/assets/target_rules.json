@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "defaultLimit": 15,
   "defaultPinned": [
     "builtin:copy",
@@ -57,27 +57,62 @@
     {
       "package": "com.autonavi.minimap",
       "category": "map",
-      "priority": 120
+      "priority": 120,
+      "label": "搜索地址",
+      "contentKinds": [
+        "address"
+      ],
+      "action": "view",
+      "explicit": true,
+      "deeplink": "amapuri://search/general?sourceApplication=mfr_tri_free_dragdrop_commute_oppo&keyword={text}"
     },
     {
       "package": "com.baidu.BaiduMap",
       "category": "map",
-      "priority": 118
+      "priority": 118,
+      "label": "搜索地址",
+      "contentKinds": [
+        "address"
+      ],
+      "action": "view",
+      "explicit": true,
+      "deeplink": "baidumap://map/place/search?src=MPOoem.oppo.tuozhuai.search.sug&query={text}"
     },
     {
       "package": "com.tencent.map",
       "category": "map",
-      "priority": 116
+      "priority": 116,
+      "label": "搜索地址",
+      "contentKinds": [
+        "address"
+      ],
+      "action": "view",
+      "explicit": true,
+      "deeplink": "qqmap://map/search?keyword={text}"
     },
     {
       "package": "com.google.android.apps.maps",
       "category": "map",
-      "priority": 110
+      "priority": 110,
+      "label": "搜索地址",
+      "contentKinds": [
+        "address"
+      ],
+      "action": "view",
+      "explicit": true,
+      "deeplink": "geo:0,0?q={text}"
     },
     {
       "package": "com.sdu.didi.psnger",
       "category": "taxi",
-      "priority": 100
+      "priority": 100,
+      "label": "打车",
+      "contentKinds": [
+        "address"
+      ],
+      "action": "view",
+      "explicit": true,
+      "deeplink": "OneTravel://dache_anycar/sendorder?q={text}"
     },
     {
       "package": "com.sankuai.meituan",
@@ -214,17 +249,35 @@
     {
       "package": "com.android.mms",
       "category": "sms",
-      "priority": 98
+      "priority": 98,
+      "label": "发短信",
+      "contentKinds": [
+        "phone"
+      ],
+      "action": "sms",
+      "explicit": true
     },
     {
       "package": "com.google.android.dialer",
       "category": "dialer",
-      "priority": 100
+      "priority": 100,
+      "label": "拨号",
+      "contentKinds": [
+        "phone"
+      ],
+      "action": "dial",
+      "explicit": true
     },
     {
       "package": "com.android.contacts",
       "category": "contacts",
-      "priority": 96
+      "priority": 100,
+      "label": "拨号",
+      "contentKinds": [
+        "phone"
+      ],
+      "action": "dial",
+      "explicit": true
     },
     {
       "package": "com.google.android.contacts",
@@ -234,42 +287,90 @@
     {
       "package": "com.android.chrome",
       "category": "browser",
-      "priority": 100
+      "priority": 100,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.microsoft.emmx",
       "category": "browser",
-      "priority": 98
+      "priority": 98,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "org.mozilla.firefox",
       "category": "browser",
-      "priority": 96
+      "priority": 96,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.quark.browser",
       "category": "browser",
-      "priority": 100
+      "priority": 100,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.UCMobile",
       "category": "browser",
-      "priority": 96
+      "priority": 96,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.baidu.searchbox",
       "category": "browser",
-      "priority": 92
+      "priority": 92,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.tencent.mtt",
       "category": "browser",
-      "priority": 90
+      "priority": 90,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.android.browser",
       "category": "browser",
-      "priority": 88
+      "priority": 88,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
     },
     {
       "package": "com.miui.gallery",
@@ -304,27 +405,57 @@
     {
       "package": "com.google.android.gm",
       "category": "mail",
-      "priority": 100
+      "priority": 100,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     },
     {
       "package": "com.microsoft.office.outlook",
       "category": "mail",
-      "priority": 98
+      "priority": 98,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     },
     {
       "package": "com.tencent.androidqqmail",
       "category": "mail",
-      "priority": 96
+      "priority": 96,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     },
     {
       "package": "com.netease.mail",
       "category": "mail",
-      "priority": 94
+      "priority": 94,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     },
     {
       "package": "com.android.email",
       "category": "mail",
-      "priority": 92
+      "priority": 92,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     },
     {
       "package": "com.taobao.taobao",
@@ -350,6 +481,50 @@
       "package": "com.miui.player",
       "category": "music",
       "priority": 60
+    },
+    {
+      "package": "com.heytap.browser",
+      "category": "browser",
+      "priority": 100,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
+    },
+    {
+      "package": "com.coloros.browser",
+      "category": "browser",
+      "priority": 100,
+      "label": "打开网页",
+      "contentKinds": [
+        "url"
+      ],
+      "action": "view",
+      "explicit": true
+    },
+    {
+      "package": "com.android.dialer",
+      "category": "dialer",
+      "priority": 98,
+      "label": "拨号",
+      "contentKinds": [
+        "phone"
+      ],
+      "action": "dial",
+      "explicit": true
+    },
+    {
+      "package": "com.netease.mobimail",
+      "category": "mail",
+      "priority": 94,
+      "label": "写邮件",
+      "contentKinds": [
+        "email"
+      ],
+      "action": "mail",
+      "explicit": true
     }
   ]
 }

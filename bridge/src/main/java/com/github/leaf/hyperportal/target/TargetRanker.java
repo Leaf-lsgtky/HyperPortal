@@ -22,6 +22,13 @@ public final class TargetRanker {
                                               List<ShareTargetEntry> all,
                                               String contentKind,
                                               TargetConfig config) {
+        return rank(context, all, Collections.singleton(contentKind), config);
+    }
+
+    public static List<ShareTargetEntry> rank(Context context,
+                                              List<ShareTargetEntry> all,
+                                              Set<String> contentKinds,
+                                              TargetConfig config) {
         TargetConfig effective = config == null
                 ? new TargetConfig(15, null, null, null) : config;
         Map<String, ShareTargetEntry> byKey = new LinkedHashMap<>();
@@ -29,7 +36,7 @@ public final class TargetRanker {
             if (effective.hiddenKeys.contains(target.key)) {
                 continue;
             }
-            if (isSupported(target, contentKind)) {
+            if (isSupported(target, contentKinds)) {
                 byKey.put(target.key, target);
             }
         }
@@ -54,8 +61,8 @@ public final class TargetRanker {
         Collections.sort(rest, new Comparator<ShareTargetEntry>() {
             @Override
             public int compare(ShareTargetEntry left, ShareTargetEntry right) {
-                int leftScore = score(left, contentKind, effective, rules);
-                int rightScore = score(right, contentKind, effective, rules);
+                int leftScore = score(left, contentKinds, effective, rules);
+                int rightScore = score(right, contentKinds, effective, rules);
                 if (leftScore != rightScore) {
                     return Integer.compare(rightScore, leftScore);
                 }
@@ -95,17 +102,35 @@ public final class TargetRanker {
         return result;
     }
 
-    private static boolean isSupported(ShareTargetEntry target, String contentKind) {
-        if ("image".equals(contentKind)) {
+    private static boolean isSupported(ShareTargetEntry target, Set<String> contentKinds) {
+        if (contentKinds == null || contentKinds.isEmpty()) {
+            return target.supportsText || target.supportsImage;
+        }
+        if (target.contentKinds != null && !target.contentKinds.isEmpty()) {
+            boolean intersects = false;
+            for (String kind : target.contentKinds) {
+                if (contentKinds.contains(kind)) {
+                    intersects = true;
+                    break;
+                }
+            }
+            if (!intersects) {
+                return false;
+            }
+        }
+        if (contentKinds.contains("image")) {
             return target.supportsImage;
         }
         return target.supportsText;
     }
 
-    private static int score(ShareTargetEntry target, String contentKind,
+    private static int score(ShareTargetEntry target, Set<String> contentKinds,
                              TargetConfig config, TargetRuleStore.Rules rules) {
-        int categoryScore = rules.score(contentKind, target.category);
+        int categoryScore = rules.score(contentKinds, target.category);
         int usage = config.usage.containsKey(target.key) ? config.usage.get(target.key) : 0;
-        return target.priority * 1000 + categoryScore * 10 + Math.min(usage, 100) * 2;
+        // Semantic fit must dominate the app's global affinity. The old
+        // priority*1000 formula made a high-priority map app outrank WeChat
+        // even for ordinary text.
+        return categoryScore * 1000 + target.priority * 10 + Math.min(usage, 100) * 2;
     }
 }

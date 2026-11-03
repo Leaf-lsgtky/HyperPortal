@@ -5,6 +5,9 @@ import android.content.ComponentName;
 import android.graphics.drawable.Drawable;
 import android.text.TextUtils;
 
+import java.util.Collections;
+import java.util.Set;
+
 /** One actual share destination. A package with several share activities gets several entries. */
 public final class ShareTargetEntry {
 
@@ -16,6 +19,13 @@ public final class ShareTargetEntry {
     public static final int KIND_SYSTEM_SHARE = 5;
     public static final int KIND_QR = 6;
     public static final int KIND_TRANSFER_DOCK = 7;
+
+    public static final String ACTION_SEND = "send";
+    public static final String ACTION_VIEW = "view";
+    public static final String ACTION_DIAL = "dial";
+    public static final String ACTION_MAIL = "mail";
+    public static final String ACTION_SMS = "sms";
+    public static final String ACTION_SEARCH = "search";
 
     public final String key;
     public final String label;
@@ -29,6 +39,14 @@ public final class ShareTargetEntry {
     public final int priority;
     public final boolean supportsText;
     public final boolean supportsImage;
+    /**
+     * Empty means this target is generic. A non-empty set limits the target to
+     * semantic content kinds (address/url/phone/email/...); this is intentionally
+     * separate from the display label.
+     */
+    public final Set<String> contentKinds;
+    public final String action;
+    public final String deeplink;
 
     public ShareTargetEntry(String key, String label, String packageName, String activityName,
                             Drawable icon, int kind, String category, int priority,
@@ -48,6 +66,16 @@ public final class ShareTargetEntry {
                             String activityName, Drawable icon, Drawable badgeIcon, int kind,
                             String category, int priority, boolean supportsText,
                             boolean supportsImage) {
+        this(key, label, appName, packageName, activityName, icon, badgeIcon, kind, category,
+                priority, supportsText, supportsImage, ACTION_SEND, null,
+                Collections.emptySet());
+    }
+
+    public ShareTargetEntry(String key, String label, String appName, String packageName,
+                            String activityName, Drawable icon, Drawable badgeIcon, int kind,
+                            String category, int priority, boolean supportsText,
+                            boolean supportsImage, String action, String deeplink,
+                            Set<String> contentKinds) {
         this.key = key;
         this.label = label == null ? "" : label;
         this.appName = appName == null ? (label == null ? "" : label) : appName;
@@ -60,6 +88,10 @@ public final class ShareTargetEntry {
         this.priority = priority;
         this.supportsText = supportsText;
         this.supportsImage = supportsImage;
+        this.action = action == null || action.isEmpty() ? ACTION_SEND : action;
+        this.deeplink = deeplink;
+        this.contentKinds = contentKinds == null
+                ? Collections.emptySet() : Collections.unmodifiableSet(contentKinds);
     }
 
     public Drawable displayIcon() {
