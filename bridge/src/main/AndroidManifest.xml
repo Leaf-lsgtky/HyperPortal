@@ -38,6 +38,8 @@
             <intent-filter>
                 <action android:name="com.github.leaf.hyperportal.SHOW" />
                 <action android:name="com.github.leaf.hyperportal.ACTION_DRAG_STATE" />
+                <action android:name="com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK" />
+                <action android:name="com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK" />
             </intent-filter>
         </receiver>
 

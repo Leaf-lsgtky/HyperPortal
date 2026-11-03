@@ -21,6 +21,7 @@ public class PortalReceiver extends BroadcastReceiver {
         Log.i(TAG, "PortalReceiver action=" + (intent == null ? "null" : intent.getAction()));
         Intent service = new Intent(context, PortalService.class);
         if (intent != null) {
+            service.setAction(intent.getAction());
             service.putExtras(intent);
         }
         service.removeExtra("keepAlive");

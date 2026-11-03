@@ -63,6 +63,9 @@ import com.github.leaf.hyperportal.target.TargetRanker;
 import com.github.leaf.hyperportal.target.BuiltInIconDrawable;
 import com.github.leaf.hyperportal.target.TargetRepository;
 import com.github.leaf.hyperportal.target.TargetRuleStore;
+import com.github.leaf.hyperportal.transferdock.TransferDockController;
+import com.github.leaf.hyperportal.transferdock.TransferDockItem;
+import com.github.leaf.hyperportal.transferdock.TransferDockManager;
 import com.github.leaf.hyperportal.util.QrCodeScanner;
 import com.github.leaf.hyperportal.view.ColorOSDockBar;
 
@@ -213,6 +216,7 @@ public final class PortalSystemUiModule {
         private final ExecutorService mQrExecutor = Executors.newSingleThreadExecutor();
         private int mQrSessionId = 0;
         private String mDetectedQrContent = null;
+        private TransferDockController mTransferDockController;
 
         public SystemUiOverlay(Context context) {
             this.mContext = context;
@@ -398,31 +402,38 @@ public final class PortalSystemUiModule {
 
         private void saveToTransferDock(Context ctx, String text, Bitmap bmp, Uri uri) {
             try {
-                Intent intent = new Intent("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
-                intent.setComponent(new ComponentName(
-                        PortalShareContract.PORTAL_PACKAGE,
-                        PortalShareContract.PORTAL_SERVICE));
-                if (!TextUtils.isEmpty(text)) {
-                    intent.putExtra("text", text);
-                }
+                TransferDockManager mgr = TransferDockManager.getInstance(ctx);
+                TransferDockItem item = null;
                 if (bmp != null) {
-                    Uri staged = stageBitmapInPortal(ctx, bmp, "transfer_");
-                    if (staged != null) {
-                        intent.putExtra("uri", staged.toString());
-                    }
+                    item = mgr.saveBitmap(bmp, "dragshare");
                 } else if (uri != null) {
-                    intent.putExtra("uri", uri.toString());
+                    Bitmap decoded = null;
+                    try (java.io.InputStream is = ctx.getContentResolver().openInputStream(uri)) {
+                        if (is != null) {
+                            decoded = BitmapFactory.decodeStream(is);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    if (decoded != null) {
+                        item = mgr.saveBitmap(decoded, "dragshare");
+                    } else {
+                        String displayName = !TextUtils.isEmpty(text) && text.contains(".") ? text : "文件";
+                        item = mgr.saveFile(uri, mImageMime, displayName, "dragshare");
+                    }
+                } else if (!TextUtils.isEmpty(text)) {
+                    item = mgr.saveText(text, "dragshare");
                 }
-                intent.putExtra("sourcePkg", ctx.getPackageName());
-                try {
-                    ctx.startService(intent);
-                    Log.i(TAG, "saveToTransferDock started service");
-                } catch (Throwable t) {
-                    Intent bcast = new Intent("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
-                    bcast.putExtras(intent);
-                    bcast.setPackage(PortalShareContract.PORTAL_PACKAGE);
-                    ctx.sendBroadcast(bcast);
-                    Log.i(TAG, "saveToTransferDock broadcast fallback sent");
+
+                if (item != null) {
+                    if (mTransferDockController == null) {
+                        mTransferDockController = new TransferDockController(ctx);
+                    }
+                    mTransferDockController.showCapsule(item);
+                    toast("已存入中转站");
+                    Log.i(TAG, "saveToTransferDock succeeded, capsule shown: " + item.getTitle());
+                } else {
+                    toast("存入中转站失败: 无有效内容");
+                    Log.w(TAG, "saveToTransferDock failed: no content");
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "saveToTransferDock failed", t);
@@ -835,6 +846,8 @@ public final class PortalSystemUiModule {
             filter.addAction(ACTION_DRAG_STATE);
             filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
+            filter.addAction("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK");
+            filter.addAction("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
             filter.addAction(Intent.ACTION_USER_UNLOCKED);
             filter.addAction(Intent.ACTION_BOOT_COMPLETED);
             if (Build.VERSION.SDK_INT >= 33) {
@@ -903,6 +916,20 @@ public final class PortalSystemUiModule {
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            if ("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK".equals(action)) {
+                if (mTransferDockController == null) {
+                    mTransferDockController = new TransferDockController(mContext);
+                }
+                mTransferDockController.openDrawer();
+                return;
+            }
+            if ("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK".equals(action)) {
+                String text = intent.getStringExtra("text");
+                String uriStr = intent.getStringExtra("uri");
+                Uri uri = uriStr != null ? Uri.parse(uriStr) : null;
+                saveToTransferDock(mContext, text, null, uri);
+                return;
+            }
             if (Intent.ACTION_USER_UNLOCKED.equals(action) || Intent.ACTION_BOOT_COMPLETED.equals(action)) {
                 updateDockTargets();
                 return;

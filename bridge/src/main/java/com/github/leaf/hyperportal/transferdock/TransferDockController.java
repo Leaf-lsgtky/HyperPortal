@@ -32,12 +32,21 @@ public class TransferDockController {
     private boolean mPanelAttached = false;
 
     public TransferDockController(Context context) {
-        this.mContext = context.getApplicationContext();
+        this.mContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
         this.mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
     }
 
     private int dp(float value) {
         return (int) (value * mContext.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private int resolveWindowType() {
+        if ("com.android.systemui".equals(mContext.getPackageName())) {
+            return 2024; // TYPE_NAVIGATION_BAR_PANEL (SystemUI root window privilege)
+        }
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
     }
 
     /**
@@ -66,19 +75,22 @@ public class TransferDockController {
                 }
 
                 DisplayMetrics dm = mContext.getResources().getDisplayMetrics();
-                int windowType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                        : WindowManager.LayoutParams.TYPE_PHONE;
+                int windowType = resolveWindowType();
 
                 if (mCapsuleParams == null) {
                     mCapsuleParams = new WindowManager.LayoutParams(
                             dp(166), dp(172),
                             windowType,
                             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                                     | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                             PixelFormat.TRANSLUCENT
                     );
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        mCapsuleParams.layoutInDisplayCutoutMode =
+                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                    }
                     mCapsuleParams.gravity = Gravity.TOP | Gravity.END;
                     mCapsuleParams.x = 0;
                     mCapsuleParams.y = (int) (dm.heightPixels * 0.35f);
@@ -126,21 +138,26 @@ public class TransferDockController {
                     mPanelView.setOnDismissListener(() -> dismissDrawer());
                 }
 
-                int windowType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                        : WindowManager.LayoutParams.TYPE_PHONE;
+                int windowType = resolveWindowType();
 
                 if (mPanelParams == null) {
                     mPanelParams = new WindowManager.LayoutParams(
                             WindowManager.LayoutParams.MATCH_PARENT,
                             WindowManager.LayoutParams.MATCH_PARENT,
                             windowType,
-                            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                    | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
                                     | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                             PixelFormat.TRANSLUCENT
                     );
-                    mPanelParams.gravity = Gravity.TOP | Gravity.START;
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        mPanelParams.layoutInDisplayCutoutMode =
+                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                    }
+                    mPanelParams.gravity = Gravity.FILL;
                 }
 
                 if (!mPanelAttached) {

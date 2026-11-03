@@ -19,21 +19,14 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.ViewGroup;
 import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.core.content.ContextCompat;
-
-import com.github.leaf.hyperportal.R;
-
-import java.io.File;
 
 /**
  * 100% ColorOS TransferDock Capsule View (Right edge floating window).
@@ -108,15 +101,10 @@ public class TransferDockCapsuleView extends FrameLayout {
     private void initView() {
         setLayoutParams(new LayoutParams(dp(166), dp(172)));
 
-        // 1. Background image (ColorOS recept_panel_right_bg)
+        // 1. Background image (ColorOS recept_panel_right_bg with programmatic fallback)
         mBgView = new ImageView(getContext());
         mBgView.setScaleType(ImageView.ScaleType.FIT_XY);
-        try {
-            mBgView.setImageResource(R.drawable.recept_panel_right_bg);
-        } catch (Throwable ignored) {
-            // Fallback if resource not present
-            mBgView.setBackgroundColor(Color.parseColor("#E6202022"));
-        }
+        mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity));
         LayoutParams bgLp = new LayoutParams(dp(166), dp(172));
         addView(mBgView, bgLp);
 
@@ -145,10 +133,7 @@ public class TransferDockCapsuleView extends FrameLayout {
 
         mIconView = new ImageView(getContext());
         mIconView.setId(View.generateViewId());
-        try {
-            mIconView.setImageResource(R.drawable.ic_file_dock);
-        } catch (Throwable ignored) {
-        }
+        mIconView.setImageDrawable(TransferDockRes.getFileDockIcon(getContext()));
         RelativeLayout.LayoutParams iconLp = new RelativeLayout.LayoutParams(dp(42), dp(42));
         iconLp.addRule(RelativeLayout.BELOW, mTitleView.getId());
         iconLp.addRule(RelativeLayout.CENTER_HORIZONTAL);
@@ -172,11 +157,7 @@ public class TransferDockCapsuleView extends FrameLayout {
 
         // Badge (+1)
         mBadgeView = new TextView(getContext());
-        try {
-            mBadgeView.setBackgroundResource(R.drawable.shape_transfer_count_group_bg);
-        } catch (Throwable ignored) {
-            mBadgeView.setBackgroundColor(Color.parseColor("#3696FE"));
-        }
+        mBadgeView.setBackground(TransferDockRes.getBadgeBg(getContext(), mDensity));
         mBadgeView.setText("+1");
         mBadgeView.setTextColor(Color.WHITE);
         mBadgeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -226,29 +207,39 @@ public class TransferDockCapsuleView extends FrameLayout {
 
         mBadgeView.setText("+1");
 
-        // Slide in from right (350ms, ease)
-        setTranslationX(dp(166));
-        setVisibility(View.VISIBLE);
+        boolean alreadyShowing = (getVisibility() == View.VISIBLE && getTranslationX() < dp(20));
 
-        if (mSlideAnimator != null && mSlideAnimator.isRunning()) {
-            mSlideAnimator.cancel();
-        }
-        mSlideAnimator = ValueAnimator.ofFloat(dp(166), 0f);
-        mSlideAnimator.setDuration(350);
-        mSlideAnimator.setInterpolator(sEaseInterpolator);
-        mSlideAnimator.addUpdateListener(animation -> {
-            setTranslationX((Float) animation.getAnimatedValue());
-        });
-        mSlideAnimator.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                // Play preview scale animation (200ms)
-                playPreviewAnim();
-                // Schedule auto-dismiss after 4000ms
-                mHandler.postDelayed(mAutoDismissRunnable, 4000);
+        if (alreadyShowing) {
+            // If already on screen, immediately play preview pop animation
+            playPreviewAnim();
+            mHandler.postDelayed(mAutoDismissRunnable, 4000);
+        } else {
+            // Slide in from right (350ms, ease)
+            setTranslationX(dp(166));
+            setVisibility(View.VISIBLE);
+            mTitleView.setAlpha(1f);
+            mIconView.setAlpha(1f);
+            mPreviewLayout.setVisibility(View.GONE);
+
+            if (mSlideAnimator != null) {
+                mSlideAnimator.removeAllListeners();
+                mSlideAnimator.cancel();
             }
-        });
-        mSlideAnimator.start();
+            mSlideAnimator = ValueAnimator.ofFloat(dp(166), 0f);
+            mSlideAnimator.setDuration(350);
+            mSlideAnimator.setInterpolator(sEaseInterpolator);
+            mSlideAnimator.addUpdateListener(animation -> {
+                setTranslationX((Float) animation.getAnimatedValue());
+            });
+            mSlideAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    playPreviewAnim();
+                    mHandler.postDelayed(mAutoDismissRunnable, 4000);
+                }
+            });
+            mSlideAnimator.start();
+        }
     }
 
     private void playPreviewAnim() {
@@ -257,7 +248,8 @@ public class TransferDockCapsuleView extends FrameLayout {
         mPreviewLayout.setScaleY(0.9f);
         mPreviewLayout.setAlpha(0f);
 
-        if (mPreviewAnimator != null && mPreviewAnimator.isRunning()) {
+        if (mPreviewAnimator != null) {
+            mPreviewAnimator.removeAllListeners();
             mPreviewAnimator.cancel();
         }
         mPreviewAnimator = ValueAnimator.ofFloat(0f, 1f);
@@ -279,7 +271,8 @@ public class TransferDockCapsuleView extends FrameLayout {
 
     public void dismissWithAnim() {
         mHandler.removeCallbacks(mAutoDismissRunnable);
-        if (mSlideAnimator != null && mSlideAnimator.isRunning()) {
+        if (mSlideAnimator != null) {
+            mSlideAnimator.removeAllListeners();
             mSlideAnimator.cancel();
         }
         mSlideAnimator = ValueAnimator.ofFloat(getTranslationX(), dp(166));
@@ -328,7 +321,6 @@ public class TransferDockCapsuleView extends FrameLayout {
                     if (mClickListener != null) {
                         mClickListener.onCapsuleClick();
                     }
-                    dismissWithAnim();
                 } else {
                     float currentTransX = getTranslationX();
                     if (currentTransX > dp(50)) {

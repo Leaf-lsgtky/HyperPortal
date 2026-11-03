@@ -200,24 +200,16 @@ class TransferDockManager private constructor(private val context: Context) {
         return try {
             val srcFile = File(item.filePath)
             if (!srcFile.exists()) return null
-            val incomingDir = File(context.cacheDir, "incoming").apply { mkdirs() }
-            val destFile = File(incomingDir, "transfer_${item.id}.png")
-            if (!destFile.exists() || destFile.length() != srcFile.length()) {
-                srcFile.copyTo(destFile, overwrite = true)
-            }
             val uri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/transfer_${item.id}.png")
-            try {
-                val targets = arrayOf(
-                    "com.miui.notes", "com.tencent.mm", "com.tencent.mobileqq",
-                    "com.sina.weibo", "org.telegram.messenger", "com.coolapk.market",
-                    "com.android.fileexplorer", "com.zhihu.android", "com.xingin.xhs",
-                    "com.baidu.tieba", "com.android.systemui"
-                )
-                for (pkg in targets) {
-                    try {
-                        context.grantUriPermission(pkg, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    } catch (ignored: Throwable) {}
+            // Stream the file into PortalFileProvider using ContentResolver so cross-UID isolation is solved
+            context.contentResolver.openOutputStream(uri, "w")?.use { out ->
+                srcFile.inputStream().use { inp ->
+                    inp.copyTo(out)
                 }
+            }
+            try {
+                val authorityUri = Uri.parse("content://com.github.leaf.hyperportal.files")
+                context.contentResolver.call(authorityUri, "grantDragPermissions", uri.toString(), null)
             } catch (ignored: Throwable) {}
             uri
         } catch (e: Throwable) {

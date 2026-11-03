@@ -10,26 +10,21 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Path;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffXfermode;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -41,11 +36,7 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.core.content.ContextCompat;
 
-import com.github.leaf.hyperportal.R;
-
-import java.io.File;
 import java.util.List;
 
 /**
@@ -60,6 +51,8 @@ import java.util.List;
  * - Full drag-out support: long-press cards to start global drag-and-drop into any app!
  */
 public class TransferDockPanel extends FrameLayout {
+
+    private static final String TAG = "TransferDockPanel";
 
     public interface OnPanelDismissListener {
         void onPanelDismiss();
@@ -80,6 +73,7 @@ public class TransferDockPanel extends FrameLayout {
     private ScrollView mScrollView;
     private LinearLayout mCardContainer;
 
+    private ValueAnimator mAnim;
     private OnPanelDismissListener mDismissListener;
     private boolean mIsDismissing = false;
 
@@ -138,12 +132,7 @@ public class TransferDockPanel extends FrameLayout {
 
         // Close button on left
         mCloseBtn = new ImageView(getContext());
-        try {
-            mCloseBtn.setImageResource(R.drawable.ic_transfer_dock_close);
-        } catch (Throwable ignored) {
-            mCloseBtn.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
-        }
-        mCloseBtn.setColorFilter(Color.parseColor("#B0FFFFFF"));
+        mCloseBtn.setImageDrawable(TransferDockRes.getCloseIcon(getContext(), mDensity));
         mCloseBtn.setPadding(dp(4), dp(4), dp(4), dp(4));
         RelativeLayout.LayoutParams closeLp = new RelativeLayout.LayoutParams(dp(28), dp(28));
         closeLp.addRule(RelativeLayout.ALIGN_PARENT_START);
@@ -198,11 +187,7 @@ public class TransferDockPanel extends FrameLayout {
         mEmptyView.setPadding(dp(12), dp(20), dp(12), dp(20));
 
         ImageView emptyIcon = new ImageView(getContext());
-        try {
-            emptyIcon.setImageResource(R.drawable.ic_file_dock);
-        } catch (Throwable ignored) {
-            emptyIcon.setImageResource(android.R.drawable.ic_menu_agenda);
-        }
+        emptyIcon.setImageDrawable(TransferDockRes.getFileDockIcon(getContext()));
         emptyIcon.setColorFilter(Color.parseColor("#40FFFFFF"));
         mEmptyView.addView(emptyIcon, new LinearLayout.LayoutParams(dp(36), dp(36)));
 
@@ -404,56 +389,69 @@ public class TransferDockPanel extends FrameLayout {
         cardView.startDragAndDrop(clipData, shadow, item, flags);
     }
 
-    private void showItemOptions(TransferDockItem item) {
-        // Quick popup options
-        String[] options = new String[]{"复制", "分享", "删除"};
-        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(
-                getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert);
-        builder.setTitle(item.getTitle());
-        builder.setItems(options, (dialog, which) -> {
-            if (which == 0) { // 复制
-                ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-                if (item.getType() == TransferDockItem.TYPE_IMAGE) {
-                    Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
-                    if (uri != null) {
-                        cm.setPrimaryClip(ClipData.newUri(getContext().getContentResolver(), "image", uri));
-                        Toast.makeText(getContext(), "图片已复制到剪贴板", Toast.LENGTH_SHORT).show();
-                    }
-                } else {
-                    String t = item.getText() != null ? item.getText() : item.getTitle();
-                    cm.setPrimaryClip(ClipData.newPlainText("TransferDock", t));
-                    Toast.makeText(getContext(), "文本已复制到剪贴板", Toast.LENGTH_SHORT).show();
-                }
-            } else if (which == 1) { // 分享
-                Intent shareIntent = new Intent(Intent.ACTION_SEND);
-                if (item.getType() == TransferDockItem.TYPE_IMAGE) {
-                    Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
-                    if (uri != null) {
-                        shareIntent.setType("image/*");
-                        shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
-                        shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    }
-                } else {
-                    shareIntent.setType("text/plain");
-                    shareIntent.putExtra(Intent.EXTRA_TEXT, item.getText() != null ? item.getText() : item.getTitle());
-                }
-                shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                Intent chooser = Intent.createChooser(shareIntent, "分享到");
-                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                getContext().startActivity(chooser);
-                dismissWithAnim();
-            } else if (which == 2) { // 删除
-                TransferDockManager.getInstance(getContext()).removeItem(item.getId());
-                reloadItems();
-                Toast.makeText(getContext(), "已删除", Toast.LENGTH_SHORT).show();
+    private void copyItem(TransferDockItem item) {
+        ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (item.getType() == TransferDockItem.TYPE_IMAGE) {
+            Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
+            if (uri != null) {
+                cm.setPrimaryClip(ClipData.newUri(getContext().getContentResolver(), "image", uri));
+                Toast.makeText(getContext(), "图片已复制到剪贴板", Toast.LENGTH_SHORT).show();
+                return;
             }
-        });
-        builder.setNegativeButton("取消", null);
-        android.app.AlertDialog dialog = builder.create();
-        if (dialog.getWindow() != null) {
-            dialog.getWindow().setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
         }
-        dialog.show();
+        String t = item.getText() != null ? item.getText() : item.getTitle();
+        cm.setPrimaryClip(ClipData.newPlainText("TransferDock", t));
+        Toast.makeText(getContext(), "文本已复制到剪贴板", Toast.LENGTH_SHORT).show();
+    }
+
+    private void showItemOptions(TransferDockItem item) {
+        try {
+            String[] options = new String[]{"复制", "分享", "删除"};
+            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(
+                    getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert);
+            builder.setTitle(item.getTitle());
+            builder.setItems(options, (dialog, which) -> {
+                if (which == 0) { // 复制
+                    copyItem(item);
+                } else if (which == 1) { // 分享
+                    Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                    if (item.getType() == TransferDockItem.TYPE_IMAGE) {
+                        Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
+                        if (uri != null) {
+                            shareIntent.setType("image/*");
+                            shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
+                            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        }
+                    } else {
+                        shareIntent.setType("text/plain");
+                        shareIntent.putExtra(Intent.EXTRA_TEXT, item.getText() != null ? item.getText() : item.getTitle());
+                    }
+                    shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    Intent chooser = Intent.createChooser(shareIntent, "分享到");
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    getContext().startActivity(chooser);
+                    dismissWithAnim();
+                } else if (which == 2) { // 删除
+                    TransferDockManager.getInstance(getContext()).removeItem(item.getId());
+                    reloadItems();
+                    Toast.makeText(getContext(), "已删除", Toast.LENGTH_SHORT).show();
+                }
+            });
+            builder.setNegativeButton("取消", null);
+            android.app.AlertDialog dialog = builder.create();
+            int alertWindowType = "com.android.systemui".equals(getContext().getPackageName())
+                    ? 2024 /* TYPE_NAVIGATION_BAR_PANEL */
+                    : (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_PHONE);
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setType(alertWindowType);
+            }
+            dialog.show();
+        } catch (Throwable t) {
+            Log.w(TAG, "showItemOptions dialog failed, fallback to copy", t);
+            copyItem(item);
+        }
     }
 
     private void clearTransferDock() {
@@ -468,30 +466,38 @@ public class TransferDockPanel extends FrameLayout {
         mBackdropView.setAlpha(0f);
         setVisibility(View.VISIBLE);
 
-        ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
-        anim.setDuration(300);
-        anim.setInterpolator(sEaseInterpolator);
-        anim.addUpdateListener(animation -> {
+        if (mAnim != null) {
+            mAnim.removeAllListeners();
+            mAnim.cancel();
+        }
+        mAnim = ValueAnimator.ofFloat(0f, 1f);
+        mAnim.setDuration(300);
+        mAnim.setInterpolator(sEaseInterpolator);
+        mAnim.addUpdateListener(animation -> {
             float frac = animation.getAnimatedFraction();
             mDrawerLayout.setTranslationX(dp(146) * (1f - frac));
             mBackdropView.setAlpha(frac);
         });
-        anim.start();
+        mAnim.start();
     }
 
     public void dismissWithAnim() {
         if (mIsDismissing) return;
         mIsDismissing = true;
 
-        ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
-        anim.setDuration(250);
-        anim.setInterpolator(sEaseInterpolator);
-        anim.addUpdateListener(animation -> {
+        if (mAnim != null) {
+            mAnim.removeAllListeners();
+            mAnim.cancel();
+        }
+        mAnim = ValueAnimator.ofFloat(0f, 1f);
+        mAnim.setDuration(250);
+        mAnim.setInterpolator(sEaseInterpolator);
+        mAnim.addUpdateListener(animation -> {
             float frac = animation.getAnimatedFraction();
             mDrawerLayout.setTranslationX(dp(146) * frac);
             mBackdropView.setAlpha(1f - frac);
         });
-        anim.addListener(new AnimatorListenerAdapter() {
+        mAnim.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
                 setVisibility(View.GONE);
@@ -500,6 +506,6 @@ public class TransferDockPanel extends FrameLayout {
                 }
             }
         });
-        anim.start();
+        mAnim.start();
     }
 }
