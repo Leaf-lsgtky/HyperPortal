@@ -755,6 +755,7 @@ public final class PortalSystemModule {
                 return;
             }
             List<Object> targets = new ArrayList<>();
+            int wechatWindows = 0;
             for (Object value : new ArrayList<>(((Map<?, ?>) mapObject).values())) {
                 try {
                     Object attrs = getField(value, "mAttrs");
@@ -765,6 +766,11 @@ public final class PortalSystemModule {
                     int type = ((Number) getField(attrs, "type")).intValue();
                     int width = ((Number) getField(attrs, "width")).intValue();
                     int height = ((Number) getField(attrs, "height")).intValue();
+                    wechatWindows++;
+                    log(Log.INFO, TAG, "WeChat window type=" + type
+                            + " size=" + width + "x" + height
+                            + " vis=" + getField(value, "mViewVisibility")
+                            + " surface=" + getField(value, "mHasSurface"));
                     // The handles may already be GONE (mViewVisibility=8) and
                     // have no surface while WeChat is in the background; they
                     // still remain in mWindowMap and reappear when WeChat
@@ -778,10 +784,10 @@ public final class PortalSystemModule {
                 } catch (Throwable ignored) {
                 }
             }
-            if (!targets.isEmpty()) {
-                log(Log.INFO, TAG, "WeChat panel candidates=" + targets.size()
-                        + " source=" + sourcePackage);
-            }
+            log(Log.INFO, TAG, "windowMap=" + ((Map<?, ?>) mapObject).size()
+                    + " WeChat windows=" + wechatWindows
+                    + " panel candidates=" + targets.size()
+                    + " source=" + sourcePackage);
             // There can be several stale pairs accumulated from earlier drags;
             // remove every matching handle panel.
             if (targets.size() < 2) {
