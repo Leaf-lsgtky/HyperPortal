@@ -727,6 +727,8 @@ public final class PortalSystemModule {
         }
         Object result = chain.proceed();
         try {
+            log(Log.INFO, TAG, "drag closed cleanup check wms=" + (sWms != null)
+                    + " source=" + sDragSourcePackage);
             dismissWeChatHandleWindows(sWms, sDragSourcePackage);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "dismissWeChatHandleWindows failed: " + throwable);
@@ -780,9 +782,9 @@ public final class PortalSystemModule {
                 log(Log.INFO, TAG, "WeChat panel candidates=" + targets.size()
                         + " source=" + sourcePackage);
             }
-            // The two handles appear as an adjacent pair.  Do not touch a
-            // single unrelated WeChat popup.
-            if (targets.size() != 2) {
+            // There can be several stale pairs accumulated from earlier drags;
+            // remove every matching handle panel.
+            if (targets.size() < 2) {
                 return;
             }
             for (Object target : targets) {
