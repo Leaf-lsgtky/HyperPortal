@@ -765,13 +765,13 @@ public final class PortalSystemModule {
                     int type = ((Number) getField(attrs, "type")).intValue();
                     int width = ((Number) getField(attrs, "width")).intValue();
                     int height = ((Number) getField(attrs, "height")).intValue();
-                    Object visible = getField(value, "mViewVisibility");
-                    Object hasSurface = getField(value, "mHasSurface");
+                    // The handles may already be GONE (mViewVisibility=8) and
+                    // have no surface while WeChat is in the background; they
+                    // still remain in mWindowMap and reappear when WeChat
+                    // resumes.  Remove them even when currently hidden.
                     if (type != 1002 // TYPE_APPLICATION_PANEL
                             || width < 70 || width > 180
-                            || height < 50 || height > 140
-                            || !(visible instanceof Integer) || ((Integer) visible) != 0
-                            || !(hasSurface instanceof Boolean) || !((Boolean) hasSurface)) {
+                            || height < 50 || height > 140) {
                         continue;
                     }
                     targets.add(value);
