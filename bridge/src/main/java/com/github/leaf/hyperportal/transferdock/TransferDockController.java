@@ -13,7 +13,7 @@ import android.view.WindowManager;
 
 /**
  * Manages the presentation, lifecycle, and WindowManager integration
- * of ColorOS TransferDock Capsule and Drawer Panel.
+ * of ColorOS TransferDock Capsule, FloatBar Handle, and Drawer Panel.
  */
 public class TransferDockController {
 
@@ -26,6 +26,10 @@ public class TransferDockController {
     private TransferDockCapsuleView mCapsuleView;
     private WindowManager.LayoutParams mCapsuleParams;
     private boolean mCapsuleAttached = false;
+
+    private TransferDockFloatBarView mFloatBarView;
+    private WindowManager.LayoutParams mFloatBarParams;
+    private boolean mFloatBarAttached = false;
 
     private TransferDockPanel mPanelView;
     private WindowManager.LayoutParams mPanelParams;
@@ -55,6 +59,8 @@ public class TransferDockController {
     public void showCapsule(final TransferDockItem item) {
         mMainHandler.post(() -> {
             try {
+                hideFloatBar();
+
                 if (mPanelAttached && mPanelView != null) {
                     // Drawer already open, simply refresh contents
                     mPanelView.reloadItems();
@@ -111,7 +117,7 @@ public class TransferDockController {
     }
 
     /**
-     * Dismiss the capsule window.
+     * Dismiss the capsule window. If items remain, show the ColorOS FloatBar edge handle.
      */
     public void dismissCapsule() {
         mMainHandler.post(() -> {
@@ -121,6 +127,80 @@ public class TransferDockController {
                 } catch (Throwable ignored) {
                 }
                 mCapsuleAttached = false;
+            }
+            if (!mPanelAttached && TransferDockManager.getInstance(mContext).getItemCount() > 0) {
+                showFloatBar();
+            }
+        });
+    }
+
+    /**
+     * Show ColorOS Smart Sidebar FloatBar (Edge Handle) on the right edge.
+     */
+    public void showFloatBar() {
+        mMainHandler.post(() -> {
+            try {
+                if (mPanelAttached || mCapsuleAttached) {
+                    return;
+                }
+                int count = TransferDockManager.getInstance(mContext).getItemCount();
+                if (count <= 0) {
+                    hideFloatBar();
+                    return;
+                }
+
+                if (mFloatBarView == null) {
+                    mFloatBarView = new TransferDockFloatBarView(mContext);
+                    mFloatBarView.setOnHandleClickListener(() -> {
+                        openDrawer();
+                    });
+                }
+
+                DisplayMetrics dm = mContext.getResources().getDisplayMetrics();
+                int windowType = resolveWindowType();
+
+                if (mFloatBarParams == null) {
+                    mFloatBarParams = new WindowManager.LayoutParams(
+                            dp(20), dp(68),
+                            windowType,
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                    | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                            PixelFormat.TRANSLUCENT
+                    );
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        mFloatBarParams.layoutInDisplayCutoutMode =
+                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                    }
+                    mFloatBarParams.gravity = Gravity.TOP | Gravity.END;
+                    mFloatBarParams.x = 0;
+                    mFloatBarParams.y = (int) (dm.heightPixels * 0.38f);
+                }
+
+                if (!mFloatBarAttached) {
+                    mWindowManager.addView(mFloatBarView, mFloatBarParams);
+                    mFloatBarAttached = true;
+                }
+                mFloatBarView.setVisibility(android.view.View.VISIBLE);
+                Log.i(TAG, "TransferDock FloatBar handle displayed");
+            } catch (Throwable t) {
+                Log.w(TAG, "showFloatBar failed", t);
+            }
+        });
+    }
+
+    /**
+     * Hide ColorOS FloatBar edge handle.
+     */
+    public void hideFloatBar() {
+        mMainHandler.post(() -> {
+            if (mFloatBarAttached && mFloatBarView != null) {
+                try {
+                    mWindowManager.removeView(mFloatBarView);
+                } catch (Throwable ignored) {
+                }
+                mFloatBarAttached = false;
             }
         });
     }
@@ -132,6 +212,7 @@ public class TransferDockController {
         mMainHandler.post(() -> {
             try {
                 dismissCapsule();
+                hideFloatBar();
 
                 if (mPanelView == null) {
                     mPanelView = new TransferDockPanel(mContext);
@@ -185,6 +266,11 @@ public class TransferDockController {
                 } catch (Throwable ignored) {
                 }
                 mPanelAttached = false;
+            }
+            if (TransferDockManager.getInstance(mContext).getItemCount() > 0) {
+                showFloatBar();
+            } else {
+                hideFloatBar();
             }
         });
     }
