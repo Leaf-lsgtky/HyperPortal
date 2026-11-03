@@ -271,6 +271,10 @@ public final class PortalSystemUiModule {
                     }
                     return;
                 }
+                if (entry.kind == ShareTargetEntry.KIND_TRANSFER_DOCK) {
+                    saveToTransferDock(ctx, text, bmp, uri);
+                    return;
+                }
                 if (entry.kind == ShareTargetEntry.KIND_SAVE) {
                     saveImageToGallery(ctx, bmp, uri);
                     return;
@@ -389,6 +393,40 @@ public final class PortalSystemUiModule {
             } catch (Throwable t) {
                 Log.w(TAG, "copyImageToClipboard failed", t);
                 toast("复制失败");
+            }
+        }
+
+        private void saveToTransferDock(Context ctx, String text, Bitmap bmp, Uri uri) {
+            try {
+                Intent intent = new Intent("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
+                intent.setComponent(new ComponentName(
+                        PortalShareContract.PORTAL_PACKAGE,
+                        PortalShareContract.PORTAL_SERVICE));
+                if (!TextUtils.isEmpty(text)) {
+                    intent.putExtra("text", text);
+                }
+                if (bmp != null) {
+                    Uri staged = stageBitmapInPortal(ctx, bmp, "transfer_");
+                    if (staged != null) {
+                        intent.putExtra("uri", staged.toString());
+                    }
+                } else if (uri != null) {
+                    intent.putExtra("uri", uri.toString());
+                }
+                intent.putExtra("sourcePkg", ctx.getPackageName());
+                try {
+                    ctx.startService(intent);
+                    Log.i(TAG, "saveToTransferDock started service");
+                } catch (Throwable t) {
+                    Intent bcast = new Intent("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
+                    bcast.putExtras(intent);
+                    bcast.setPackage(PortalShareContract.PORTAL_PACKAGE);
+                    ctx.sendBroadcast(bcast);
+                    Log.i(TAG, "saveToTransferDock broadcast fallback sent");
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "saveToTransferDock failed", t);
+                toast("存入中转站失败");
             }
         }
 

@@ -62,6 +62,10 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import com.github.leaf.hyperportal.view.ColorOSDockBar;
+import com.github.leaf.hyperportal.transferdock.TransferDockController;
+import com.github.leaf.hyperportal.transferdock.TransferDockItem;
+import com.github.leaf.hyperportal.transferdock.TransferDockManager;
+import com.github.leaf.hyperportal.target.BuiltInIconDrawable;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -140,6 +144,7 @@ public class PortalService extends Service {
     private volatile String mImageUrl;
 
     private final List<AppTarget> mTargets = new ArrayList<>();
+    private TransferDockController mTransferDockController;
     private float mTriggerThreshold = 0.76f;
     private String mTriggerPosition = "bottom";
     private float mStartDragX = -1f;
@@ -167,6 +172,7 @@ public class PortalService extends Service {
         PortalFileProvider.pruneCacheAsync(this, null);
         sInstance = this;
         mWindowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        mTransferDockController = new TransferDockController(this);
         createChannel();
         // Must be called for both startService() and startForegroundService():
         // the system drag-state path still uses startForegroundService, and
@@ -211,6 +217,16 @@ public class PortalService extends Service {
         }
         if (PortalShareContract.ACTION_DISPATCH_IMAGE_SHARE.equals(intent.getAction())) {
             dispatchImageShare(intent);
+            return START_NOT_STICKY;
+        }
+        if ("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK".equals(intent.getAction())) {
+            handleSaveToTransferDock(intent);
+            return START_NOT_STICKY;
+        }
+        if ("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK".equals(intent.getAction())) {
+            if (mTransferDockController != null) {
+                mTransferDockController.openDrawer();
+            }
             return START_NOT_STICKY;
         }
         if (intent.hasExtra("state")) {
@@ -1210,8 +1226,8 @@ public class PortalService extends Service {
         mTargets.clear();
         boolean isImage = (mBitmap != null || mLocalFile != null || mFilePfd != null);
         try {
-            mTargets.add(new AppTarget(isImage ? "存入中转站" : "中转站",
-                    getPackageManager().getApplicationIcon(getPackageName()),
+            mTargets.add(new AppTarget("存入中转站",
+                    BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_TRANSFER_DOCK),
                     getPackageName(), AppTarget.KIND_SAVE));
         } catch (Throwable ignored) {
         }
@@ -1257,18 +1273,64 @@ public class PortalService extends Service {
     }
 
     private void saveToPortal() {
-        if (!TextUtils.isEmpty(mText)) {
-            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            clipboard.setPrimaryClip(ClipData.newPlainText("portal", mText));
-            toast("已存入中转站");
-        } else if (mLocalFile != null) {
-            Uri uri = ensureFileUri();
-            toast(uri == null ? "保存失败" : "已存入中转站");
-        } else if (mBitmap != null) {
-            Uri uri = ensureImageUri();
-            toast(uri == null ? "保存失败" : "已存入中转站");
+        TransferDockItem saved = null;
+        if (mBitmap != null) {
+            saved = TransferDockManager.getInstance(this).saveBitmap(mBitmap, mSource);
+        } else if (mLocalFile != null && mLocalFile.isFile()) {
+            Bitmap bmp = BitmapFactory.decodeFile(mLocalFile.getAbsolutePath());
+            if (bmp != null) {
+                saved = TransferDockManager.getInstance(this).saveBitmap(bmp, mSource);
+            } else {
+                saved = TransferDockManager.getInstance(this).saveFile(Uri.fromFile(mLocalFile), mMimeType, mFileName, mSource);
+            }
+        } else if (!TextUtils.isEmpty(mText)) {
+            saved = TransferDockManager.getInstance(this).saveText(mText, mSource);
         }
         removeBottomPortal();
+        if (saved != null) {
+            if (mTransferDockController == null) {
+                mTransferDockController = new TransferDockController(this);
+            }
+            mTransferDockController.showCapsule(saved);
+        } else {
+            toast("存入中转站失败");
+        }
+    }
+
+    private void handleSaveToTransferDock(Intent intent) {
+        String text = intent.getStringExtra("text");
+        String uriStr = intent.getStringExtra("uri");
+        String sourcePkg = intent.getStringExtra("sourcePkg");
+        TransferDockItem saved = null;
+        if (uriStr != null) {
+            try {
+                Uri uri = Uri.parse(uriStr);
+                Bitmap bmp = null;
+                try {
+                    InputStream is = getContentResolver().openInputStream(uri);
+                    if (is != null) {
+                        bmp = BitmapFactory.decodeStream(is);
+                        is.close();
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (bmp != null) {
+                    saved = TransferDockManager.getInstance(this).saveBitmap(bmp, sourcePkg);
+                } else {
+                    saved = TransferDockManager.getInstance(this).saveFile(uri, null, null, sourcePkg);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "handleSaveToTransferDock failed", t);
+            }
+        } else if (!TextUtils.isEmpty(text)) {
+            saved = TransferDockManager.getInstance(this).saveText(text, sourcePkg);
+        }
+        if (saved != null) {
+            if (mTransferDockController == null) {
+                mTransferDockController = new TransferDockController(this);
+            }
+            mTransferDockController.showCapsule(saved);
+        }
     }
 
     private void shareText() {

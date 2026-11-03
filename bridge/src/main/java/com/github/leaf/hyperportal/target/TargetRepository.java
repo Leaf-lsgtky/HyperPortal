@@ -187,6 +187,9 @@ public final class TargetRepository {
 
     public static List<ShareTargetEntry> builtInEntries(boolean image) {
         List<ShareTargetEntry> result = new ArrayList<>();
+        result.add(new ShareTargetEntry("builtin:transfer_dock", "存入中转站",
+                "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_TRANSFER_DOCK), null,
+                ShareTargetEntry.KIND_TRANSFER_DOCK, "action", 120, true, true));
         result.add(new ShareTargetEntry("builtin:copy", image ? "复制" : "复制文本",
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY), null,
                 ShareTargetEntry.KIND_COPY, "action", 110, true, true));
@@ -212,6 +215,9 @@ public final class TargetRepository {
 
     public static List<ShareTargetEntry> allBuiltInEntries() {
         List<ShareTargetEntry> result = new ArrayList<>();
+        result.add(new ShareTargetEntry("builtin:transfer_dock", "存入中转站",
+                "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_TRANSFER_DOCK), null,
+                ShareTargetEntry.KIND_TRANSFER_DOCK, "action", 120, true, true));
         result.add(new ShareTargetEntry("builtin:copy", "复制",
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY), null,
                 ShareTargetEntry.KIND_COPY, "action", 110, true, true));

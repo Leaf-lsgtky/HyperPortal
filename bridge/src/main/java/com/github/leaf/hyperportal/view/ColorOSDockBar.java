@@ -446,7 +446,9 @@ public class ColorOSDockBar extends FrameLayout {
                 iconDrawable = BuiltInIconDrawable.create(item.id);
             }
             if (iconDrawable == null) {
-                if (item.label != null && (item.label.contains("存") || item.label.contains("保"))) {
+                if (item.label != null && item.label.contains("中转站")) {
+                    iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_TRANSFER_DOCK);
+                } else if (item.label != null && (item.label.contains("存") || item.label.contains("保"))) {
                     iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SAVE);
                 } else if (item.label != null && item.label.contains("分词")) {
                     iconDrawable = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEGMENT);

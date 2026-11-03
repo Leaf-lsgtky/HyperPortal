@@ -4,10 +4,13 @@ package com.github.leaf.hyperportal.target;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorFilter;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 
 import androidx.annotation.NonNull;
@@ -25,6 +28,7 @@ public final class BuiltInIconDrawable extends Drawable {
     public static final int TYPE_SEARCH = 4;
     public static final int TYPE_SHARE = 5;
     public static final int TYPE_QR = 6;
+    public static final int TYPE_TRANSFER_DOCK = 7;
 
     private final int mType;
     private final Paint mBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -65,6 +69,8 @@ public final class BuiltInIconDrawable extends Drawable {
                 return new BuiltInIconDrawable(TYPE_SHARE);
             case "builtin:qr":
                 return new BuiltInIconDrawable(TYPE_QR);
+            case "builtin:transfer_dock":
+                return new BuiltInIconDrawable(TYPE_TRANSFER_DOCK);
             default:
                 return null;
         }
@@ -83,13 +89,24 @@ public final class BuiltInIconDrawable extends Drawable {
         float left = bounds.left + (bounds.width() - size) / 2f;
         float top = bounds.top + (bounds.height() - size) / 2f;
 
-        // 1. Dark squircle background
+        // 1. Squircle background (Blue gradient for TransferDock, dark squircle for others)
         float cornerRadius = size * 0.28f;
         RectF bgRect = new RectF(left, top, left + size, top + size);
+        if (mType == TYPE_TRANSFER_DOCK) {
+            mBgPaint.setShader(new LinearGradient(left, top, left, top + size,
+                    Color.parseColor("#69B2FF"), Color.parseColor("#3696FE"),
+                    Shader.TileMode.CLAMP));
+        } else {
+            mBgPaint.setShader(null);
+            mBgPaint.setColor(Color.parseColor("#38383A"));
+        }
         canvas.drawRoundRect(bgRect, cornerRadius, cornerRadius, mBgPaint);
 
         // 2. Vector icon glyph
         switch (mType) {
+            case TYPE_TRANSFER_DOCK:
+                drawTransferDock(canvas, left, top, size);
+                break;
             case TYPE_COPY:
                 drawCopy(canvas, left, top, size);
                 break;
@@ -228,6 +245,48 @@ public final class BuiltInIconDrawable extends Drawable {
         // Center scan line
         canvas.drawLine(qLeft + qrSize * 0.15f, top + size * 0.5f,
                 qLeft + qrSize * 0.85f, top + size * 0.5f, mStrokePaint);
+    }
+
+    private void drawTransferDock(Canvas canvas, float left, float top, float size) {
+        float cx = left + size * 0.5f;
+        float cy = top + size * 0.5f;
+        mStrokePaint.setStrokeWidth(Math.max(1.5f, size * 0.045f));
+
+        // Folder outline
+        float fw = size * 0.44f;
+        float fh = size * 0.34f;
+        float fx = cx - fw / 2f;
+        float fy = cy - fh / 2f + size * 0.02f;
+        float rad = size * 0.06f;
+
+        // Folder tab & body path
+        Path path = new Path();
+        path.moveTo(fx, fy + rad);
+        path.lineTo(fx, fy + fh - rad);
+        path.quadTo(fx, fy + fh, fx + rad, fy + fh);
+        path.lineTo(fx + fw - rad, fy + fh);
+        path.quadTo(fx + fw, fy + fh, fx + fw, fy + fh - rad);
+        path.lineTo(fx + fw, fy + rad * 1.5f);
+        path.quadTo(fx + fw, fy, fx + fw - rad, fy);
+        path.lineTo(fx + fw * 0.55f, fy);
+        path.lineTo(fx + fw * 0.42f, fy - size * 0.04f);
+        path.lineTo(fx + rad, fy - size * 0.04f);
+        path.quadTo(fx, fy - size * 0.04f, fx, fy + rad);
+        path.close();
+        canvas.drawPath(path, mStrokePaint);
+
+        // Two transfer arrows inside
+        // Arrow pointing right (top)
+        float aY1 = cy - size * 0.035f;
+        canvas.drawLine(cx - size * 0.11f, aY1, cx + size * 0.09f, aY1, mStrokePaint);
+        canvas.drawLine(cx + size * 0.03f, aY1 - size * 0.035f, cx + size * 0.09f, aY1, mStrokePaint);
+        canvas.drawLine(cx + size * 0.03f, aY1 + size * 0.035f, cx + size * 0.09f, aY1, mStrokePaint);
+
+        // Arrow pointing left (bottom)
+        float aY2 = cy + size * 0.075f;
+        canvas.drawLine(cx - size * 0.09f, aY2, cx + size * 0.11f, aY2, mStrokePaint);
+        canvas.drawLine(cx - size * 0.03f, aY2 - size * 0.035f, cx - size * 0.09f, aY2, mStrokePaint);
+        canvas.drawLine(cx - size * 0.03f, aY2 + size * 0.035f, cx - size * 0.09f, aY2, mStrokePaint);
     }
 
     @Override

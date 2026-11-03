@@ -15,6 +15,7 @@ public final class ShareTargetEntry {
     public static final int KIND_SEARCH = 4;
     public static final int KIND_SYSTEM_SHARE = 5;
     public static final int KIND_QR = 6;
+    public static final int KIND_TRANSFER_DOCK = 7;
 
     public final String key;
     public final String label;
