@@ -12,6 +12,11 @@ public final class PortalShareContract {
 
     public static final String ACTION_DISPATCH_IMAGE_SHARE =
             "com.github.leaf.hyperportal.DISPATCH_IMAGE_SHARE";
+    public static final String ACTION_OCR_SEGMENT =
+            "com.github.leaf.hyperportal.OCR_SEGMENT";
+    public static final String EXTRA_OCR_IMAGE_URI = "ocrImageUri";
+    public static final String EXTRA_OCR_TOUCH_X = "ocrTouchX";
+    public static final String EXTRA_OCR_TOUCH_Y = "ocrTouchY";
 
     public static final String EXTRA_TARGET_PACKAGE = "targetPackage";
     public static final String EXTRA_TARGET_ACTIVITY = "targetActivity";

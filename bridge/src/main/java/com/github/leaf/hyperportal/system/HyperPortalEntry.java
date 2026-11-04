@@ -19,6 +19,7 @@ import io.github.libxposed.api.XposedModuleInterface;
  * Scopes:
  *   - system (system_server): 3D spatial tilt transformation (PortalSystemModule)
  *   - com.android.systemui: Aurora Glow & Bottom Target Shelf (PortalSystemUiModule)
+ *   - com.xiaomi.aicr: reserved for the HyperOS AI engine OCR integration
  */
 public final class HyperPortalEntry extends XposedModule {
 

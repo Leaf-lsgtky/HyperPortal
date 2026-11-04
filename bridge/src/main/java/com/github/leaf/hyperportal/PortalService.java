@@ -1,6 +1,8 @@
 package com.github.leaf.hyperportal;
 
+import com.github.leaf.hyperportal.bigbang.BigBangContract;
 import com.github.leaf.hyperportal.data.HyperPortalPreferences;
+import com.github.leaf.hyperportal.ocr.AicrOcrClient;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 
@@ -221,6 +223,10 @@ public class PortalService extends Service {
         }
         if ("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK".equals(intent.getAction())) {
             handleSaveToTransferDock(intent);
+            return START_NOT_STICKY;
+        }
+        if (PortalShareContract.ACTION_OCR_SEGMENT.equals(intent.getAction())) {
+            recognizeImageSegment(intent);
             return START_NOT_STICKY;
         }
         if ("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK".equals(intent.getAction())) {
@@ -1295,6 +1301,49 @@ public class PortalService extends Service {
         } else {
             toast("存入中转站失败");
         }
+    }
+
+    private void recognizeImageSegment(Intent intent) {
+        String uriString = intent == null ? null
+                : intent.getStringExtra(PortalShareContract.EXTRA_OCR_IMAGE_URI);
+        if (TextUtils.isEmpty(uriString)) {
+            toast("图片准备失败");
+            return;
+        }
+        final int touchX = intent.getIntExtra(PortalShareContract.EXTRA_OCR_TOUCH_X, -1);
+        final int touchY = intent.getIntExtra(PortalShareContract.EXTRA_OCR_TOUCH_Y, -1);
+        Uri uri = Uri.parse(uriString);
+        Bitmap bitmap = null;
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input != null) {
+                bitmap = BitmapFactory.decodeStream(input);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "read OCR image failed uri=" + uri, t);
+        }
+        if (bitmap == null) {
+            toast("无法读取图片");
+            return;
+        }
+        AicrOcrClient.recognize(this, bitmap, (text, error) -> {
+            if (error != null) {
+                Log.w(TAG, "AICR image OCR failed", error);
+                String message = error.getMessage();
+                toast(TextUtils.isEmpty(message) ? "图片文字识别失败" : message);
+                return;
+            }
+            if (TextUtils.isEmpty(text)) {
+                toast("图片中没有识别到文字");
+                return;
+            }
+            try {
+                startActivity(BigBangContract.createIntent(
+                        this, text, touchX, touchY));
+            } catch (Throwable t) {
+                Log.w(TAG, "open BigBang after OCR failed", t);
+                toast("无法打开文本分词");
+            }
+        });
     }
 
     private void handleSaveToTransferDock(Intent intent) {

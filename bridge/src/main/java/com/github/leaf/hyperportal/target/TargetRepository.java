@@ -267,6 +267,9 @@ public final class TargetRepository {
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_COPY), null,
                 ShareTargetEntry.KIND_COPY, "action", 110, true, true));
         if (image) {
+            result.add(new ShareTargetEntry("builtin:segment", "文本分词",
+                    "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEGMENT), null,
+                    ShareTargetEntry.KIND_SEGMENT, "image", 100, true, true));
             result.add(new ShareTargetEntry("builtin:save", "保存",
                     "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SAVE), null,
                     ShareTargetEntry.KIND_SAVE, "image", 105, false, true));
@@ -299,7 +302,7 @@ public final class TargetRepository {
                 ShareTargetEntry.KIND_SAVE, "image", 105, false, true));
         result.add(new ShareTargetEntry("builtin:segment", "文本分词",
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SEGMENT), null,
-                ShareTargetEntry.KIND_SEGMENT, "text", 100, true, false));
+                ShareTargetEntry.KIND_SEGMENT, "text", 100, true, true));
         result.add(new ShareTargetEntry("builtin:share", "系统分享",
                 "系统内置", "builtin", "", BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_SHARE), null,
                 ShareTargetEntry.KIND_SYSTEM_SHARE, "action", 95, true, true));

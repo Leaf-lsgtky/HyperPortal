@@ -288,13 +288,9 @@ public final class PortalSystemUiModule {
                 }
                 if (entry.kind == ShareTargetEntry.KIND_SEGMENT) {
                     if (!TextUtils.isEmpty(text)) {
-                        try {
-                            ctx.startActivity(BigBangContract.createIntent(
-                                    ctx, text, Math.round(mLastDropX), Math.round(mLastDropY)));
-                        } catch (Throwable t) {
-                            Log.w(TAG, "open text segmentation failed", t);
-                            toast("无法打开文本分词");
-                        }
+                        openTextSegmentation(ctx, text);
+                    } else if (bmp != null || uri != null) {
+                        openImageTextSegmentation(ctx, bmp, uri);
                     }
                     return;
                 }
@@ -504,6 +500,66 @@ public final class PortalSystemUiModule {
                 }
                 mDockBar.setItems(dockItems);
             }
+        }
+
+        private void openTextSegmentation(Context ctx, String text) {
+            try {
+                ctx.startActivity(BigBangContract.createIntent(
+                        ctx, text, Math.round(mLastDropX), Math.round(mLastDropY)));
+            } catch (Throwable t) {
+                Log.w(TAG, "open text segmentation failed", t);
+                toast("无法打开文本分词");
+            }
+        }
+
+        private void openImageTextSegmentation(Context ctx, Bitmap bitmap, Uri uri) {
+            Bitmap source = bitmap;
+            if (source == null && uri != null) {
+                try (InputStream input = ctx.getContentResolver().openInputStream(uri)) {
+                    source = BitmapFactory.decodeStream(input);
+                } catch (Throwable t) {
+                    Log.w(TAG, "decode OCR image failed uri=" + uri, t);
+                }
+            }
+            if (source == null || source.isRecycled()) {
+                toast("无法读取图片");
+                return;
+            }
+            source = scaleForOcr(source);
+            Uri staged = stageBitmapInPortal(ctx, source, "ocr_");
+            if (staged == null) {
+                toast("图片准备失败");
+                return;
+            }
+            try {
+                Intent ocr = new Intent(PortalShareContract.ACTION_OCR_SEGMENT);
+                ocr.setClassName(
+                        PortalShareContract.PORTAL_PACKAGE,
+                        PortalShareContract.PORTAL_SERVICE);
+                ocr.putExtra(PortalShareContract.EXTRA_OCR_IMAGE_URI, staged.toString());
+                ocr.putExtra(PortalShareContract.EXTRA_OCR_TOUCH_X, Math.round(mLastDropX));
+                ocr.putExtra(PortalShareContract.EXTRA_OCR_TOUCH_Y, Math.round(mLastDropY));
+                ocr.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startForegroundService(ocr);
+                toast("正在识别图片文字…");
+            } catch (Throwable t) {
+                Log.w(TAG, "start image OCR failed", t);
+                toast("无法启动图片识字");
+            }
+        }
+
+        private Bitmap scaleForOcr(Bitmap source) {
+            int width = source.getWidth();
+            int height = source.getHeight();
+            int max = Math.max(width, height);
+            if (max <= 4096) {
+                return source;
+            }
+            float scale = 4096f / max;
+            Bitmap scaled = Bitmap.createScaledBitmap(source,
+                    Math.max(1, Math.round(width * scale)),
+                    Math.max(1, Math.round(height * scale)), true);
+            return scaled != null ? scaled : source;
         }
 
         private void copyImageToClipboard(Context ctx, Bitmap bmp, Uri uri) {
