@@ -23,7 +23,7 @@ import androidx.annotation.NonNull;
  * Dimensions:
  * - Visual bar: 5dp width, 52dp height, 2.5dp corner radius
  * - Touch hot zone: 20dp width, 68dp height (easy to touch while visually minimalist)
- * - ColorOS frosted glass: #992C2C2E fill, #33FFFFFF stroke
+ * - ColorOS frosted glass: #992C2C2E fill, no outline stroke
  */
 public class TransferDockFloatBarView extends View {
 
@@ -34,7 +34,6 @@ public class TransferDockFloatBarView extends View {
     private final float mDensity;
     private final int mTouchSlop;
     private final Paint mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint mStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF mBarRect = new RectF();
 
     private OnHandleClickListener mClickListener;
@@ -61,8 +60,6 @@ public class TransferDockFloatBarView extends View {
 
     private void init() {
         mPaint.setStyle(Paint.Style.FILL);
-        mStrokePaint.setStyle(Paint.Style.STROKE);
-        mStrokePaint.setStrokeWidth(dp(0.8f));
         applyTheme();
     }
 
@@ -70,29 +67,25 @@ public class TransferDockFloatBarView extends View {
         mNight = TransferDockTheme.isNight(getContext());
         if (!mHasRegionSample) {
             // Fallback until the compositor sample arrives.
-            setBarColors(mNight ? 0x33C7C7C7 : 0x33191919,
-                    mNight ? 0xCCFFFFFF : 0xFF979797, false);
+            setBarColors(mNight ? 0x33C7C7C7 : 0x33191919, false);
         }
     }
 
-    private void setBarColors(int fill, int stroke, boolean animate) {
+    private void setBarColors(int fill, boolean animate) {
         if (mColorAnimator != null) {
             mColorAnimator.cancel();
         }
         if (!animate) {
             mPaint.setColor(fill);
-            mStrokePaint.setColor(stroke);
             invalidate();
             return;
         }
         final int oldFill = mPaint.getColor();
-        final int oldStroke = mStrokePaint.getColor();
         mColorAnimator = ValueAnimator.ofFloat(0f, 1f);
         mColorAnimator.setDuration(180);
         mColorAnimator.addUpdateListener(a -> {
             float f = a.getAnimatedFraction();
             mPaint.setColor(blend(oldFill, fill, f));
-            mStrokePaint.setColor(blend(oldStroke, stroke, f));
             invalidate();
         });
         mColorAnimator.start();
@@ -114,8 +107,7 @@ public class TransferDockFloatBarView extends View {
         }
         mHasRegionSample = true;
         mRegionDark = dark;
-        setBarColors(dark ? 0x33C7C7C7 : 0x33191919,
-                dark ? 0xCCFFFFFF : 0xFF979797, true);
+        setBarColors(dark ? 0x33C7C7C7 : 0x33191919, true);
     }
 
     public void refreshTheme() {
@@ -190,7 +182,6 @@ public class TransferDockFloatBarView extends View {
 
         mBarRect.set(left, top, right, bottom);
         canvas.drawRoundRect(mBarRect, radius, radius, mPaint);
-        canvas.drawRoundRect(mBarRect, radius, radius, mStrokePaint);
     }
 
     @Override

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package com.github.leaf.hyperportal.transferdock;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
@@ -12,6 +13,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.animation.PathInterpolator;
 import android.widget.Toast;
 
 import java.util.function.Consumer;
@@ -47,6 +49,9 @@ public class TransferDockController {
     private TransferDockPanel mPanelView;
     private WindowManager.LayoutParams mPanelParams;
     private boolean mPanelAttached = false;
+    private ValueAnimator mPanelSlideAnim;
+    private int mPanelRestX;
+    private int mPanelDragOutX;
 
     private View mScrimView;
     private WindowManager.LayoutParams mScrimParams;
@@ -150,7 +155,7 @@ public class TransferDockController {
 
                 if (mCapsuleParams == null) {
                     mCapsuleParams = new WindowManager.LayoutParams(
-                            dp(166), dp(172),
+                            dp(146), dp(112),
                             windowType,
                             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                                     | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -162,14 +167,22 @@ public class TransferDockController {
                         mCapsuleParams.layoutInDisplayCutoutMode =
                                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
                     }
-                    mCapsuleParams.gravity = Gravity.TOP | Gravity.END;
-                    mCapsuleParams.x = 0;
-                    mCapsuleParams.y = (int) (dm.heightPixels * 0.35f);
                 }
+
+                // Keep the +1 capsule centered on the collapsed FloatBar
+                // handle (both use the 25% vertical anchor).
+                int handleTop = (int) (dm.heightPixels * 0.25f);
+                mCapsuleParams.gravity = Gravity.TOP | Gravity.END;
+                // The dock panel sits 8dp off the right edge; the capsule
+                // must use the same inset instead of being flush to the edge.
+                mCapsuleParams.x = dp(8);
+                mCapsuleParams.y = handleTop + (dp(68) - dp(112)) / 2;
 
                 if (!mCapsuleAttached) {
                     mWindowManager.addView(mCapsuleView, mCapsuleParams);
                     mCapsuleAttached = true;
+                } else {
+                    mWindowManager.updateViewLayout(mCapsuleView, mCapsuleParams);
                 }
 
                 int totalCount = TransferDockManager.getInstance(mContext).getItemCount();
@@ -275,6 +288,9 @@ public class TransferDockController {
             mScrimView.setOnClickListener(v -> dismissDrawer());
         }
         mScrimView.setBackgroundColor(TransferDockTheme.scrimColor(mContext));
+        // A drag can leave the scrim GONE + NOT_TOUCHABLE; every reopen must
+        // restore both flags, otherwise the dim layer silently disappears.
+        mScrimView.setVisibility(View.VISIBLE);
 
         if (mScrimParams == null) {
             mScrimParams = new WindowManager.LayoutParams(
@@ -292,6 +308,14 @@ public class TransferDockController {
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             }
             mScrimParams.gravity = Gravity.FILL;
+        }
+        mScrimParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        if (mScrimAttached) {
+            try {
+                mWindowManager.updateViewLayout(mScrimView, mScrimParams);
+            } catch (Throwable t) {
+                Log.w(TAG, "refresh scrim layout failed", t);
+            }
         }
 
         if (!mScrimAttached) {
@@ -332,6 +356,14 @@ public class TransferDockController {
                     mScrimView.setVisibility(View.VISIBLE);
                     mScrimView.setAlpha(1f);
                     mScrimView.setBackgroundColor(TransferDockTheme.scrimColor(mContext));
+                    if (mScrimParams != null) {
+                        mScrimParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                        try {
+                            mWindowManager.updateViewLayout(mScrimView, mScrimParams);
+                        } catch (Throwable t) {
+                            Log.w(TAG, "restore scrim layout failed", t);
+                        }
+                    }
                 }
 
                 mPanelView.setBackdropBlurAvailable(mBlurAvailable);
@@ -344,6 +376,9 @@ public class TransferDockController {
                 int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        // The panel slides mostly off the right edge while a
+                        // card is being dragged; allow that negative x offset.
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
 
                 if (mPanelParams == null) {
@@ -363,7 +398,11 @@ public class TransferDockController {
                     mPanelParams.flags = flags;
                 }
                 mPanelParams.gravity = Gravity.TOP | Gravity.END;
-                mPanelParams.x = dp(8);
+                mPanelRestX = dp(8);
+                // Leave a 36dp grab strip on screen: dragging the payload back
+                // onto it cancels the send and lets the panel return.
+                mPanelDragOutX = mPanelRestX - Math.max(0, panelWidth - dp(36));
+                mPanelParams.x = mPanelRestX;
                 mPanelParams.y = panelTop;
                 clearNativePanelBlur(mPanelParams);
 
@@ -388,13 +427,35 @@ public class TransferDockController {
      * Both the panel and the scrim become non-touchable so the target app
      * below can receive the drop.
      */
+    /**
+     * The payload is back over the transfer dock: expand the panel so the
+     * user can see where it will land.  The drag itself is not interrupted;
+     * moving out again slides the panel aside.
+     */
+    public void onPanelDragEntered() {
+        mMainHandler.post(() -> animatePanelTo(mPanelRestX, 260));
+    }
+
+    /**
+     * The payload left the transfer dock again: slide the panel aside so it
+     * stops covering app targets.  Called repeatedly while the drag crosses
+     * the panel edge.
+     */
+    public void onPanelDragExited() {
+        mMainHandler.post(() -> animatePanelTo(mPanelDragOutX, 220));
+    }
+
     public void onPanelDragStarted() {
         notifyTransferDockDragState(true);
         mMainHandler.post(() -> {
             if (mPanelAttached && mPanelView != null && mPanelParams != null) {
                 try {
-                    mPanelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                    // Keep the panel touchable so its own drag listener can
+                    // detect the payload coming back.  It is moved almost
+                    // entirely off-screen, so it does not cover app targets.
+                    mPanelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
                     mWindowManager.updateViewLayout(mPanelView, mPanelParams);
+                    animatePanelTo(mPanelDragOutX, 240);
                 } catch (Throwable t) {
                     Log.w(TAG, "onPanelDragStarted panel failed", t);
                 }
@@ -408,7 +469,7 @@ public class TransferDockController {
                     Log.w(TAG, "onPanelDragStarted scrim failed", t);
                 }
             }
-            Log.i(TAG, "onPanelDragStarted: panel/scrim set to NOT_TOUCHABLE");
+            Log.i(TAG, "onPanelDragStarted: panel moved aside, scrim hidden");
         });
     }
 
@@ -420,6 +481,19 @@ public class TransferDockController {
         mMainHandler.post(() -> {
             Log.i(TAG, "onPanelDragEnded success=" + success);
             if (success) {
+                // The drag hid the scrim.  Restore it before the exit
+                // animation; otherwise the next open reuses a GONE,
+                // non-touchable scrim and the dim layer is missing.
+                if (mScrimAttached && mScrimView != null && mScrimParams != null) {
+                    try {
+                        mScrimParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                        mScrimView.setVisibility(View.VISIBLE);
+                        mScrimView.setAlpha(1f);
+                        mWindowManager.updateViewLayout(mScrimView, mScrimParams);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "restore scrim after drag failed", t);
+                    }
+                }
                 dismissDrawer();
                 Toast.makeText(mContext, "已拖出发送", Toast.LENGTH_SHORT).show();
             } else {
@@ -431,6 +505,7 @@ public class TransferDockController {
                         Log.w(TAG, "restore panel failed", t);
                     }
                     mPanelView.restoreFromDrag();
+                    animatePanelTo(mPanelRestX, 300);
                 }
                 if (mScrimAttached && mScrimView != null && mScrimParams != null) {
                     try {
@@ -444,6 +519,44 @@ public class TransferDockController {
                 }
             }
         });
+    }
+
+    private void animatePanelTo(int targetX, long duration) {
+        if (!mPanelAttached || mPanelView == null || mPanelParams == null) {
+            return;
+        }
+        if (mPanelSlideAnim != null) {
+            mPanelSlideAnim.cancel();
+            mPanelSlideAnim = null;
+        }
+        final int startX = mPanelParams.x;
+        if (startX == targetX) {
+            return;
+        }
+        ValueAnimator animator = ValueAnimator.ofInt(startX, targetX);
+        animator.setDuration(duration);
+        animator.setInterpolator(new PathInterpolator(0.2f, 0f, 0f, 1f));
+        animator.addUpdateListener(animation -> {
+            if (!mPanelAttached || mPanelParams == null) {
+                return;
+            }
+            mPanelParams.x = (Integer) animation.getAnimatedValue();
+            try {
+                mWindowManager.updateViewLayout(mPanelView, mPanelParams);
+            } catch (Throwable t) {
+                Log.w(TAG, "panel slide update failed", t);
+            }
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                if (mPanelSlideAnim == animation) {
+                    mPanelSlideAnim = null;
+                }
+            }
+        });
+        mPanelSlideAnim = animator;
+        animator.start();
     }
 
     /**
@@ -477,6 +590,10 @@ public class TransferDockController {
 
     private void removePanelWindows() {
         notifyTransferDockDragState(false);
+        if (mPanelSlideAnim != null) {
+            mPanelSlideAnim.cancel();
+            mPanelSlideAnim = null;
+        }
         if (mPanelAttached && mPanelView != null) {
             try {
                 mWindowManager.removeView(mPanelView);
@@ -490,6 +607,11 @@ public class TransferDockController {
             } catch (Throwable ignored) {
             }
             mScrimAttached = false;
+        }
+        if (mScrimView != null && mScrimParams != null) {
+            mScrimParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            mScrimView.setVisibility(View.VISIBLE);
+            mScrimView.setAlpha(1f);
         }
         if (TransferDockManager.getInstance(mContext).getItemCount() > 0) {
             showFloatBar();

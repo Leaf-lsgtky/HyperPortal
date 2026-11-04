@@ -5,7 +5,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.text.TextUtils
 import android.util.Log
+import android.webkit.MimeTypeMap
 import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
@@ -194,27 +196,63 @@ class TransferDockManager private constructor(private val context: Context) {
     }
 
     fun exportItemUri(item: TransferDockItem): Uri? {
-        if (item.type != TransferDockItem.TYPE_IMAGE || item.filePath == null) {
+        if (item.type == TransferDockItem.TYPE_TEXT) {
             return null
         }
+        var mime = item.mimeType.ifBlank { "application/octet-stream" }
+        if (item.type == TransferDockItem.TYPE_IMAGE
+            && (mime.isBlank() || mime == "text/plain" || mime == "application/octet-stream")
+        ) {
+            mime = "image/png"
+        }
+        val extension = extensionForMime(mime)
+        val name = "transfer_${item.id}.$extension"
         return try {
-            val srcFile = File(item.filePath)
-            if (!srcFile.exists()) return null
-            val uri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/transfer_${item.id}.png")
-            // Stream the file into PortalFileProvider using ContentResolver so cross-UID isolation is solved
-            context.contentResolver.openOutputStream(uri, "w")?.use { out ->
-                srcFile.inputStream().use { inp ->
-                    inp.copyTo(out)
+            val uri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/$name")
+            val out = context.contentResolver.openOutputStream(uri, "w") ?: return null
+            out.use { stream ->
+                when {
+                    !TextUtils.isEmpty(item.filePath) -> {
+                        val srcFile = File(item.filePath!!)
+                        if (!srcFile.isFile) return null
+                        srcFile.inputStream().use { it.copyTo(stream) }
+                    }
+                    !TextUtils.isEmpty(item.uriString) -> {
+                        val src = Uri.parse(item.uriString!!)
+                        if ("file" == src.scheme) {
+                            val srcFile = File(src.path ?: return null)
+                            if (!srcFile.isFile) return null
+                            srcFile.inputStream().use { it.copyTo(stream) }
+                        } else {
+                            val input = context.contentResolver.openInputStream(src) ?: return null
+                            input.use { it.copyTo(stream) }
+                        }
+                    }
+                    else -> return null
                 }
             }
             try {
                 val authorityUri = Uri.parse("content://com.github.leaf.hyperportal.files")
                 context.contentResolver.call(authorityUri, "grantDragPermissions", uri.toString(), null)
-            } catch (ignored: Throwable) {}
+            } catch (ignored: Throwable) {
+            }
             uri
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to export item URI", e)
             null
+        }
+    }
+
+    private fun extensionForMime(mime: String): String {
+        return when {
+            mime == "image/png" -> "png"
+            mime == "image/jpeg" -> "jpg"
+            mime == "image/webp" -> "webp"
+            mime == "image/gif" -> "gif"
+            else -> MimeTypeMap.getSingleton()
+                .getExtensionFromMimeType(mime)
+                ?.takeIf { it.isNotBlank() }
+                ?: "bin"
         }
     }
 

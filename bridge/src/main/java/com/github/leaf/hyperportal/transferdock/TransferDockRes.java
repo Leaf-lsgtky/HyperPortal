@@ -10,7 +10,6 @@ import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.InsetDrawable;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -42,28 +41,12 @@ public final class TransferDockRes {
     }
 
     public static Drawable getCapsuleBg(Context ctx, float density, boolean night) {
-        if (night) {
-            try {
-                Context hyper = getHyperContext(ctx);
-                int id = hyper.getResources().getIdentifier("recept_panel_right_bg", "drawable", "com.github.leaf.hyperportal");
-                if (id != 0) {
-                    Drawable d = ContextCompat.getDrawable(hyper, id);
-                    if (d != null) return d;
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        int r = (int) (22 * density + 0.5f);
-        int stroke = (int) (0.8f * density + 0.5f);
+        int r = (int) (20 * density + 0.5f);
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(night ? Color.parseColor("#E6202022") : Color.parseColor("#F2F7F7F7"));
-        shape.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
-        shape.setStroke(Math.max(1, stroke),
-                night ? Color.parseColor("#33FFFFFF") : Color.parseColor("#1F000000"));
-        int insetL = (int) (14 * density + 0.5f);
-        int insetT = (int) (22 * density + 0.5f);
-        int insetB = (int) (22 * density + 0.5f);
-        return new InsetDrawable(shape, insetL, insetT, 0, insetB);
+        // Rounded rectangle instead of the old D-shaped right-flat capsule.
+        shape.setCornerRadius(r);
+        return shape;
     }
 
     public static Drawable getFileDockIcon(Context ctx) {

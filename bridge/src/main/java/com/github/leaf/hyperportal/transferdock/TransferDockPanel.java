@@ -46,6 +46,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -93,7 +94,6 @@ public class TransferDockPanel extends FrameLayout {
     private RelativeLayout mHeaderBar;
     private TextView mTitleView;
     private ImageView mBackBtn;
-    private ImageView mMoreBtn;
     private FrameLayout mContentContainer;
     private LinearLayout mEmptyView;
     private ImageView mEmptyIcon;
@@ -108,6 +108,10 @@ public class TransferDockPanel extends FrameLayout {
     private OnPanelDismissListener mDismissListener;
     private OnThemeChangedListener mThemeListener;
     private TransferDockController mController;
+    private TransferDockDialogHost mDialogHost;
+    private boolean mDragActive;
+    private boolean mDragPanelAside;
+    private long mDragStartedAt;
     private TransferDockTheme mTheme;
     private boolean mBlurAvailable;
     private boolean mIsDismissing = false;
@@ -199,17 +203,6 @@ public class TransferDockPanel extends FrameLayout {
         titleLp.addRule(RelativeLayout.CENTER_IN_PARENT);
         mHeaderBar.addView(mTitleView, titleLp);
 
-        mMoreBtn = new ImageView(getContext());
-        mMoreBtn.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        mMoreBtn.setPadding(dp(8), dp(8), dp(8), dp(8));
-        mMoreBtn.setContentDescription("更多");
-        mMoreBtn.setOnClickListener(v -> showOverflowMenu());
-        RelativeLayout.LayoutParams moreLp = new RelativeLayout.LayoutParams(dp(40), dp(40));
-        moreLp.addRule(RelativeLayout.ALIGN_PARENT_END);
-        moreLp.addRule(RelativeLayout.CENTER_VERTICAL);
-        moreLp.rightMargin = dp(4);
-        mHeaderBar.addView(mMoreBtn, moreLp);
-
         // 3. Scrollable list.
         mContentContainer = new FrameLayout(getContext());
         LinearLayout.LayoutParams contentLp = new LinearLayout.LayoutParams(
@@ -289,9 +282,32 @@ public class TransferDockPanel extends FrameLayout {
         setOnDragListener((v, event) -> {
             int action = event.getAction();
             if (action == DragEvent.ACTION_DRAG_STARTED) {
+                mDragActive = true;
+                mDragPanelAside = true;
+                mDragStartedAt = android.os.SystemClock.uptimeMillis();
+                return true;
+            }
+            if (action == DragEvent.ACTION_DRAG_ENTERED
+                    || action == DragEvent.ACTION_DRAG_LOCATION) {
+                // Ignore the initial ENTERED at the drag origin.  Once the
+                // panel has slid aside, moving into its left 24dp expands it
+                // without interrupting the drag, so the user can drag back
+                // out on the same gesture.
+                maybeExpandDragPanel(event.getX());
+                return true;
+            }
+            if (action == DragEvent.ACTION_DRAG_EXITED) {
+                if (mDragActive && !mDragPanelAside) {
+                    mDragPanelAside = true;
+                    if (mController != null) {
+                        mController.onPanelDragExited();
+                    }
+                }
                 return true;
             }
             if (action == DragEvent.ACTION_DRAG_ENDED) {
+                mDragActive = false;
+                mDragPanelAside = false;
                 boolean success = event.getResult();
                 Log.i(TAG, "ACTION_DRAG_ENDED received in TransferDockPanel, success=" + success);
                 if (mController != null) {
@@ -352,10 +368,7 @@ public class TransferDockPanel extends FrameLayout {
         mTitleView.setTextColor(mTheme.primaryText);
         mBackBtn.setImageDrawable(TransferDockRes.getBackIcon(
                 getContext(), mDensity, mTheme.primaryText));
-        mMoreBtn.setImageDrawable(TransferDockRes.getMoreIcon(
-                getContext(), mDensity, mTheme.primaryText));
         mBackBtn.setBackground(buildIconBackground());
-        mMoreBtn.setBackground(buildIconBackground());
 
         mEmptyIcon.setColorFilter(mTheme.emptyIcon);
         mEmptyTitle.setTextColor(mTheme.secondaryText);
@@ -494,8 +507,6 @@ public class TransferDockPanel extends FrameLayout {
         mEmptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
         mScrollView.setVisibility(empty ? View.GONE : View.VISIBLE);
         mFooter.setVisibility(empty ? View.GONE : View.VISIBLE);
-        mMoreBtn.setEnabled(!empty);
-        mMoreBtn.setAlpha(empty ? 0.42f : 1.0f);
 
         if (empty) {
             return;
@@ -582,26 +593,74 @@ public class TransferDockPanel extends FrameLayout {
         return card;
     }
 
+    private void maybeExpandDragPanel(float panelX) {
+        if (!mDragActive || !mDragPanelAside) {
+            return;
+        }
+        if (android.os.SystemClock.uptimeMillis() - mDragStartedAt < 260) {
+            return;
+        }
+        // At the aside position only the left 36dp is visible.  Expand only
+        // when the finger is safely inside the 24dp inner band, otherwise the
+        // expanded window would end right under the finger and immediately
+        // collapse again.
+        if (panelX > dp(24)) {
+            return;
+        }
+        mDragPanelAside = false;
+        if (mController != null) {
+            mController.onPanelDragEntered();
+        }
+    }
+
+    @Nullable
+    private ClipData buildDragClip(TransferDockItem item) {
+        if (item.getType() != TransferDockItem.TYPE_TEXT) {
+            Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
+            if (uri == null) {
+                Log.w(TAG, "cannot export non-text item for drag: " + item.getTitle());
+                return null;
+            }
+            String mime = item.getMimeType();
+            if (TextUtils.isEmpty(mime)) {
+                mime = "application/octet-stream";
+            }
+            List<String> mimeTypes = new ArrayList<>();
+            mimeTypes.add(mime);
+            if (mime.startsWith("image/")) {
+                if (!"image/*".equals(mime)) {
+                    mimeTypes.add("image/*");
+                }
+            } else if (!"*/*".equals(mime)) {
+                mimeTypes.add("*/*");
+            }
+            mimeTypes.add(ClipDescription.MIMETYPE_TEXT_URILIST);
+            mimeTypes.add("application/x-dragshare");
+
+            ClipDescription desc = new ClipDescription(
+                    TextUtils.isEmpty(item.getTitle()) ? "内容" : item.getTitle(),
+                    mimeTypes.toArray(new String[0]));
+            // The URI is the entire payload.  Never put the card title in
+            // the text slot: text/plain targets would otherwise accept the
+            // image drag and insert a title string instead of the bitmap.
+            ClipData.Item clipItem = new ClipData.Item(null, null, null, uri);
+            Log.i(TAG, "startDragOut: uri=" + uri + " mime=" + mime
+                    + " types=" + mimeTypes);
+            return new ClipData(desc, clipItem);
+        }
+
+        String text = item.getText();
+        if (TextUtils.isEmpty(text)) text = item.getTitle();
+        return ClipData.newPlainText("TransferDock", text);
+    }
+
     private void startDragOut(View cardView, TransferDockItem item) {
         cardView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
 
-        ClipData clipData;
-        if (item.getType() == TransferDockItem.TYPE_IMAGE) {
-            Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
-            if (uri != null) {
-                String[] mimeTypes = new String[]{"image/png", "image/*", "text/plain"};
-                ClipDescription desc = new ClipDescription("TransferDock", mimeTypes);
-                ClipData.Item clipItem = new ClipData.Item(item.getTitle(), null, uri);
-                clipData = new ClipData(desc, clipItem);
-            } else if (!TextUtils.isEmpty(item.getText())) {
-                clipData = ClipData.newPlainText("TransferDock", item.getText());
-            } else {
-                clipData = ClipData.newPlainText("TransferDock", item.getTitle());
-            }
-        } else {
-            String text = item.getText();
-            if (TextUtils.isEmpty(text)) text = item.getTitle();
-            clipData = ClipData.newPlainText("TransferDock", text);
+        ClipData clipData = buildDragClip(item);
+        if (clipData == null) {
+            Toast.makeText(getContext(), "图片准备失败，请重试", Toast.LENGTH_SHORT).show();
+            return;
         }
 
         View.DragShadowBuilder shadow = new View.DragShadowBuilder(cardView) {
@@ -622,7 +681,10 @@ public class TransferDockPanel extends FrameLayout {
         };
 
         mDrawerLayout.animate().cancel();
-        mDrawerLayout.setAlpha(0.12f);
+        mDrawerLayout.setAlpha(1.0f);
+        mDragActive = true;
+        mDragPanelAside = true;
+        mDragStartedAt = android.os.SystemClock.uptimeMillis();
 
         if (mController != null) {
             mController.onPanelDragStarted();
@@ -631,6 +693,8 @@ public class TransferDockPanel extends FrameLayout {
         int flags = View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ;
         boolean started = cardView.startDragAndDrop(clipData, shadow, item, flags);
         if (!started) {
+            mDragActive = false;
+            mDragPanelAside = false;
             if (mController != null) {
                 mController.onPanelDragEnded(false);
             } else {
@@ -648,13 +712,76 @@ public class TransferDockPanel extends FrameLayout {
                 Toast.makeText(getContext(), "图片已复制到剪贴板", Toast.LENGTH_SHORT).show();
                 return;
             }
+            Toast.makeText(getContext(), "图片准备失败，请重试", Toast.LENGTH_SHORT).show();
+            return;
         }
         String t = item.getText() != null ? item.getText() : item.getTitle();
         cm.setPrimaryClip(ClipData.newPlainText("TransferDock", t));
         Toast.makeText(getContext(), "文本已复制到剪贴板", Toast.LENGTH_SHORT).show();
     }
 
+    private TransferDockDialogHost getDialogHost() {
+        if (mDialogHost == null) {
+            mDialogHost = new TransferDockDialogHost(getContext());
+        }
+        return mDialogHost;
+    }
+
     private void showItemOptions(TransferDockItem item) {
+        try {
+            getDialogHost().showItemOptions(
+                    item,
+                    () -> copyItem(item),
+                    () -> shareItem(item),
+                    () -> deleteItem(item));
+        } catch (Throwable t) {
+            Log.w(TAG, "Miuix item dialog failed, using platform fallback", t);
+            showItemOptionsLegacy(item);
+        }
+    }
+
+    private void shareItem(TransferDockItem item) {
+        Intent shareIntent = new Intent(Intent.ACTION_SEND);
+        Uri uri = item.getType() != TransferDockItem.TYPE_TEXT
+                ? TransferDockManager.getInstance(getContext()).exportItemUri(item)
+                : null;
+        if (item.getType() != TransferDockItem.TYPE_TEXT && uri == null) {
+            Toast.makeText(getContext(), "图片准备失败，请重试", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (uri != null) {
+            String mime = item.getMimeType();
+            if (TextUtils.isEmpty(mime)) {
+                mime = item.getType() == TransferDockItem.TYPE_IMAGE ? "image/*" : "*/*";
+            }
+            shareIntent.setType(mime);
+            shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
+            shareIntent.setClipData(ClipData.newUri(
+                    getContext().getContentResolver(), "内容", uri));
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } else {
+            shareIntent.setType("text/plain");
+            shareIntent.putExtra(Intent.EXTRA_TEXT,
+                    item.getText() != null ? item.getText() : item.getTitle());
+        }
+        shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        Intent chooser = Intent.createChooser(shareIntent, "分享到");
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getContext().startActivity(chooser);
+        dismissWithAnim();
+    }
+
+    private void deleteItem(TransferDockItem item) {
+        TransferDockManager.getInstance(getContext()).removeItem(item.getId());
+        reloadItems();
+        Toast.makeText(getContext(), "已删除", Toast.LENGTH_SHORT).show();
+        if (TransferDockManager.getInstance(getContext()).getItemCount() == 0
+                && mController != null) {
+            mController.hideFloatBar();
+        }
+    }
+
+    private void showItemOptionsLegacy(TransferDockItem item) {
         try {
             String[] options = new String[]{"复制", "分享", "删除"};
             android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(
@@ -664,28 +791,9 @@ public class TransferDockPanel extends FrameLayout {
                 if (which == 0) {
                     copyItem(item);
                 } else if (which == 1) {
-                    Intent shareIntent = new Intent(Intent.ACTION_SEND);
-                    if (item.getType() == TransferDockItem.TYPE_IMAGE) {
-                        Uri uri = TransferDockManager.getInstance(getContext()).exportItemUri(item);
-                        if (uri != null) {
-                            shareIntent.setType("image/*");
-                            shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
-                            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        }
-                    } else {
-                        shareIntent.setType("text/plain");
-                        shareIntent.putExtra(Intent.EXTRA_TEXT,
-                                item.getText() != null ? item.getText() : item.getTitle());
-                    }
-                    shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    Intent chooser = Intent.createChooser(shareIntent, "分享到");
-                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    getContext().startActivity(chooser);
-                    dismissWithAnim();
+                    shareItem(item);
                 } else if (which == 2) {
-                    TransferDockManager.getInstance(getContext()).removeItem(item.getId());
-                    reloadItems();
-                    Toast.makeText(getContext(), "已删除", Toast.LENGTH_SHORT).show();
+                    deleteItem(item);
                 }
             });
             builder.setNegativeButton("取消", null);
@@ -695,29 +803,8 @@ public class TransferDockPanel extends FrameLayout {
             }
             dialog.show();
         } catch (Throwable t) {
-            Log.w(TAG, "showItemOptions dialog failed, fallback to copy", t);
+            Log.w(TAG, "showItemOptionsLegacy dialog failed, fallback to copy", t);
             copyItem(item);
-        }
-    }
-
-    private void showOverflowMenu() {
-        if (TransferDockManager.getInstance(getContext()).getItemCount() == 0) {
-            return;
-        }
-        try {
-            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(
-                    getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert);
-            builder.setTitle("中转站");
-            builder.setItems(new String[]{"清空中转站"}, (dialog, which) -> clearTransferDock());
-            builder.setNegativeButton("取消", null);
-            android.app.AlertDialog dialog = builder.create();
-            if (dialog.getWindow() != null) {
-                dialog.getWindow().setType(resolveDialogWindowType());
-            }
-            dialog.show();
-        } catch (Throwable t) {
-            Log.w(TAG, "showOverflowMenu failed", t);
-            clearTransferDock();
         }
     }
 
@@ -803,6 +890,10 @@ public class TransferDockPanel extends FrameLayout {
 
     @Override
     protected void onDetachedFromWindow() {
+        mDragActive = false;
+        if (mDialogHost != null) {
+            mDialogHost.dismiss();
+        }
         if (mAnim != null) {
             mAnim.removeAllListeners();
             mAnim.cancel();

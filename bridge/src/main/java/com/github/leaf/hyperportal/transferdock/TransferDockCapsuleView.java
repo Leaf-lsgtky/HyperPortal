@@ -11,6 +11,8 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
@@ -28,6 +30,8 @@ import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+
+import java.lang.reflect.Method;
 
 /**
  * 100% ColorOS TransferDock Capsule View (Right edge floating window).
@@ -54,7 +58,11 @@ public class TransferDockCapsuleView extends FrameLayout {
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private final float mDensity;
 
-    private ImageView mBgView;
+    private View mBgView;
+    private Drawable mLocalBlurDrawable;
+    private Method mBlurSetRadius;
+    private Method mBlurSetCorner;
+    private Method mBlurSetColor;
     private RelativeLayout mContentView;
     private TextView mTitleView;
     private ImageView mIconView;
@@ -66,6 +74,7 @@ public class TransferDockCapsuleView extends FrameLayout {
 
     private ValueAnimator mSlideAnimator;
     private ValueAnimator mPreviewAnimator;
+    private boolean mHasBeenShown;
 
     private OnCapsuleClickListener mClickListener;
     private OnCapsuleDismissListener mDismissListener;
@@ -102,11 +111,83 @@ public class TransferDockCapsuleView extends FrameLayout {
         return (int) (value * mDensity + 0.5f);
     }
 
+    private void applyCapsuleBackground() {
+        if (mBgView == null) {
+            return;
+        }
+        // Match the panel: a translucent tint over a local
+        // BackgroundBlurDrawable.  When blur is unavailable, keep the surface
+        // readable with the more opaque fallback.
+        int alpha = mLocalBlurDrawable != null ? 0xB4 : 0xF2;
+        GradientDrawable tint = new GradientDrawable();
+        tint.setColor(mNight
+                ? Color.argb(alpha, 28, 28, 30)
+                : Color.argb(alpha, 242, 242, 242));
+        tint.setCornerRadius(dp(20));
+        if (mLocalBlurDrawable != null) {
+            mBgView.setBackground(new LayerDrawable(
+                    new Drawable[]{mLocalBlurDrawable, tint}));
+        } else {
+            mBgView.setBackground(tint);
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        mBgView.post(this::installLocalBlur);
+    }
+
+    private void installLocalBlur() {
+        if (mLocalBlurDrawable != null || !isAttachedToWindow()) {
+            return;
+        }
+        try {
+            Method getViewRootImpl = View.class.getDeclaredMethod("getViewRootImpl");
+            getViewRootImpl.setAccessible(true);
+            Object viewRoot = getViewRootImpl.invoke(mBgView);
+            if (viewRoot == null) {
+                throw new IllegalStateException("ViewRootImpl is null");
+            }
+            Method create = viewRoot.getClass().getMethod("createBackgroundBlurDrawable");
+            Object drawable = create.invoke(viewRoot);
+            if (!(drawable instanceof Drawable)) {
+                throw new IllegalStateException("no BackgroundBlurDrawable");
+            }
+            mLocalBlurDrawable = (Drawable) drawable;
+            mBlurSetRadius = drawable.getClass().getMethod("setBlurRadius", int.class);
+            mBlurSetCorner = drawable.getClass().getMethod("setCornerRadius", float.class);
+            mBlurSetColor = drawable.getClass().getMethod("setColor", int.class);
+            mBlurSetRadius.invoke(mLocalBlurDrawable, dp(28));
+            mBlurSetCorner.invoke(mLocalBlurDrawable, (float) dp(20));
+            mBlurSetColor.invoke(mLocalBlurDrawable, Color.TRANSPARENT);
+            mLocalBlurDrawable.invalidateSelf();
+            applyCapsuleBackground();
+            android.util.Log.i("TransferDockCapsule", "local BackgroundBlurDrawable installed");
+        } catch (Throwable t) {
+            mLocalBlurDrawable = null;
+            mBlurSetRadius = null;
+            mBlurSetCorner = null;
+            mBlurSetColor = null;
+            applyCapsuleBackground();
+            android.util.Log.w("TransferDockCapsule", "local blur unavailable", t);
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        mLocalBlurDrawable = null;
+        mBlurSetRadius = null;
+        mBlurSetCorner = null;
+        mBlurSetColor = null;
+        super.onDetachedFromWindow();
+    }
+
     public void refreshTheme() {
         boolean night = TransferDockTheme.isNight(getContext());
         if (night != mNight) {
             mNight = night;
-            mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity, mNight));
+            applyCapsuleBackground();
             mTitleView.setTextColor(mNight ? Color.WHITE : Color.argb(230, 0, 0, 0));
         }
     }
@@ -118,20 +199,24 @@ public class TransferDockCapsuleView extends FrameLayout {
     }
 
     private void initView() {
-        setLayoutParams(new LayoutParams(dp(166), dp(172)));
+        // Same width as the transfer dock panel; compact card height so the
+        // +1 capsule does not look like a floating page.
+        setLayoutParams(new LayoutParams(dp(146), dp(112)));
 
-        // 1. Background image (ColorOS recept_panel_right_bg with programmatic fallback)
-        mBgView = new ImageView(getContext());
-        mBgView.setScaleType(ImageView.ScaleType.FIT_XY);
-        mBgView.setImageDrawable(TransferDockRes.getCapsuleBg(getContext(), mDensity, mNight));
-        LayoutParams bgLp = new LayoutParams(dp(166), dp(172));
+        // Background layer first, exactly like the panel's mDrawerLayout.
+        mBgView = new View(getContext());
+        mBgView.setClipToOutline(true);
+        LayoutParams bgLp = new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
         addView(mBgView, bgLp);
+        applyCapsuleBackground();
 
-        // 2. Content container
+        // Content container
         mContentView = new RelativeLayout(getContext());
-        LayoutParams contentLp = new LayoutParams(dp(146), dp(112));
-        contentLp.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
-        contentLp.leftMargin = dp(20);
+        mContentView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LayoutParams contentLp = new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+        contentLp.gravity = Gravity.CENTER;
         addView(mContentView, contentLp);
 
         // 3. Initial title & icon (ColorOS layout_transfer_dock_panel_right)
@@ -220,13 +305,20 @@ public class TransferDockCapsuleView extends FrameLayout {
             cardText.setMaxLines(3);
             cardText.setEllipsize(TextUtils.TruncateAt.END);
             cardText.setPadding(dp(8), dp(8), dp(8), dp(8));
-            cardText.setBackgroundColor(mNight ? Color.parseColor("#383838") : Color.WHITE);
+            GradientDrawable cardBg = new GradientDrawable();
+            cardBg.setColor(mNight ? Color.parseColor("#383838") : Color.WHITE);
+            cardBg.setCornerRadius(dp(11));
+            cardText.setBackground(cardBg);
             mStackView.setTopCustomView(cardText, totalCount);
         }
 
         mBadgeView.setText("+1");
 
-        boolean alreadyShowing = (getVisibility() == View.VISIBLE && getTranslationX() < dp(20));
+        // A newly attached View is already VISIBLE at translation 0, so the
+        // old visibility check skipped the entrance slide on the first item.
+        boolean alreadyShowing = mHasBeenShown
+                && getVisibility() == View.VISIBLE
+                && getTranslationX() < dp(20);
 
         if (alreadyShowing) {
             // If already on screen, immediately play preview pop animation
@@ -234,7 +326,8 @@ public class TransferDockCapsuleView extends FrameLayout {
             mHandler.postDelayed(mAutoDismissRunnable, 4000);
         } else {
             // Slide in from right (350ms, ease)
-            setTranslationX(dp(166));
+            mHasBeenShown = true;
+            setTranslationX(dp(146));
             setVisibility(View.VISIBLE);
             mTitleView.setAlpha(1f);
             mIconView.setAlpha(1f);
@@ -244,7 +337,7 @@ public class TransferDockCapsuleView extends FrameLayout {
                 mSlideAnimator.removeAllListeners();
                 mSlideAnimator.cancel();
             }
-            mSlideAnimator = ValueAnimator.ofFloat(dp(166), 0f);
+            mSlideAnimator = ValueAnimator.ofFloat(dp(146), 0f);
             mSlideAnimator.setDuration(350);
             mSlideAnimator.setInterpolator(sEaseInterpolator);
             mSlideAnimator.addUpdateListener(animation -> {
@@ -294,7 +387,7 @@ public class TransferDockCapsuleView extends FrameLayout {
             mSlideAnimator.removeAllListeners();
             mSlideAnimator.cancel();
         }
-        mSlideAnimator = ValueAnimator.ofFloat(getTranslationX(), dp(166));
+        mSlideAnimator = ValueAnimator.ofFloat(getTranslationX(), dp(146));
         mSlideAnimator.setDuration(350);
         mSlideAnimator.setInterpolator(sEaseInterpolator);
         mSlideAnimator.addUpdateListener(animation -> {
