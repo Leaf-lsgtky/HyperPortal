@@ -45,6 +45,9 @@ public final class HyperPortalEntry extends XposedModule {
         if ("com.android.systemui".equals(param.getPackageName())) {
             log(Log.INFO, TAG, "onPackageLoaded: injecting Aurora Glow & Bottom Shelf into SystemUI");
             PortalSystemUiModule.initSystemUi(this, param);
+        } else if ("com.xiaomi.aicr".equals(param.getPackageName())) {
+            log(Log.INFO, TAG, "onPackageLoaded: allowing HyperPortal OCR in AICR");
+            AicrAccessHook.init(this, param);
         }
     }
 

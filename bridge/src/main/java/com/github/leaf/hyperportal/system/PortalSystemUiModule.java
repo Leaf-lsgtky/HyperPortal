@@ -57,6 +57,7 @@ import android.widget.Toast;
 
 import com.github.leaf.hyperportal.PortalShareContract;
 import com.github.leaf.hyperportal.bigbang.BigBangContract;
+import com.github.leaf.hyperportal.ocr.AicrOcrClient;
 import com.github.leaf.hyperportal.target.ShareTargetEntry;
 import com.github.leaf.hyperportal.target.TargetConfig;
 import com.github.leaf.hyperportal.target.TargetRanker;
@@ -526,26 +527,20 @@ public final class PortalSystemUiModule {
                 return;
             }
             source = scaleForOcr(source);
-            Uri staged = stageBitmapInPortal(ctx, source, "ocr_");
-            if (staged == null) {
-                toast("图片准备失败");
-                return;
-            }
-            try {
-                Intent ocr = new Intent(PortalShareContract.ACTION_OCR_SEGMENT);
-                ocr.setClassName(
-                        PortalShareContract.PORTAL_PACKAGE,
-                        PortalShareContract.PORTAL_SERVICE);
-                ocr.putExtra(PortalShareContract.EXTRA_OCR_IMAGE_URI, staged.toString());
-                ocr.putExtra(PortalShareContract.EXTRA_OCR_TOUCH_X, Math.round(mLastDropX));
-                ocr.putExtra(PortalShareContract.EXTRA_OCR_TOUCH_Y, Math.round(mLastDropY));
-                ocr.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                ctx.startForegroundService(ocr);
-                toast("正在识别图片文字…");
-            } catch (Throwable t) {
-                Log.w(TAG, "start image OCR failed", t);
-                toast("无法启动图片识字");
-            }
+            toast("正在识别图片文字…");
+            AicrOcrClient.recognize(ctx, source, (text, error) -> {
+                if (error != null) {
+                    Log.w(TAG, "image OCR failed", error);
+                    String message = error.getMessage();
+                    toast(TextUtils.isEmpty(message) ? "图片文字识别失败" : message);
+                    return;
+                }
+                if (TextUtils.isEmpty(text)) {
+                    toast("图片中没有识别到文字");
+                    return;
+                }
+                openTextSegmentation(ctx, text);
+            });
         }
 
         private Bitmap scaleForOcr(Bitmap source) {
