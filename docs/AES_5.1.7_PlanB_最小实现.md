@@ -97,7 +97,8 @@ ActivityImpl.onCreate()
 `PortalSystemModule` 现在在 system_server 中 Hook
 `com.miui.server.SecurityManagerService.getContentExtensionEnabled()`，对普通应用 UID
 返回 `true`（系统 UID 仍走原逻辑），因此传送门开关关闭时 AES 触摸门仍然打开，
-不需要改写用户设置。
+不需要改写用户设置。该 Hook 位于 system_server，安装新 bridge APK 后必须重启一次
+才会加载；普通应用进程则只需重新打开。
 
 ---
 
