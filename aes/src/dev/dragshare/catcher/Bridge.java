@@ -2530,12 +2530,23 @@ public final class Bridge {
         return true;
     }
 
+    private static boolean isInternalDragLabel(CharSequence text) {
+        if (TextUtils.isEmpty(text)) {
+            return false;
+        }
+        String lower = text.toString().trim().toLowerCase(Locale.ROOT);
+        return lower.equals("drag_file") || lower.equals("drag-file") || lower.equals("drag file");
+    }
+
     private static boolean isMeaningfulUserText(CharSequence text) {
         if (TextUtils.isEmpty(text)) {
             return false;
         }
         String s = text.toString().trim();
         if (s.isEmpty()) {
+            return false;
+        }
+        if (isInternalDragLabel(s)) {
             return false;
         }
         if (!isDragableUserText(s)) {
@@ -2554,7 +2565,7 @@ public final class Bridge {
                 || lower.equals("点赞") || lower.equals("评论") || lower.equals("收藏")
                 || lower.equals("查看图片") || lower.equals("查看原图") || lower.equals("原图") || lower.equals("表情包")
                 || lower.equals("查看大图") || lower.equals("动图") || lower.equals("gif图") || lower.equals("语音")
-                || lower.equals("语音消息") || lower.equals("已发送") || lower.equals("发送中")
+                || lower.equals("语音消息") || lower.equals("语音输入") || lower.equals("已发送") || lower.equals("发送中")
                 || lower.equals("浮窗") || lower.equals("按住说话") || lower.equals("按住 说话")
                 || lower.equals("切换到键盘") || lower.equals("切换到语音") || lower.equals("聊天信息")) {
             return false;
@@ -5877,6 +5888,9 @@ public final class Bridge {
     private static boolean startSystemDrag(Context context, String text, Bitmap bitmap,
                                            Uri imageUri, String imageMime) {
         try {
+            if (isInternalDragLabel(text)) {
+                text = null;
+            }
             View view = sLastTouchView;
             if (view == null || !view.isAttachedToWindow()) {
                 Log.i(TAG, "system drag skipped: no attached view");
@@ -5946,9 +5960,13 @@ public final class Bridge {
                 }
                 mimeList.add(ClipDescription.MIMETYPE_TEXT_URILIST);
                 mimeList.add("application/x-dragshare");
-                String clipLabel = !TextUtils.isEmpty(text) ? text : "drag_file";
+                String clipLabel = !TextUtils.isEmpty(text) ? text : "图片";
                 ClipDescription description = new ClipDescription(clipLabel, mimeList.toArray(new String[0]));
-                ClipData.Item item = new ClipData.Item(clipLabel, null, null, imageUri);
+                // Never expose the internal fallback label as clipboard text.
+                // The URI is the payload; a null text item prevents "drag_file"
+                // from being pasted into target apps.
+                ClipData.Item item = new ClipData.Item(
+                        TextUtils.isEmpty(text) ? null : text, null, null, imageUri);
                 clip = new ClipData(description, item);
                 Log.i(TAG, "startSystemDrag: dragging URI " + imageUri + " mime=" + mime + " label=" + clipLabel);
             } else {
