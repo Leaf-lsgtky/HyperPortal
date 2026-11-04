@@ -107,6 +107,7 @@ public final class PortalSystemModule {
     private static volatile Context sSystemContext;
     private static volatile float sTriggerThreshold = 0.76f;
     private static volatile boolean sReceiverRegistered = false;
+    private static volatile boolean sLoggedGateOverride = false;
     private static volatile Object sWms;
     private static volatile String sDragSourcePackage;
 
@@ -449,6 +450,10 @@ public final class PortalSystemModule {
         // original path so their UI state still reflects the real user switch.
         if (callingUid == android.os.Process.SYSTEM_UID || callingUid == 0) {
             return chain.proceed();
+        }
+        if (!sLoggedGateOverride) {
+            sLoggedGateOverride = true;
+            log(Log.INFO, TAG, "AES content extension gate forced on for app uid=" + callingUid);
         }
         return Boolean.TRUE;
     }
