@@ -77,7 +77,7 @@ jobs:
             dist/AES-patched.apk
           name: ${{ github.event.inputs.tag_name || github.ref_name }}
           draft: false
-          prerelease: true
+          prerelease: ${{ contains(github.event.inputs.tag_name || github.ref_name, '-') }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
