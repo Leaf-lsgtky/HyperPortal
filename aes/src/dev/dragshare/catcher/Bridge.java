@@ -267,6 +267,10 @@ public final class Bridge {
     private static volatile float sShadowMorphProgress;
     private static volatile ValueAnimator sShadowMorphAnimator;
     private static volatile boolean sShadowReceiverRegistered;
+    // MediaStore is only a transport fallback when the portal provider cannot be
+    // reached. Track the one fallback item for this gesture so an unhandled drop
+    // can delete it instead of leaving a "saved" image in the gallery.
+    private static volatile Uri sActiveMediaStoreUri;
     private static final BroadcastReceiver sShadowReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -305,7 +309,7 @@ public final class Bridge {
 
     static {
         try {
-            Log.i(TAG, "Bridge loaded v43 pid=" + android.os.Process.myPid()
+            Log.i(TAG, "Bridge loaded v44 pid=" + android.os.Process.myPid()
                     + " uid=" + android.os.Process.myUid()
                     + " (classes2.dex)");
         } catch (Throwable ignored) {
@@ -411,7 +415,7 @@ public final class Bridge {
                         sPendingPayload = null;
                         sPendingContent = null;
                         Log.i(TAG, "pending drag starts on move");
-                        forwardToPortal(pending, pendingContent);
+                        forwardToPortal(pending, pendingContent, true);
                     }
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     sMainHandler.removeCallbacks(sCustomLongPressRunnable);
@@ -516,12 +520,15 @@ public final class Bridge {
             dismissTextSelectionUi(touchTarget);
             if (sMovedSinceDown) {
                 sGestureState.set(STATE_DRAGGING);
-                forwardToPortal(content, null);
+                forwardToPortal(content, null, true);
             } else {
                 sPendingPayload = content;
                 sPendingContent = null;
                 sGestureState.set(STATE_IDLE);
-                forwardToPortal(content, null);
+                // Preview only: do not stage the image or start a system drag
+                // until the finger actually moves. Staging here used to create
+                // a second MediaStore copy for every stationary long-press.
+                forwardToPortal(content, null, false);
             }
         } catch (Throwable throwable) {
             Log.w(TAG, "onCustomLongPressTriggered failed", throwable);
@@ -5195,7 +5202,7 @@ public final class Bridge {
                 sPendingGeneration = sGestureGeneration;
                 dismissTextSelectionUi(sLastTouchView);
                 Log.i(TAG, "long press preview only; drag waits for real move");
-                forwardToPortal(payload, content);
+                forwardToPortal(payload, content, false);
             }
         } catch (Throwable throwable) {
             Log.w(TAG, "deliverContent failed", throwable);
@@ -5382,6 +5389,18 @@ public final class Bridge {
         }
     }
 
+    private static void deleteMediaStoreUri(Context context, Uri uri) {
+        if (context == null || uri == null) {
+            return;
+        }
+        try {
+            int rows = context.getContentResolver().delete(uri, null, null);
+            Log.i(TAG, "deleted MediaStore transport uri=" + uri + " rows=" + rows);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "delete MediaStore transport failed uri=" + uri, throwable);
+        }
+    }
+
     /**
      * The staged file is the source of truth. Source MIME values such as image/gif
      * must not be reused when the bitmap fallback actually produced a PNG.
@@ -5544,7 +5563,13 @@ public final class Bridge {
         }
     }
 
-    private static void forwardToPortal(Bundle payload, Object content) {
+    /**
+     * @param prepareDrag true only for the call that may start the real system drag.
+     *                    Preview-only calls must not stage images: otherwise a
+     *                    stationary long-press creates an orphan copy in
+     *                    Pictures/HyperPortal before the user ever drags.
+     */
+    private static void forwardToPortal(Bundle payload, Object content, boolean prepareDrag) {
         Context context = currentContext();
         if (context == null) {
             Log.w(TAG, "forward skipped: no context");
@@ -5629,26 +5654,45 @@ public final class Bridge {
         // the current extraction path exposes a static bitmap. Keep the original file
         // only when there is no bitmap to convert.
         boolean preferPngForGif = sourceIsGif && dragBitmap != null;
-        if (imageCacheName == null && filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
-            imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
-        }
-        if (imageCacheName == null && dragBitmap != null) {
-            // Stage full-resolution bitmap into PortalFileProvider as lossless PNG
-            imageCacheName = copyBitmapToPortal(context, dragBitmap);
-            imageMimeType = "image/png";
-        }
-        if (imageCacheName == null && filePfd instanceof ParcelFileDescriptor) {
-            // Staging a bitmap failed; preserve the original file rather than dropping it.
-            imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
-        }
-        Uri mediaUri = null;
-        if (imageCacheName == null && dragBitmap != null) {
-            // HyperOS AutoStart may reject a ContentProvider start from QQ. Fall
-            // back to a MediaStore item owned by QQ, which needs no provider start.
-            mediaUri = insertBitmapToMediaStore(context, dragBitmap);
+        if (prepareDrag) {
+            if (imageCacheName == null && imageContentUri == null
+                    && filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
+                imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+            }
+            if (imageCacheName == null && imageContentUri == null && dragBitmap != null) {
+                // Stage full-resolution bitmap into PortalFileProvider as lossless PNG
+                imageCacheName = copyBitmapToPortal(context, dragBitmap);
+                imageMimeType = "image/png";
+            }
+            if (imageCacheName == null && imageContentUri == null
+                    && filePfd instanceof ParcelFileDescriptor) {
+                // Staging a bitmap failed; preserve the original file rather than dropping it.
+                imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+            }
+            if (imageCacheName == null && imageContentUri == null && dragBitmap != null) {
+                // HyperOS AutoStart may reject a ContentProvider start from QQ. Fall
+                // back to a MediaStore item owned by QQ, which needs no provider start.
+                // This is transport only: it is deleted when the drop is not handled.
+                Uri mediaUri = insertBitmapToMediaStore(context, dragBitmap);
+                if (mediaUri != null) {
+                    imageContentUri = mediaUri;
+                    imageMimeType = "image/png";
+                    payload.putString("stagedImageUri", mediaUri.toString());
+                    payload.putString("stagedImageMime", imageMimeType);
+                    payload.putBoolean("stagedImageIsMediaStore", true);
+                    sActiveMediaStoreUri = mediaUri;
+                }
+            }
+            if (imageCacheName != null) {
+                imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
+                        + Uri.encode(imageCacheName));
+            }
         }
         if (imageCacheName != null) {
-            imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(imageCacheName));
+            if (imageContentUri == null) {
+                imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
+                        + Uri.encode(imageCacheName));
+            }
             payload.putString("stagedCacheName", imageCacheName);
             payload.putString("stagedImageUri", imageContentUri.toString());
             intent.putExtra("imageCacheName", imageCacheName);
@@ -5665,13 +5709,20 @@ public final class Bridge {
                     + " mime=" + imageMimeType
                     + " sourceMime=" + lowerSourceMime
                     + " bitmap=" + describeBitmap(payload));
-        } else if (mediaUri != null) {
-            imageContentUri = mediaUri;
-            imageMimeType = "image/png";
-            intent.putExtra("imageUri", mediaUri.toString());
-            intent.putExtra("imageFileName", "dragshare_" + SystemClock.uptimeMillis() + ".png");
+        } else if (imageContentUri != null) {
+            if (TextUtils.isEmpty(imageMimeType)) {
+                imageMimeType = "image/png";
+            }
+            String imageFileName = payload.getString("stagedImageName");
+            if (TextUtils.isEmpty(imageFileName)) {
+                imageFileName = "dragshare_" + SystemClock.uptimeMillis() + ".png";
+                payload.putString("stagedImageName", imageFileName);
+            }
+            intent.putExtra("imageUri", imageContentUri.toString());
+            intent.putExtra("imageFileName", imageFileName);
             intent.putExtra("imageMimeType", imageMimeType);
-            Log.i(TAG, "staged image fallback MediaStore uri=" + mediaUri);
+            Log.i(TAG, "staged image fallback MediaStore uri=" + imageContentUri
+                    + " reused=" + payload.getBoolean("stagedImageIsMediaStore", false));
         }
         if (dragBitmap != null) {
             // Preview thumbnail for UI and drag shadow (small so Intent parcel doesn't exceed 1MB)
@@ -5689,8 +5740,14 @@ public final class Bridge {
                 + " file=" + (filePfd == null ? "null" : payload.getString("fileName"))
                 + " cache=" + imageCacheName
                 + " uri=" + imageContentUri
+                + " prepareDrag=" + prepareDrag
                 + " source=" + source);
-        boolean dragStarted = startSystemDrag(context, text, dragBitmap, imageContentUri, imageMimeType);
+        boolean dragStarted = prepareDrag
+                && startSystemDrag(context, text, dragBitmap, imageContentUri, imageMimeType);
+        if (!dragStarted && prepareDrag && sActiveMediaStoreUri != null) {
+            deleteMediaStoreUri(context, sActiveMediaStoreUri);
+            sActiveMediaStoreUri = null;
+        }
         intent.putExtra("dragActive", dragStarted);
         try {
             // The target app is foreground during long-press, so a plain
@@ -5930,6 +5987,7 @@ public final class Bridge {
                     if (mediaUri != null) {
                         imageUri = mediaUri;
                         imageMime = "image/png";
+                        sActiveMediaStoreUri = mediaUri;
                     }
                 }
             }
@@ -6081,6 +6139,24 @@ public final class Bridge {
                             cancelShadowMorphAnimator();
                             sShadowMorphProgress = 0f;
                             sActiveShadowSquare = false;
+                            // A MediaStore item is only a transport fallback for the
+                            // drag URI. If no target consumed the drop, remove it so
+                            // merely dragging an image does not save it to the gallery.
+                            Uri mediaTransport = sActiveMediaStoreUri;
+                            sActiveMediaStoreUri = null;
+                            if (mediaTransport != null) {
+                                boolean handled = false;
+                                try {
+                                    handled = event.getResult();
+                                } catch (Throwable ignored) {
+                                }
+                                if (handled) {
+                                    Log.i(TAG, "keep MediaStore transport for handled drop uri="
+                                            + mediaTransport);
+                                } else {
+                                    deleteMediaStoreUri(v.getContext(), mediaTransport);
+                                }
+                            }
                             notifyPortalDragState(v.getContext(), 0, 0f, 0f);
                             sActiveDragView = null;
                             sActiveDragText = null;
