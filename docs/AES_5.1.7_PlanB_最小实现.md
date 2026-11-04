@@ -72,6 +72,33 @@ mContentExtensionEnabled == false -> return
 Plan B 的 PoC 不依赖 AES 服务，但仍需要 `mContentExtensionEnabled=1`，否则
 `InterceptorProxy.dispatchTouchEvent()` 不会调用 `Interceptor`。
 
+#### 2.1.1 为什么“自制长按”仍然受传送门开关影响
+
+`Bridge.ping()` 并不是独立注册的 `ViewRootImpl` 触摸监听器；它的插桩点是
+`com.miui.contentcatcher.Interceptor.dispatchTouchEvent()`。调用链是：
+
+```text
+ActivityImpl.onCreate()
+  -> InterceptorProxy.create()
+  -> InterceptorProxy.dispatchTouchEvent()
+       if (!mContentExtensionEnabled) return false;   // 传送门开关在这里拦截
+  -> Interceptor.dispatchTouchEvent()
+       -> Bridge.ping()                               // 自制 500ms fallback
+```
+
+因此 `Bridge` 里的 500ms 定时器只是 AES 已收到触摸后的兜底，无法绕过框架层的
+`mContentExtensionEnabled` 门。传送门 5.1.5 的 `TaplusSettingUtils.setTaplusEnableStatus()`
+会调用 `ContentCatcherUtil.setLongPressEnableStatus()`，把
+`content_catcher_network_enabled_content_extension` 写成 0，并通过
+`refreshKeepCatcherProcessAliveEnable()` 重算
+`open_content_extension_clipboard_mode`（手机上当 `taplus_clipboard_mode` 也为 0 时即为 0）。
+这就是“传送门关掉后模块不生效”的真正原因；它与长按触发器是否自制无关。
+
+`PortalSystemModule` 现在在 system_server 中 Hook
+`com.miui.server.SecurityManagerService.getContentExtensionEnabled()`，对普通应用 UID
+返回 `true`（系统 UID 仍走原逻辑），因此传送门开关关闭时 AES 触摸门仍然打开，
+不需要改写用户设置。
+
 ---
 
 ## 3. Framework 加载链（已确认）

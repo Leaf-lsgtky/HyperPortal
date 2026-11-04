@@ -198,6 +198,7 @@ public final class PortalSystemModule {
             // SELinux context fixes for re-signed UID 1000 packages (ContentCatcher / AES)
             installSELinuxHooks(classLoader);
             installAppsFilterHooks(classLoader);
+            installContentExtensionGateHook(classLoader);
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "installHooks failed", throwable);
         }
@@ -389,6 +390,67 @@ public final class PortalSystemModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "installAppsFilterHooks failed", t);
         }
+    }
+
+    /**
+     * HyperOS gates the whole AES touch pipeline in the framework:
+     *
+     *   InterceptorProxy.dispatchTouchEvent()
+     *     if (!mContentExtensionEnabled) return false;
+     *   mContentExtensionEnabled = ContentCatcherManager.getContentExtensionEnabled()
+     *                            = SecurityManagerService.getContentExtensionEnabled()
+     *                            = Settings.System.open_content_extension_clipboard_mode == 1
+     *
+     * 传送门's master switch writes that setting to 0, so our Bridge.ping() inside
+     * Interceptor.dispatchTouchEvent() is never called even though the long-press
+     * fallback itself is self-contained. Keep the framework gate open for normal
+     * app processes without touching 传送门's user-facing switch or settings.
+     */
+    private static void installContentExtensionGateHook(ClassLoader classLoader) {
+        try {
+            Class<?> securityManager = null;
+            ClassLoader[] candidates = new ClassLoader[]{
+                    classLoader,
+                    ClassLoader.getSystemClassLoader(),
+                    Thread.currentThread().getContextClassLoader()
+            };
+            for (ClassLoader candidate : candidates) {
+                if (candidate == null) continue;
+                try {
+                    securityManager = Class.forName(
+                            "com.miui.server.SecurityManagerService", false, candidate);
+                    break;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (securityManager == null) {
+                log(Log.WARN, TAG, "SecurityManagerService class not found");
+                return;
+            }
+            for (Method method : securityManager.getDeclaredMethods()) {
+                if ("getContentExtensionEnabled".equals(method.getName())
+                        && method.getParameterCount() == 0) {
+                    sXposed.hook(method)
+                            .setId("security-getContentExtensionEnabled")
+                            .intercept(PortalSystemModule::onGetContentExtensionEnabled);
+                    log(Log.INFO, TAG, "hooked SecurityManagerService.getContentExtensionEnabled");
+                    return;
+                }
+            }
+            log(Log.WARN, TAG, "SecurityManagerService.getContentExtensionEnabled not found");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "installContentExtensionGateHook failed", throwable);
+        }
+    }
+
+    private static Object onGetContentExtensionEnabled(XposedInterface.Chain chain) throws Throwable {
+        int callingUid = android.os.Binder.getCallingUid();
+        // Leave system_server / system-UID callers (Settings, 传送门 itself) on the
+        // original path so their UI state still reflects the real user switch.
+        if (callingUid == android.os.Process.SYSTEM_UID || callingUid == 0) {
+            return chain.proceed();
+        }
+        return Boolean.TRUE;
     }
 
     private static Object onShouldFilterApplication(XposedInterface.Chain chain) throws Throwable {
