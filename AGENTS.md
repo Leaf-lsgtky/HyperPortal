@@ -192,6 +192,15 @@ All build and deployment tasks are unified under `tools/`:
   - `buildTargets(...)`: Text branch adds the built-in “文本分词” target before “搜索”.
   - `ACTION_DROP`: stores the drop coordinates so the BigBang chips animate from the drop point.
   - Image targets never build `file://` URIs; they stage a bitmap through `PortalFileProvider` and ask `PortalService` to dispatch the share as the HyperPortal UID.
+  - **Never block SystemUI's main thread**: no `ContentResolver.call`, `PackageManager` query,
+    icon decode or `SharedPreferences` read on it. The drag path (`handleIntent` →
+    `handleDragStateChanged`) once called `getConfig` there, waited on
+    `ActivityThread.acquireProvider()` for the cold HyperPortal process, and got SystemUI
+    ANR-killed on the first drag after a cold boot. Config is cached (`applyConfig` /
+    `applyConfigBroadcast`), targets build on `sBgExecutor`, and the receiver is registered
+    before any expensive work. See `docs/ARCHITECTURE.md` §5.
+  - Views must exist before a drag starts (a window added mid-drag gets no
+    `ACTION_DRAG_STARTED`), which is why `warmUp()` posts `ensureViews()` on the first frame.
 - **`PortalShareContract.java` / `PortalService.dispatchImageShare(...)`**:
   - Cross-process contract for image shares from the SystemUI module.
   - `PortalService` owns `PortalFileProvider`, so it is the only place that grants the target URI and starts the target's `ACTION_SEND` activity.

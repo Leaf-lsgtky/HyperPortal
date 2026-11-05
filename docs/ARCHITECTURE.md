@@ -76,3 +76,56 @@ In Android WindowManagerService, `DragState.createCancelAnimationLocked` calcula
 > [!IMPORTANT]
 > If any `OnDragListener` in the source window or overlay window returns `true` on `DragEvent.ACTION_DROP`, WMS marks `mDragResult = true` and skips `createCancelAnimationLocked`.
 > Therefore, both `Bridge.java` and `PortalService` strictly return `false` on `ACTION_DROP` unless the drop lands squarely on an executable `AppTarget`.
+
+---
+
+## 5. SystemUI Host: Never Block the Main Thread
+
+The portal overlay lives in `com.android.systemui` (`PortalSystemUiModule`), so its work is
+charged to SystemUI's main thread — the same thread that runs input dispatch. SystemUI is a
+persistent process with a 5 s input-dispatch timeout, and the input dispatcher waits for
+SystemUI's gesture monitors before delivering a touch to the foreground app.
+
+That makes every blocking cross-process call on that thread a potential device-wide freeze.
+
+### The cold-boot bug this caused
+
+The first drag after a cold boot showed only the `system_server` tilt, no aurora glow and no
+shelf; SystemUI then restarted by itself and everything worked.
+
+`handleIntent()` answered `ACTION_DRAG_STATE` by calling `isMasterEnabled()`, which did a
+`ContentResolver.call("getConfig")` on the main thread. On the first drag after a cold boot the
+HyperPortal process is not running, so `acquireProvider()` waited for it to cold-start. Dropbox
+and `/data/anr` capture the exact stack:
+
+```
+"main" prio=5 tid=1 TimedWaiting
+  at java.lang.Object.wait(Native method)
+  at android.app.ActivityThread.acquireProvider(ActivityThread.java:9958)
+  at android.content.ContentResolver.call(ContentResolver.java:2557)
+  at ...PortalSystemUiModule$SystemUiOverlay.isMasterEnabled(PortalSystemUiModule.java:1021)
+  at ...PortalSystemUiModule$SystemUiOverlay.handleIntent(PortalSystemUiModule.java:1103)
+  at ...PortalSystemUiModule$SystemUiOverlay$1.onReceive(PortalSystemUiModule.java:990)
+```
+
+`Subject: Input dispatching timed out ([Gesture Monitor] mhm-gesture-handle is not responding.
+Waited 5000ms for MotionEvent(action=MOVE))` → the system killed SystemUI. The drag's
+broadcasts were processed only after the drag was over, so nothing was ever shown; after the
+restart the provider was warm and the next drag worked.
+
+### Invariants
+
+- **No provider calls, `PackageManager` queries, icon decoding, or `SharedPreferences` reads on
+  the main thread.** They run on `sBgExecutor`; the main thread only reads the resulting cache.
+  `getConfig` values are cached (`CONFIG_TTL_MS`) and refreshed asynchronously; the app's
+  `ACTION_CONFIG_CHANGED` broadcast carries the same values and is applied directly.
+- **Register the drag-state receiver before anything expensive.** `initOverlay()` constructs a
+  trivial `SystemUiOverlay`, registers, then warms up. A receiver that does not exist yet is a
+  drag that silently shows nothing.
+- **Build the overlay views before the first drag, not during it.** A window added mid-drag
+  never receives `ACTION_DRAG_STARTED`, so its `AppTarget`s would be dead for that drag. Views
+  are built on the first main-thread frame after registration; only the target list is async,
+  and `applyTargets()` reveals the shelf if a drag already reached the hot zone.
+- **`PortalFileProvider.isSystemUiActive()` tracks SystemUI's pid.** The flag lives in the
+  HyperPortal process, which outlives SystemUI; without the `/proc/<pid>` liveness check a
+  killed SystemUI would keep telling `PortalService` to stand down.
