@@ -2,6 +2,7 @@ package com.github.leaf.hyperportal.system;
 
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -54,6 +55,23 @@ public final class PortalSystemModule {
 
     private static final String TAG = "DragShareSystem";
     private static final String DRAG_MIME = "application/x-dragshare";
+    private static final String DROP_SHARE_PROP = "persist.sys.hyperportal.drop_to_share_enable";
+    /**
+     * Windows whose package must never receive the drop-to-share fallback:
+     * system surfaces, launchers, and our own overlay (its panel window has no
+     * ActivityRecord anyway, but the package check keeps service windows out).
+     */
+    private static final java.util.Set<String> DROP_SHARE_DENY_PACKAGES = new java.util.HashSet<>(
+            java.util.Arrays.asList(
+                    "android",
+                    "com.android.systemui",
+                    "com.android.settings",
+                    "com.miui.home",
+                    "com.miui.securitycenter",
+                    "com.miui.permcenter",
+                    "com.lbe.security.miui",
+                    "com.github.leaf.hyperportal",
+                    "com.dragshare.portal"));
     private static final ExecutorService sNotifyExecutor = Executors.newSingleThreadExecutor();
 
     private static volatile XposedInterface sXposed;
@@ -186,6 +204,9 @@ public final class PortalSystemModule {
                 } else if ("onDragStateClosedLocked".equals(name)) {
                     sXposed.hook(method).setId("ddc-onDragStateClosed").intercept(PortalSystemModule::onDragClosed);
                     log(Log.INFO, TAG, "hooked onDragStateClosedLocked " + method);
+                } else if ("reportDropResult".equals(name) && method.getParameterCount() == 2) {
+                    sXposed.hook(method).setId("ddc-reportDropResult").intercept(PortalSystemModule::onReportDropResult);
+                    log(Log.INFO, TAG, "hooked reportDropResult " + method);
                 }
             }
             Class<?> dragState = Class.forName("com.android.server.wm.DragState", false, classLoader);
@@ -874,6 +895,353 @@ public final class PortalSystemModule {
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "dismissWeChatHandleWindows inspect failed: " + throwable);
         }
+    }
+
+    /**
+     * OPPO Content Portal "window-level share fallback" port.
+     *
+     * Reference: docs/OPPO_拖拽未适配窗口_应用分享回退机制.md
+     *   OplusGlobalDragAndDropCallback.preReportDropResult() fires when the drop
+     *   target window reports consumed=false (the app has no OnDragListener and
+     *   ViewRootImpl answered ACTION_DROP with false). system_server then builds a
+     *   plain ACTION_SEND / ACTION_SEND_MULTIPLE intent, setPackage()s the target
+     *   window's package, and starts it, so the target app's own share entry opens
+     *   (QQ: 发送给好友 / 发送到电脑). It also flips the drop result to consumed so
+     *   the drag shadow does not fly back.
+     *
+     * HyperOS has no such callback, so we hook DragDropController.reportDropResult
+     * itself: the hook runs before the WMS lock (same place OPPO's preReportDropResult
+     * executes), and on success we proceed() with consumed=true.
+     */
+    private static Object onReportDropResult(XposedInterface.Chain chain) throws Throwable {
+        boolean handedOff = false;
+        try {
+            handedOff = tryDropToShareFallback(chain);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "dropToShare fallback failed: " + throwable);
+        }
+        if (handedOff) {
+            Object[] newArgs = chain.getArgs().toArray();
+            newArgs[1] = Boolean.TRUE; // no cancel fly-back, OPPO sets mConsumeResult=true too
+            return chain.proceed(newArgs);
+        }
+        return chain.proceed();
+    }
+
+    private static boolean tryDropToShareFallback(XposedInterface.Chain chain) throws Exception {
+        List<Object> args = chain.getArgs();
+        if (args == null || args.size() < 2) {
+            return false;
+        }
+        if (!Boolean.FALSE.equals(args.get(1))) {
+            return false; // target consumed the drop
+        }
+        Object window = args.get(0);
+        if (window == null) {
+            return false;
+        }
+        if (!dropToShareEnabled()) {
+            return false;
+        }
+
+        Object controller = chain.getThisObject();
+        Object wms = getField(controller, "mService");
+        if (wms == null) {
+            return false;
+        }
+        sWms = wms;
+        Object dragState = getField(controller, "mDragState");
+        if (dragState == null) {
+            return false;
+        }
+        Object clipObject = getField(dragState, "mData");
+        if (!(clipObject instanceof ClipData)) {
+            return false;
+        }
+        ClipData clip = (ClipData) clipObject;
+        if (clip.getItemCount() == 0) {
+            return false;
+        }
+
+        Object targetWin = findWindow(wms, window);
+        if (targetWin == null) {
+            return false;
+        }
+
+        // Only real app activity windows may receive the fallback. Our portal overlay
+        // and the SystemUI dock are service windows without an ActivityRecord.
+        if (getField(targetWin, "mActivityRecord") == null) {
+            return false;
+        }
+
+        Object targetAttrs = getField(targetWin, "mAttrs");
+        Object targetPkgObject = getField(targetAttrs, "packageName");
+        String targetPkg = targetPkgObject == null ? null : String.valueOf(targetPkgObject);
+        if (targetPkg == null || targetPkg.isEmpty()
+                || DROP_SHARE_DENY_PACKAGES.contains(targetPkg)) {
+            return false;
+        }
+
+        Object sourceWin = getField(dragState, "mDragWindow");
+        if (sourceWin == targetWin) {
+            return false; // OPPO: never share back into the start window
+        }
+        String sourcePkg = null;
+        if (sourceWin != null) {
+            try {
+                Object sourceAttrs = getField(sourceWin, "mAttrs");
+                Object sourcePkgObject = getField(sourceAttrs, "packageName");
+                sourcePkg = sourcePkgObject == null ? null : String.valueOf(sourcePkgObject);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (targetPkg.equals(sourcePkg)) {
+            return false; // same app: freeform / split windows must not self-share
+        }
+
+        Context context = resolveWmContext(wms);
+        if (context == null) {
+            log(Log.WARN, TAG, "dropToShare skip: no system context");
+            return false;
+        }
+
+        Intent send = buildDropShareIntent(clip, targetPkg, context);
+        if (send == null) {
+            return false;
+        }
+        if (context.getPackageManager().resolveActivity(send, 0) == null) {
+            log(Log.INFO, TAG, "dropToShare skip: no ACTION_SEND entry in " + targetPkg
+                    + " type=" + send.getType());
+            return false;
+        }
+
+        int ownerUid = -1;
+        try {
+            Object uidObj = invoke(targetWin, "getOwningUid");
+            if (uidObj instanceof Integer) {
+                ownerUid = (Integer) uidObj;
+            }
+        } catch (Throwable ignored) {
+            try {
+                Object uidObj = getField(targetWin, "mOwnerUid");
+                if (uidObj instanceof Integer) {
+                    ownerUid = (Integer) uidObj;
+                }
+            } catch (Throwable ignored2) {
+            }
+        }
+        android.os.UserHandle targetUser = null;
+        if (ownerUid >= 0) {
+            // Public API equivalent of UserHandle.of(UserHandle.getUserId(uid));
+            // targets cloned apps (parallel space) with their own user.
+            targetUser = android.os.UserHandle.getUserHandleForUid(ownerUid);
+        }
+
+        try {
+            if (targetUser != null) {
+                // Context.startActivityAsUser(Intent, UserHandle) is @hide in the
+                // SDK 37 stubs but present at runtime; inside system_server there
+                // is no hidden-API enforcement.
+                invoke(context, "startActivityAsUser", send, targetUser);
+            } else {
+                context.startActivity(send);
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "dropToShare start failed for " + targetPkg + ": " + throwable);
+            return false;
+        }
+        log(Log.INFO, TAG, "dropToShare: " + sourcePkg + " -> " + targetPkg
+                + " action=" + send.getAction() + " type=" + send.getType()
+                + " items=" + clip.getItemCount() + " ownerUid=" + ownerUid);
+        return true;
+    }
+
+    /**
+     * Mirrors OPPO createSendIntentInner(): text -> ACTION_SEND text/plain,
+     * URI -> ACTION_SEND with EXTRA_STREAM, several URIs -> ACTION_SEND_MULTIPLE
+     * (abort on mixed MIME, like OPPO), and it never shares file:// URIs because
+     * Android 17 kills the caller on file exposure. The clip keeps our custom
+     * application/x-dragshare mime, so the intent type is picked from the
+     * standard mimes only.
+     */
+    private static Intent buildDropShareIntent(ClipData clip, String targetPkg, Context context) {
+        ClipDescription description = clip.getDescription();
+        Intent send = new Intent();
+        send.setPackage(targetPkg);
+        send.setClipData(clip);
+        int count = clip.getItemCount();
+
+        if (count == 1) {
+            ClipData.Item item = clip.getItemAt(0);
+            Uri uri = item.getUri();
+            CharSequence text = item.getText();
+            if (uri != null) {
+                if ("file".equals(uri.getScheme())) {
+                    return null;
+                }
+                String mime = pickDropShareMime(description, 0, uri, context);
+                send.setAction(Intent.ACTION_SEND);
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                send.setType(mime != null ? mime : "*/*");
+                if (text != null && text.length() > 0) {
+                    send.putExtra(Intent.EXTRA_TEXT, text.toString());
+                }
+            } else if (text != null && text.length() > 0) {
+                send.setAction(Intent.ACTION_SEND);
+                send.putExtra(Intent.EXTRA_TEXT, text.toString());
+                send.setType("text/plain");
+            } else {
+                return null;
+            }
+        } else {
+            ArrayList<Uri> uris = new ArrayList<>();
+            ArrayList<String> texts = new ArrayList<>();
+            String firstMime = null;
+            for (int i = 0; i < count; i++) {
+                ClipData.Item item = clip.getItemAt(i);
+                Uri uri = item.getUri();
+                CharSequence text = item.getText();
+                if (uri != null) {
+                    if ("file".equals(uri.getScheme())) {
+                        return null;
+                    }
+                    String mime = pickDropShareMime(description, i, uri, context);
+                    if (mime == null) {
+                        mime = "*/*";
+                    }
+                    if (firstMime == null) {
+                        firstMime = mime;
+                    } else if (!firstMime.equals(mime)) {
+                        log(Log.INFO, TAG, "dropToShare skip: mixed mime " + firstMime + " vs " + mime);
+                        return null; // OPPO aborts mixed file drags
+                    }
+                    uris.add(uri);
+                } else if (text != null && text.length() > 0) {
+                    texts.add(text.toString());
+                }
+            }
+            if (!uris.isEmpty() && !texts.isEmpty()) {
+                return null; // mixed text+uri payload
+            }
+            if (!uris.isEmpty()) {
+                send.setAction(Intent.ACTION_SEND_MULTIPLE);
+                send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+                send.setType(firstMime != null ? firstMime : "*/*");
+            } else if (!texts.isEmpty()) {
+                send.setAction(Intent.ACTION_SEND);
+                send.putExtra(Intent.EXTRA_TEXT, texts.get(0));
+                send.setType("text/plain");
+            } else {
+                return null;
+            }
+        }
+
+        send.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        return send;
+    }
+
+    private static String pickDropShareMime(ClipDescription description, int itemIndex,
+            Uri uri, Context context) {
+        if (description != null) {
+            if (itemIndex < description.getMimeTypeCount()) {
+                String mime = description.getMimeType(itemIndex);
+                if (isDropShareMime(mime)) {
+                    return mime;
+                }
+            }
+            for (int i = 0; i < description.getMimeTypeCount(); i++) {
+                String mime = description.getMimeType(i);
+                if (isDropShareMime(mime)) {
+                    return mime;
+                }
+            }
+        }
+        try {
+            String type = context.getContentResolver().getType(uri);
+            if (isDropShareMime(type)) {
+                return type;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean isDropShareMime(String mime) {
+        if (mime == null || mime.isEmpty()) {
+            return false;
+        }
+        if (DRAG_MIME.equals(mime)) {
+            return false;
+        }
+        if (ClipDescription.MIMETYPE_TEXT_URILIST.equals(mime)) {
+            return false;
+        }
+        return !"*/*".equals(mime);
+    }
+
+    private static boolean dropToShareEnabled() {
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            Method get = sp.getMethod("getBoolean", String.class, boolean.class);
+            return (Boolean) get.invoke(null, DROP_SHARE_PROP, true);
+        } catch (Throwable throwable) {
+            return true;
+        }
+    }
+
+    /**
+     * Resolve the WindowState for an IWindow argument the same way
+     * DragDropController.reportDropResult() does: WindowManagerService
+     * .windowForClient(null, window), with a raw mWindowMap lookup as fallback.
+     */
+    private static Object findWindow(Object wms, Object window) {
+        try {
+            Method windowForClient = null;
+            for (Method method : wms.getClass().getDeclaredMethods()) {
+                if ("windowForClient".equals(method.getName())
+                        && method.getParameterTypes().length == 2) {
+                    windowForClient = method;
+                    break;
+                }
+            }
+            if (windowForClient != null) {
+                windowForClient.setAccessible(true);
+                Object win = windowForClient.invoke(wms, null, window);
+                if (win != null) {
+                    return win;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object windowMap = getField(wms, "mWindowMap");
+            if (windowMap instanceof Map) {
+                Object binder = invoke(window, "asBinder");
+                if (binder != null) {
+                    return ((Map<?, ?>) windowMap).get(binder);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static Context resolveWmContext(Object wms) {
+        Context cached = sSystemContext;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            Object ctx = getField(wms, "mContext");
+            if (ctx instanceof Context) {
+                sSystemContext = (Context) ctx;
+                return sSystemContext;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private static void notifyPortalState(int state, float x, float y) {

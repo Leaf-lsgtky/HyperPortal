@@ -1075,6 +1075,44 @@ system_server (PortalSystemModule)
 
 这样既保留了现有中转站面板的交互，又补上了 OPPO 的“窗口级分享回退”。
 
+### 6.4 实现状态（已落地）
+
+本项目已按方案 A 在 `bridge/src/main/java/com/github/leaf/hyperportal/system/PortalSystemModule.java`
+实现，hook id `ddc-reportDropResult`：
+
+- 只在 `consumed == false` 时处理；目标窗口经 `windowForClient(null, window)` 解析
+  （回退 `mWindowMap.get(asBinder())`），要求 `mActivityRecord != null`，
+  服务/悬浮窗类面板（中转站、SystemUI dock）因此天然被排除。
+- 过滤：目标窗口 == 起始窗口、目标包 == 来源包、`DROP_SHARE_DENY_PACKAGES`
+  （`android` / SystemUI / Settings / `com.miui.home` / 安全中心 / 权限中心 /
+  `com.github.leaf.hyperportal` / `com.dragshare.portal`）、
+  `resolveActivity == null` 均不触发，保持原生 fly-back。
+- Intent 构造对齐 `createSendIntentInner`（`buildDropShareIntent`）：
+  - 单项 text → `ACTION_SEND text/plain + EXTRA_TEXT`；
+  - 单项 URI → `ACTION_SEND + EXTRA_STREAM`，MIME 取 ClipDescription 或
+    `ContentResolver.getType`，自动跳过 `application/x-dragshare`、`text/uri-list`、`*/*`；
+  - 多 URI → `ACTION_SEND_MULTIPLE`；混合 MIME 或 text+uri 混合放弃（同 OPPO）；
+  - 多 text 只带第一条（同 OPPO）；
+  - 始终 `setClipData(clip)` + `setPackage(targetPkg)` +
+    `NEW_TASK | GRANT_READ | GRANT_WRITE`；
+  - `file://` 一律跳过（Android 17 FileUriExposure 会杀死调用方，
+    不学 OPPO 用 `disableDeathOnFileUriExposure` 绕过）。
+- 与 OPPO 的差异：**不套 `createChooser`**，直接隐式启动已 `setPackage` 的
+  send intent——唯一命中直接进目标 App 分享入口，多命中系统自动出小选单。
+- 分身/多用户：反射 `getOwningUid()`（回退字段 `mOwnerUid`）→
+  `UserHandle.getUserHandleForUid(uid)` → 反射 `Context.startActivityAsUser`
+  （该方法在 SDK 37 桩中为 @hide，system_server 内无隐藏 API 限制）。
+- 成功启动后 `chain.proceed(args[1] = true)`，等价 OPPO 的
+  `mConsumeResult → getConsumedResult()`，阴影不飞回；失败则原样 proceed。
+- 开关：`adb shell setprop persist.sys.hyperportal.drop_to_share_enable false`
+  可整体关闭（默认开）。
+- 日志（tag `DragShareSystem`）：
+  - `dropToShare: <srcPkg> -> <dstPkg> action=... type=... items=... ownerUid=...`
+  - `dropToShare skip: no ACTION_SEND entry in <pkg> type=...`
+  - `dropToShare skip: mixed mime ...`
+
+> ⚠️ 该 hook 在 `system_server`，安装后需**冷重启一次**才生效（规则 7：不自动重启）。
+
 ---
 
 ## 7. 一句话总结
@@ -1130,3 +1168,15 @@ QQ 的“发送给好友 / 发送到电脑”不是 OPPO 写的，而是 QQ 的 
 | `com.android.server.wm.DragState.mDragWindow` | 起始 WindowState |
 | `com.android.server.wm.DragState.mDragResult` | 拖拽结果 |
 | `com.android.server.wm.DragDropController.notifyUnhandledDrop` | AOSP 未处理 drop 回调 |
+
+### 本项目实现（ohmyAES）
+
+| 名称 | 作用 |
+| :--- | :--- |
+| `PortalSystemModule.onReportDropResult` | hook `ddc-reportDropResult`，入口 |
+| `PortalSystemModule.tryDropToShareFallback` | 判定并触发回退 |
+| `PortalSystemModule.buildDropShareIntent` | ClipData → ACTION_SEND（对应 OPPO `createSendIntentInner`） |
+| `PortalSystemModule.pickDropShareMime` | 单项 MIME 解析（跳过自定义 MIME） |
+| `PortalSystemModule.findWindow` | IWindow → WindowState |
+| `DROP_SHARE_DENY_PACKAGES` | 目标包黑名单 |
+| `DROP_SHARE_PROP` | `persist.sys.hyperportal.drop_to_share_enable` 开关 |
