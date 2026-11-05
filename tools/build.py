@@ -91,7 +91,7 @@ def build_bridge(clean=False, r8=False):
     print(f"[2/2] [OK] Built & Verified: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
     return out_apk
 
-def build_aes(clean=False, version_code=1000000047):
+def build_aes(clean=False, version_code=1000000048):
     print("=" * 60)
     print("Building AES (ContentCatcher Privileged Hook)...")
     print("=" * 60)
@@ -180,7 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description="Unified Build Tool for ohmyAES")
     parser.add_argument("target", choices=["bridge", "aes", "all", "clean"], help="Target component to build")
     parser.add_argument("--clean", action="store_true", help="Force clean build cache before building")
-    parser.add_argument("--version-code", type=int, default=1000000047, help="versionCode for ContentCatcher APK")
+    parser.add_argument("--version-code", type=int, default=1000000048, help="versionCode for ContentCatcher APK")
     parser.add_argument(
         "--r8",
         action="store_true",
