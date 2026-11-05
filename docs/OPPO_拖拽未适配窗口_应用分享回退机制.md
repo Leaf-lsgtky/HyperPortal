@@ -975,6 +975,31 @@ Android 17 对 `file://` 暴露限制更严。
 OPPO 用 `StrictMode.disableDeathOnFileUriExposure()` 临时绕过，但这只是避免 system_server 崩溃，不代表目标 App 能读。
 建议直接跳过 `file://`，或转换为 `content://`。
 
+#### 坑 9：`WMS.windowForClient(Session, IWindow)` 不能传 `null` Session
+
+想从 `performDrag(IWindow window, …)` 拿到拖拽源窗口时，最直觉的写法是：
+
+```java
+wms.windowForClient(null, window)   // ✗ 恒返回 null
+```
+
+`WindowManagerService.windowForClient` 的实现是
+`win = mWindowMap.get(client.asBinder()); return win != null && win.mSession == session ? win : null;`，
+`mSession == null` 永远不成立，所以**永远拿不到窗口**。
+
+正确做法是像 WMS 自己那样按 client binder 查：
+
+```java
+mWindowMap.get(((IInterface) window).asBinder())   // ✓
+```
+
+如果担心 `Binder` / `BinderProxy` 的 `equals` 不对称，再补一遍
+`mWindowMap.values()` 线性扫描、比对每个 `WindowState.mClient` 的 binder。
+
+**踩坑后果**：拿不到源窗口 → 源包名恒为 `null` → 所有"按来源区分"的判断
+（例如"overlay 拖拽源不要做 3D 倾斜"）静默失效，并且 `resolveTargetTask` 会一路回退到
+"最上层全屏 Task"，把**背景里那个 App** 当成拖拽源去变换。
+
 ---
 
 ## 5. 验证方法
