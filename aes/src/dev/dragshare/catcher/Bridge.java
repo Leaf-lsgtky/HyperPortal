@@ -5500,6 +5500,14 @@ public final class Bridge {
                 }
                 continue;
             }
+            if (node instanceof java.net.URL) {
+                java.io.File candidate = fileFromString(((java.net.URL) node).getPath());
+                if (isAnimatedFile(candidate)) {
+                    Log.i(TAG, "findAnimatedFile hit via URL: " + candidate);
+                    return candidate;
+                }
+                continue;
+            }
             if (depth >= 4) {
                 continue;
             }
@@ -5515,8 +5523,28 @@ public final class Bridge {
                 try {
                     Object value = type.getMethod(accessor).invoke(node);
                     if (value != null) {
+                        // URLDrawable.getURL() returns java.net.URL, whose toString is
+                        // "file:/storage/..." (single slash). Normalise before judging.
+                        String asPath = null;
+                        if (value instanceof java.net.URL) {
+                            asPath = ((java.net.URL) value).getPath();
+                        } else if (value instanceof String) {
+                            asPath = (String) value;
+                        }
+                        if (asPath != null) {
+                            java.io.File direct = fileFromString(asPath);
+                            if (direct != null) {
+                                boolean animated = isAnimatedFile(direct);
+                                Log.i(TAG, "accessor " + accessor + " -> " + direct
+                                        + " exists=" + direct.isFile() + " animated=" + animated);
+                                if (animated) {
+                                    return direct;
+                                }
+                            }
+                        }
                         if (diag.length() < 400) {
                             diag.append(" {").append(accessor).append('=')
+                                    .append(value.getClass().getSimpleName()).append(':')
                                     .append(String.valueOf(value)).append('}');
                         }
                         queue.add(value);
