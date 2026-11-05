@@ -5242,6 +5242,10 @@ public final class Bridge {
         if (pfd == null) {
             return null;
         }
+        String magicMime = sniffMimeByMagic(pfd);
+        if (magicMime != null) {
+            return magicMime;
+        }
         try {
             android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
             options.inJustDecodeBounds = true;
@@ -5253,6 +5257,87 @@ public final class Bridge {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    // ---- Animated image hand-off -------------------------------------------------
+    // QQ ships its sticker GIFs with a byte-mangled signature: "GIF89a" is stored as
+    // 47 48 46 39 39 60 ("GHF99`"), i.e. the bytes at index 1/3/5 are XORed with 1.
+    // Naive sniffers report application/octet-stream, and every GIF decoder that
+    // checks the magic refuses the file. Detect the pattern, advertise it as image/gif
+    // and rewrite the six header bytes while staging so the target accepts it.
+    private static byte[] readHead(ParcelFileDescriptor pfd, int count) {
+        if (pfd == null) {
+            return null;
+        }
+        try {
+            byte[] buf = new byte[count];
+            int read = android.system.Os.pread(pfd.getFileDescriptor(), buf, 0, count, 0L);
+            return read >= 6 ? buf : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isMangledGif(byte[] head, int len) {
+        if (head == null || len < 6) {
+            return false;
+        }
+        return head[0] == 0x47                       // 'G'
+                && head[1] == 0x48                   // 'H'  (== 'I' ^ 1)
+                && head[2] == 0x46                   // 'F'
+                && (head[3] == 0x38 || head[3] == 0x39)   // '8'/'9' ^ 1
+                && head[5] == 0x60;                  // '`'  (== 'a' ^ 1)
+    }
+
+    private static void repairMangledGif(byte[] head, int len) {
+        if (!isMangledGif(head, len)) {
+            return;
+        }
+        head[1] = 0x49;                              // 'I'
+        head[3] = (byte) (head[3] ^ 0x01);           // back to '8' or '9'
+        head[5] = 0x61;                              // 'a'
+    }
+
+    private static String sniffMimeByMagic(ParcelFileDescriptor pfd) {
+        byte[] head = readHead(pfd, 12);
+        if (head == null) {
+            return null;
+        }
+        if (head[0] == 0x47 && head[1] == 0x49 && head[2] == 0x46
+                && head[3] == 0x38 && (head[4] == 0x37 || head[4] == 0x39)) {
+            return "image/gif";                      // GIF87a / GIF89a
+        }
+        if (isMangledGif(head, 12)) {
+            return "image/gif";                      // QQ obfuscated sticker GIF
+        }
+        if (head[0] == 0x52 && head[1] == 0x49 && head[2] == 0x46 && head[3] == 0x46
+                && head[8] == 0x57 && head[9] == 0x45 && head[10] == 0x42 && head[11] == 0x50) {
+            return "image/webp";                     // RIFF....WEBP
+        }
+        return null;
+    }
+
+    /**
+     * True when the descriptor starts with a signature we can forward untouched and
+     * still call "animated": GIF87a/GIF89a, QQ's mangled GIF, or an animated WebP
+     * (VP8X chunk carrying the ANIM flag). Static images return false so they keep the
+     * old path.
+     */
+    private static boolean isAnimatedDescriptor(ParcelFileDescriptor pfd) {
+        byte[] head = readHead(pfd, 24);
+        if (head == null) {
+            return false;
+        }
+        if (head[0] == 0x47 && head[1] == 0x49 && head[2] == 0x46) {
+            return true;
+        }
+        if (isMangledGif(head, 24)) {
+            return true;
+        }
+        return head[0] == 0x52 && head[1] == 0x49 && head[2] == 0x46 && head[3] == 0x46
+                && head[8] == 0x57 && head[9] == 0x45 && head[10] == 0x42 && head[11] == 0x50
+                && head[12] == 0x56 && head[13] == 0x50 && head[14] == 0x38 && head[15] == 0x58
+                && (head[20] & 0x02) != 0;           // VP8X flags: ANIMATION
     }
 
     private static String copyPfdToPortal(Context context, ParcelFileDescriptor pfd, Bundle payload) {
@@ -5316,7 +5401,17 @@ public final class Bridge {
             byte[] buffer = new byte[65536];
             int count;
             long total = 0;
+            boolean firstChunk = true;
             while ((count = input.read(buffer)) > 0) {
+                if (firstChunk) {
+                    firstChunk = false;
+                    // QQ's sticker GIFs carry a mangled signature; no receiver accepts
+                    // them until the six header bytes are restored.
+                    if (isMangledGif(buffer, count)) {
+                        repairMangledGif(buffer, count);
+                        Log.i(TAG, "copyPfdToPortal repaired mangled GIF header for " + name);
+                    }
+                }
                 output.write(buffer, 0, count);
                 total += count;
                 if (total > 128L * 1024 * 1024) {
@@ -5750,10 +5845,18 @@ public final class Bridge {
             dragBitmap = toSoftwareBitmap((Bitmap) bitmap);
         }
 
-        // Animated GIFs are intentionally reduced to their first frame (PNG) because
-        // the current extraction path exposes a static bitmap. Keep the original file
-        // only when there is no bitmap to convert.
-        boolean preferPngForGif = sourceIsGif && dragBitmap != null;
+        // An animated source must never be rasterised: staging a PNG of the first frame
+        // is what turned a dragged GIF into a still picture. When the descriptor itself
+        // is a real animated file (GIF87a/GIF89a, QQ's mangled sticker GIF, animated
+        // WebP) we forward it byte-for-byte and keep the bitmap for the drag shadow only.
+        boolean animatedOriginal = filePfd instanceof ParcelFileDescriptor
+                && isAnimatedDescriptor((ParcelFileDescriptor) filePfd);
+        if (animatedOriginal) {
+            imageMimeType = "image/gif";
+            Log.i(TAG, "animated source detected, forwarding original bytes"
+                    + " (was mime=" + lowerSourceMime + ")");
+        }
+        boolean preferPngForGif = sourceIsGif && dragBitmap != null && !animatedOriginal;
         if (prepareDrag) {
             // A URI owned by the source app (Weibo's own provider, a photo-picker
             // grant, ...) is opaque to the drop target. Re-stage it so every drag
