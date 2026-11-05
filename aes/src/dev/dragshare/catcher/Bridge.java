@@ -5407,8 +5407,13 @@ public final class Bridge {
         }
         try {
             String path = value;
-            if (path.startsWith("file://")) {
-                path = path.substring(7);
+            // URLDrawable.getURL() hands back "file:/storage/..." with a single slash,
+            // while providers use "file:///storage/...". Normalise both.
+            if (path.startsWith("file:")) {
+                path = path.substring(5);
+                if (path.startsWith("//")) {
+                    path = path.substring(2);
+                }
             }
             if (!path.startsWith("/")) {
                 return null;
@@ -5454,6 +5459,8 @@ public final class Bridge {
         java.util.IdentityHashMap<Object, Boolean> seen = new java.util.IdentityHashMap<>();
         java.util.ArrayDeque<Object> queue = new java.util.ArrayDeque<>();
         java.util.ArrayDeque<Integer> depths = new java.util.ArrayDeque<>();
+        StringBuilder diag = new StringBuilder();
+        int[] paths = new int[]{0};
         queue.add(root);
         depths.add(0);
         int budget = 400;
@@ -5471,9 +5478,17 @@ public final class Bridge {
                 continue;
             }
             if (node instanceof String) {
-                java.io.File candidate = fileFromString((String) node);
-                if (isAnimatedFile(candidate)) {
-                    return candidate;
+                String text = (String) node;
+                if (text.length() <= 512
+                        && (text.startsWith("/") || text.startsWith("file://") || text.contains("://"))) {
+                    if (paths[0]++ < 6) {
+                        diag.append(" [").append(text).append(']');
+                    }
+                    java.io.File candidate = fileFromString(text);
+                    if (isAnimatedFile(candidate)) {
+                        Log.i(TAG, "findAnimatedFile hit via string: " + candidate);
+                        return candidate;
+                    }
                 }
                 continue;
             }
@@ -5493,11 +5508,16 @@ public final class Bridge {
                 continue;
             }
             // URLDrawable keeps its source in mUrl / mParams rather than in a File.
-            String[] accessors = {"getUrl", "getSrcUrl", "getFilePath", "getLocalPath", "getImagePath"};
+            String[] accessors = {"getURL", "getUrl", "getSrcUrl", "getFilePath", "getLocalPath",
+                    "getImagePath", "getCacheKey", "getSrcPath", "getPath"};
             for (String accessor : accessors) {
                 try {
                     Object value = type.getMethod(accessor).invoke(node);
                     if (value != null) {
+                        if (diag.length() < 400) {
+                            diag.append(" {").append(accessor).append('=')
+                                    .append(String.valueOf(value)).append('}');
+                        }
                         queue.add(value);
                         depths.add(depth + 1);
                     }
@@ -5527,6 +5547,7 @@ public final class Bridge {
                 cursor = cursor.getSuperclass();
             }
         }
+        Log.i(TAG, "findAnimatedFile: no hit, seen=" + seen.size() + " paths=" + diag);
         return null;
     }
 
@@ -5543,7 +5564,18 @@ public final class Bridge {
             if (!TextUtils.isEmpty(result.getString("fileName"))) {
                 return;
             }
-            if (!shouldProbeAnimated(view)) {
+            boolean probe = shouldProbeAnimated(view);
+            String drawableName = "?";
+            try {
+                if (view instanceof ImageView) {
+                    android.graphics.drawable.Drawable d = ((ImageView) view).getDrawable();
+                    drawableName = d == null ? "null" : d.getClass().getName();
+                }
+            } catch (Throwable ignored) {
+            }
+            Log.i(TAG, "probe animated: view=" + view.getClass().getName()
+                    + " drawable=" + drawableName + " probe=" + probe);
+            if (!probe) {
                 return;
             }
             java.io.File file = findAnimatedFile(view);
