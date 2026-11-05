@@ -184,7 +184,10 @@ All build and deployment tasks are unified under `tools/`:
     go through `attachAnimatedSource()` / `findAnimatedFile()`: a bounded reflective walk
     (depth 4, 400 nodes) probing `getURL`/`getSrcUrl`/… and any reachable `File`/`Uri` for a
     real animated file. `URLDrawable.getURL()` returns `java.net.URL`, **not** `String`, and
-    its `toString()` is `file:/storage/...` with a single slash.
+    its `toString()` is `file:/storage/...` with a single slash. Sticker views often expose
+    only a 32-hex content hash (WeChat's `ChattingEmojiView`), so the walk also collects
+    hashes and `resolveEmojiByHash()` maps them onto `MicroMsg/*/emoji/<md5>` (WeChat) or
+    `.emotionsm/<packId>/<md5>` (QQ).
 - **`PortalService.java`**:
   - `GlowView`: Custom AGSL RuntimeShader view rendering ColorOS Aurora glow.
   - `setPhase1Progress(float progress)`: Glow intensity ramp (Phase 1).

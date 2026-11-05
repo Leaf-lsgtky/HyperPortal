@@ -5433,26 +5433,27 @@ public final class Bridge {
      * views. Everything else keeps the old, cheap extraction path.
      */
     private static boolean shouldProbeAnimated(View view) {
-        if (!(view instanceof ImageView)) {
+        if (view == null) {
             return false;
         }
         try {
-            android.graphics.drawable.Drawable drawable = ((ImageView) view).getDrawable();
-            if (drawable == null) {
-                return false;
-            }
-            if (drawable.getClass().getName().contains("tencent.image")) {
-                return true;
+            if (view instanceof ImageView) {
+                android.graphics.drawable.Drawable drawable = ((ImageView) view).getDrawable();
+                if (drawable != null && drawable.getClass().getName().contains("tencent.image")) {
+                    return true;
+                }
             }
             Context ctx = view.getContext();
             String pkg = ctx == null ? null : ctx.getPackageName();
+            // WeChat's sticker view is a custom View, so probing by package is the only
+            // reliable gate there.
             return "com.tencent.mobileqq".equals(pkg) || "com.tencent.mm".equals(pkg);
         } catch (Throwable ignored) {
             return false;
         }
     }
 
-    private static java.io.File findAnimatedFile(View root) {
+    private static java.io.File findAnimatedFile(View root, java.util.List<String> hashes) {
         if (root == null) {
             return null;
         }
@@ -5484,6 +5485,10 @@ public final class Bridge {
                             && (text.startsWith("/") || text.startsWith("file:") || text.contains("://"))) {
                         paths[0]++;
                         diag.append(" [").append(text).append(']');
+                    }
+                    // Sticker views usually carry only the content hash, not a path.
+                    if (hashes != null && hashes.size() < 8 && text.length() == 32 && isHexHash(text)) {
+                        hashes.add(text);
                     }
                     java.io.File candidate = fileFromString(text);
                     if (isAnimatedFile(candidate)) {
@@ -5576,7 +5581,8 @@ public final class Bridge {
                 cursor = cursor.getSuperclass();
             }
         }
-        Log.i(TAG, "findAnimatedFile: no hit, seen=" + seen.size() + " paths=" + diag);
+        Log.i(TAG, "findAnimatedFile: no hit, seen=" + seen.size() + " paths=" + diag
+                + " hashes=" + (hashes == null ? "-" : hashes));
         return null;
     }
 
@@ -5585,6 +5591,81 @@ public final class Bridge {
      * Records the real animated file so forwardToPortal() can stage the original
      * bytes instead of a PNG of the first frame.
      */
+    private static boolean isHexHash(String text) {
+        if (text == null || text.length() != 32) {
+            return false;
+        }
+        for (int i = 0; i < 32; i++) {
+            char c = text.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Sticker views often expose only the content hash, never a path. WeChat and QQ both
+     * store stickers as <container>/<hash> with no extension, and we run inside the app
+     * process, so those directories are readable here.
+     */
+    private static java.io.File resolveEmojiByHash(Context ctx, String hash) {
+        if (ctx == null || !isHexHash(hash)) {
+            return null;
+        }
+        long start = SystemClock.uptimeMillis();
+        try {
+            String pkg = ctx.getPackageName();
+            if ("com.tencent.mm".equals(pkg)) {
+                java.io.File base = ctx.getDataDir();
+                java.io.File micro = base == null ? null : new java.io.File(base, "MicroMsg");
+                java.io.File[] users = micro == null ? null : micro.listFiles();
+                if (users != null) {
+                    for (java.io.File user : users) {
+                        if (user == null || !user.isDirectory()) {
+                            continue;
+                        }
+                        java.io.File emoji = new java.io.File(user, "emoji");
+                        if (!emoji.isDirectory()) {
+                            continue;
+                        }
+                        java.io.File candidate = new java.io.File(emoji, hash);
+                        if (isAnimatedFile(candidate)) {
+                            return candidate;
+                        }
+                        candidate = new java.io.File(new java.io.File(emoji, "decrypt"), hash);
+                        if (isAnimatedFile(candidate)) {
+                            return candidate;
+                        }
+                    }
+                }
+            } else if ("com.tencent.mobileqq".equals(pkg)) {
+                java.io.File ext = ctx.getExternalFilesDir(null);
+                java.io.File root = ext == null ? null : ext.getParentFile();
+                java.io.File emo = root == null
+                        ? null : new java.io.File(root, "Tencent/MobileQQ/.emotionsm");
+                java.io.File[] packs = emo == null ? null : emo.listFiles();
+                if (packs != null) {
+                    for (java.io.File pack : packs) {
+                        if (pack == null || !pack.isDirectory()) {
+                            continue;
+                        }
+                        java.io.File candidate = new java.io.File(pack, hash);
+                        if (isAnimatedFile(candidate)) {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "resolveEmojiByHash failed", throwable);
+        }
+        Log.i(TAG, "resolveEmojiByHash miss " + hash
+                + " in " + (SystemClock.uptimeMillis() - start) + "ms");
+        return null;
+    }
+
     private static void attachAnimatedSource(View view, Bundle result) {
         try {
             if (view == null || result == null) {
@@ -5607,7 +5688,18 @@ public final class Bridge {
             if (!probe) {
                 return;
             }
-            java.io.File file = findAnimatedFile(view);
+            java.util.ArrayList<String> hashes = new java.util.ArrayList<>();
+            java.io.File file = findAnimatedFile(view, hashes);
+            if (file == null && !hashes.isEmpty()) {
+                Context ctx = view.getContext();
+                for (String hash : hashes) {
+                    file = resolveEmojiByHash(ctx, hash);
+                    if (file != null) {
+                        Log.i(TAG, "resolved sticker by hash " + hash + " -> " + file);
+                        break;
+                    }
+                }
+            }
             if (file == null) {
                 return;
             }
