@@ -5439,8 +5439,19 @@ public final class Bridge {
         try {
             if (view instanceof ImageView) {
                 android.graphics.drawable.Drawable drawable = ((ImageView) view).getDrawable();
-                if (drawable != null && drawable.getClass().getName().contains("tencent.image")) {
-                    return true;
+                if (drawable != null) {
+                    String name = drawable.getClass().getName();
+                    if (name.contains("tencent.image")) {
+                        return true;
+                    }
+                    // Generic: any animated-image drawable is worth probing, whatever the
+                    // app (Weibo's com.sina.gifdecoder.GifDrawable, Qzone, etc.).
+                    String lower = name.toLowerCase(Locale.US);
+                    if (lower.contains("gif") || lower.contains("anim")
+                            || lower.contains("movie") || lower.contains("webp")
+                            || lower.contains("apng")) {
+                        return true;
+                    }
                 }
             }
             Context ctx = view.getContext();
@@ -5546,7 +5557,7 @@ public final class Bridge {
                     "getPath", "getSrcPath", "getCacheKey", "getRequest", "getImageRequest",
                     "getParams", "getBytes", "getByteBuffer", "getSourceBytes", "getData",
                     "getSource", "getDrawable", "getState", "getConstantState", "getOrigin",
-                    "getOriginal", "getTarget", "getContent"};
+                    "getOriginal", "getTarget", "getContent", "getBuffer", "getGifBuffer"};
             for (String accessor : accessors) {
                 try {
                     Object value = type.getMethod(accessor).invoke(node);
@@ -5558,6 +5569,18 @@ public final class Bridge {
                             if (fromBytes != null) {
                                 Log.i(TAG, "findAnimatedFile hit via " + accessor + " bytes");
                                 return fromBytes;
+                            }
+                        }
+                        // Glide's GifDrawable exposes the encoded GIF through getBuffer().
+                        if (value instanceof java.nio.ByteBuffer) {
+                            java.nio.ByteBuffer buffer = ((java.nio.ByteBuffer) value).duplicate();
+                            buffer.position(0);
+                            byte[] copy = new byte[Math.min(buffer.remaining(), 32 * 1024 * 1024)];
+                            buffer.get(copy);
+                            java.io.File fromBuffer = bytesToTempFile(root.getContext(), copy);
+                            if (fromBuffer != null) {
+                                Log.i(TAG, "findAnimatedFile hit via " + accessor + " buffer");
+                                return fromBuffer;
                             }
                         }
                         // URLDrawable.getURL() returns java.net.URL, whose toString is
@@ -5631,6 +5654,22 @@ public final class Bridge {
             java.io.File dir = new java.io.File(ctx.getCacheDir(), "hp_anim");
             if (!dir.isDirectory() && !dir.mkdirs()) {
                 return null;
+            }
+            // These copies can be tens of megabytes; keep only the newest few.
+            java.io.File[] existing = dir.listFiles();
+            if (existing != null && existing.length > 2) {
+                java.util.Arrays.sort(existing, new java.util.Comparator<java.io.File>() {
+                    @Override
+                    public int compare(java.io.File a, java.io.File b) {
+                        return Long.compare(b.lastModified(), a.lastModified());
+                    }
+                });
+                for (int i = 2; i < existing.length; i++) {
+                    try {
+                        existing[i].delete();
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
             java.io.File out = new java.io.File(dir, "anim_" + SystemClock.uptimeMillis() + ".gif");
             java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
