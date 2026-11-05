@@ -124,7 +124,7 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int, isCurrent: () -> Boolean) {
                 )
                 BasicComponent(
                     title = "system_server 钩子",
-                    summary = if (status.systemServerReady) "已注入" else "未注入",
+                    summary = systemServerSummary(status),
                 )
                 BasicComponent(
                     title = "系统界面钩子",
@@ -158,9 +158,10 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int, isCurrent: () -> Boolean) {
 /**
  * 通栏状态卡。
  *
- * 四个状态而不是两个：总开关关掉时钩子还在，说「已激活」是骗人；钩子在、但还没有任何 App
+ * 五个状态而不是两个。总开关关掉时钩子还在，说「已激活」是骗人；LSPosed 服务没绑上时钩子可能
+ * 好好的，说「未激活」同样是骗人 —— 那是「问不到」，不是「不在」；钩子在、但还没有任何 App
  * 完成过 AES 握手，是开机之后的常态，用琥珀色说清楚「还差一步，去长按一个内容」；连钩子都
- * 没找到才是红色。
+ * 确认没找到才是红色。
  */
 @Composable
 private fun PortalStatusCard(
@@ -170,10 +171,11 @@ private fun PortalStatusCard(
     onRefresh: () -> Unit,
 ) {
     val paused = checked && !status.masterSwitch
-    val ready = checked && !paused && status.allReady
-    val hooksOnly = checked && !paused && status.hooksReady && !status.aesReady
-    val problem = checked && !paused && !status.hooksReady
-    val attention = paused || hooksOnly
+    val unknown = checked && !paused && !status.serviceBound
+    val ready = checked && !paused && !unknown && status.allReady
+    val hooksOnly = checked && !paused && !unknown && status.hooksReady && !status.aesReady
+    val problem = checked && !paused && !unknown && !status.hooksReady
+    val attention = paused || unknown || hooksOnly
 
     val dark = isSystemInDarkTheme()
     val dynamic = MiuixTheme.isDynamicColor
@@ -208,6 +210,7 @@ private fun PortalStatusCard(
     }
     val title = when {
         paused -> "已暂停运行"
+        unknown -> "无法确认状态"
         ready -> "HyperPortal 已激活"
         hooksOnly -> "等待 AES 握手"
         problem -> "HyperPortal 未激活"
@@ -215,6 +218,7 @@ private fun PortalStatusCard(
     }
     val summary = when {
         paused -> "功能总开关已关闭，长按内容不会触发传送门"
+        unknown -> "LSPosed 服务未连接，查不到钩子被注入到了哪些进程"
         ready -> "三段钩子全部就绪"
         hooksOnly -> "钩子已注入，长按任意应用里的内容即可完成握手"
         problem -> "LSPosed 中没有找到已注入的进程，请检查模块是否启用"
@@ -297,6 +301,16 @@ private fun frameworkSummary(status: PortalStatus): String {
     if (!status.serviceBound) return "未连接，无法查询注入状态"
     val name = status.frameworkName.ifBlank { "LSPosed" }
     return if (status.frameworkVersion.isBlank()) name else "$name ${status.frameworkVersion}"
+}
+
+/**
+ * system_server 只能由框架回答 —— 它不像 SystemUI 那样会自己报一声。服务没绑上时它是「不知道」，
+ * 不是「没注入」，这两件事在页面上必须分开说。
+ */
+private fun systemServerSummary(status: PortalStatus): String = when {
+    !status.serviceBound -> "未知（LSPosed 服务未连接）"
+    status.systemServerReady -> "已注入"
+    else -> "未注入"
 }
 
 private fun systemUiSummary(status: PortalStatus): String {
