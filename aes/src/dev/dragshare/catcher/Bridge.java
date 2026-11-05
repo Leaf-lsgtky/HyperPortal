@@ -1516,10 +1516,65 @@ public final class Bridge {
     private static Bundle extractTelegramContent(View view, float rawX, float rawY, boolean wantText, boolean wantBitmap) {
         if (view == null) return null;
         String name = view.getClass().getName();
-        if (!name.contains("ChatMessageCell") && !name.contains("BackupImageView")) {
+        if (!name.contains("ChatMessageCell") && !name.contains("BackupImageView")
+                && !name.contains("PhotoViewer")) {
             return null;
         }
         try {
+            // Telegram's full-screen viewer draws the photo itself and exposes a
+            // caption elsewhere in the tree, so clicking the picture used to
+            // return that caption. A viewer with a bitmap always means "image".
+            if (name.contains("PhotoViewer")) {
+                Bitmap viewerBitmap = extractTelegramViewerBitmap(view);
+                if (viewerBitmap != null && !viewerBitmap.isRecycled()
+                        && viewerBitmap.getWidth() >= 60 && viewerBitmap.getHeight() >= 60) {
+                    Bundle b = new Bundle();
+                    b.putParcelable("viewBitmap", toSoftwareBitmap(viewerBitmap));
+                    b.putInt("catchType", 2);
+                    Log.i(TAG, "telegram hit viewer photo " + viewerBitmap.getWidth() + "x" + viewerBitmap.getHeight());
+                    return b;
+                }
+            }
+            // A Telegram message cell holds BOTH the photo and its caption, so the
+            // modality must follow the finger position, not a fixed order. Asking
+            // for text first is what made "long press the picture" drag the caption.
+            Rect photoRect = wantBitmap ? telegramPhotoRect(view) : null;
+            boolean onPhoto = photoRect != null && rectContainsLocalPoint(view, photoRect, rawX, rawY);
+            if (photoRect != null) {
+                Log.i(TAG, "telegram photoRect=" + photoRect.toShortString() + " onPhoto=" + onPhoto);
+            } else {
+                logTelegramDiagnostics(view);
+            }
+            if (onPhoto) {
+                Bitmap bmp = extractTelegramBitmap(view);
+                if (bmp != null && !bmp.isRecycled() && bmp.getWidth() >= 60 && bmp.getHeight() >= 60) {
+                    Bundle b = new Bundle();
+                    b.putParcelable("viewBitmap", toSoftwareBitmap(bmp));
+                    b.putInt("catchType", 2);
+                    Log.i(TAG, "telegram hit photo (touch on image) " + bmp.getWidth() + "x" + bmp.getHeight());
+                    return b;
+                }
+            } else if (wantBitmap && photoRect == null) {
+                // photoImage coords are not always populated; fall back to the
+                // inverse test — if the finger is outside the text block of a
+                // message that does have a picture, the user pressed the picture.
+                Rect textRect = telegramTextRect(view);
+                if (textRect != null) {
+                    boolean onText = rectContainsLocalPoint(view, textRect, rawX, rawY);
+                    Log.i(TAG, "telegram textRect=" + textRect.toShortString() + " onText=" + onText);
+                    if (!onText) {
+                        Bitmap bmp = extractTelegramBitmap(view);
+                        if (bmp != null && !bmp.isRecycled() && bmp.getWidth() >= 60 && bmp.getHeight() >= 60) {
+                            Bundle b = new Bundle();
+                            b.putParcelable("viewBitmap", toSoftwareBitmap(bmp));
+                            b.putInt("catchType", 2);
+                            Log.i(TAG, "telegram hit photo (touch outside text block) "
+                                    + bmp.getWidth() + "x" + bmp.getHeight());
+                            return b;
+                        }
+                    }
+                }
+            }
             // 1. Text extraction from Telegram message
             if (wantText) {
                 String text = extractTelegramText(view);
@@ -1546,6 +1601,216 @@ public final class Bridge {
             Log.w(TAG, "extractTelegramContent failed", throwable);
         }
         return null;
+    }
+
+    /**
+     * One-shot diagnostic: dumps the real field names of the image receiver and
+     * of the cell, because Telegram renames/relocates them between versions.
+     */
+    private static void logTelegramDiagnostics(View view) {
+        try {
+            Log.i(TAG, "telegram diag cell=" + view.getClass().getName()
+                    + " size=" + view.getWidth() + "x" + view.getHeight());
+            for (Class<?> c = view.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    String type = f.getType().getName();
+                    String fName = f.getName().toLowerCase(Locale.US);
+                    if (f.getType() == int.class || f.getType() == float.class) {
+                        if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                        if (fName.contains("text") || fName.contains("image") || fName.contains("photo")) {
+                            try {
+                                f.setAccessible(true);
+                                Object v = f.getType() == int.class ? (Object) f.getInt(view) : (Object) f.getFloat(view);
+                                Log.i(TAG, "   cell." + f.getName() + "=" + v);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        continue;
+                    }
+                    if (!type.contains("ImageReceiver") && !type.contains("image")) continue;
+                    Log.i(TAG, "telegram diag field " + c.getSimpleName() + "." + f.getName() + " : " + type);
+                    try {
+                        f.setAccessible(true);
+                        Object receiver = f.get(view);
+                        if (receiver == null) {
+                            Log.i(TAG, "   (null)");
+                            continue;
+                        }
+                        StringBuilder sb = new StringBuilder("   recv");
+                        for (String rn : new String[]{"imageX", "imageY", "imageW", "imageH"}) {
+                            sb.append(' ').append(rn).append('=').append(floatFieldOf(receiver, rn));
+                        }
+                        sb.append(" bitmap=").append(describeReceiverBitmap(receiver));
+                        Log.i(TAG, sb.toString());
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "logTelegramDiagnostics failed", throwable);
+        }
+    }
+
+    private static float floatFieldOf(Object target, String name) {
+        for (Class<?> c = target.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                if (f.getType() == float.class) return f.getFloat(target);
+                if (f.getType() == int.class) return f.getInt(target);
+            } catch (NoSuchFieldException ignored) {
+            } catch (Throwable ignored) {
+                return -1f;
+            }
+        }
+        return -1f;
+    }
+
+    private static String describeReceiverBitmap(Object receiver) {
+        try {
+            Bitmap b = extractBitmapFromReceiver(receiver);
+            return b == null ? "none" : b.getWidth() + "x" + b.getHeight();
+        } catch (Throwable ignored) {
+            return "err";
+        }
+    }
+
+    /**
+     * Bitmap of a Telegram full-screen viewer. The viewer draws with its own
+     * canvas and keeps the ImageReceivers on the *outer* PhotoViewer instance
+     * (centre / left / right page), so the cell-level lookup finds nothing.
+     */
+    private static Bitmap extractTelegramViewerBitmap(View view) {
+        Bitmap direct = extractTelegramBitmap(view);
+        if (direct != null && !direct.isRecycled()) {
+            return direct;
+        }
+        try {
+            Object outer = null;
+            for (Class<?> c = view.getClass(); c != null && c != Object.class && outer == null; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    String fName = f.getName();
+                    boolean looksOuter = fName.startsWith("this$")
+                            || f.getType().getName().contains("PhotoViewer");
+                    if (!looksOuter) continue;
+                    f.setAccessible(true);
+                    Object value = f.get(view);
+                    if (value != null && value.getClass().getName().contains("PhotoViewer")) {
+                        outer = value;
+                        break;
+                    }
+                }
+            }
+            if (outer == null) {
+                Log.i(TAG, "telegram viewer: no outer PhotoViewer found");
+                return null;
+            }
+            Bitmap best = null;
+            for (Class<?> c = outer.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (!f.getType().getName().contains("ImageReceiver")) continue;
+                    try {
+                        f.setAccessible(true);
+                        Bitmap b = extractBitmapFromReceiver(f.get(outer));
+                        if (b != null && !b.isRecycled()
+                                && (best == null || b.getWidth() * b.getHeight() > best.getWidth() * best.getHeight())) {
+                            best = b;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            return best;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "extractTelegramViewerBitmap failed", throwable);
+            return null;
+        }
+    }
+
+    /** Photo rectangle of a Telegram message cell, in cell-local coordinates. */
+    private static Rect telegramPhotoRect(View view) {
+        try {
+            Object receiver = findTelegramImageReceiver(view);
+            if (receiver == null) return null;
+            // ImageReceiver coordinates are float in current Telegram builds and
+            // int in older ones — read either, never assume.
+            float x = floatFieldOf(receiver, "imageX");
+            float y = floatFieldOf(receiver, "imageY");
+            float w = floatFieldOf(receiver, "imageW");
+            float h = floatFieldOf(receiver, "imageH");
+            if (w < 1f || h < 1f) return null;
+            return new Rect((int) x, (int) y, (int) (x + w), (int) (y + h));
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** Caption/text rectangle of a Telegram message cell, cell-local. */
+    private static Rect telegramTextRect(View view) {
+        float x = floatFieldOf(view, "textX");
+        float y = floatFieldOf(view, "textY");
+        float w = floatFieldOf(view, "textLayoutWidth");
+        float h = floatFieldOf(view, "textLayoutHeight");
+        if (w < 1f || h < 1f) {
+            return null;
+        }
+        return new Rect((int) x, (int) y, (int) (x + w), (int) (y + h));
+    }
+
+    private static Object findTelegramImageReceiver(View view) {
+        try {
+            for (Method m : view.getClass().getMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                String mName = m.getName().toLowerCase(Locale.US);
+                if (mName.equals("getimagereceiver") || mName.equals("getphotoimage")) {
+                    m.setAccessible(true);
+                    Object receiver = m.invoke(view);
+                    if (receiver != null) return receiver;
+                }
+            }
+            for (Class<?> c = view.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    String fName = f.getName().toLowerCase(Locale.US);
+                    if (fName.contains("photoimage") || fName.contains("imagereceiver")) {
+                        f.setAccessible(true);
+                        Object receiver = f.get(view);
+                        if (receiver != null) return receiver;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static int intFieldOf(Object target, String name) {
+        for (Class<?> c = target.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.getInt(target);
+            } catch (NoSuchFieldException ignored) {
+            } catch (Throwable ignored) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    /** True when the raw touch point falls inside {@code localRect} of {@code view}. */
+    private static boolean rectContainsLocalPoint(View view, Rect localRect, float rawX, float rawY) {
+        if (view == null || localRect == null) return false;
+        try {
+            int[] loc = new int[2];
+            view.getLocationOnScreen(loc);
+            float lx = rawX - loc[0] + view.getScrollX();
+            float ly = rawY - loc[1] + view.getScrollY();
+            return lx >= localRect.left - 8 && lx <= localRect.right + 8
+                    && ly >= localRect.top - 8 && ly <= localRect.bottom + 8;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static String extractTelegramText(View view) {
@@ -4115,26 +4380,50 @@ public final class Bridge {
     }
 
     private static Bitmap findNativeImageViewBitmap(View root, float rawX, float rawY) {
+        return findNativeImageViewBitmap(root, rawX, rawY, null);
+    }
+
+    /**
+     * @param nodeBounds when non-null, only native ImageViews that sit *inside*
+     *                   this screen rectangle and roughly match its aspect ratio
+     *                   are accepted. Without it a Compose page happily returns
+     *                   some background ImageView that merely happens to be
+     *                   behind the finger (that is how an empty-state panel got
+     *                   dragged instead of the comment photo).
+     */
+    private static Bitmap findNativeImageViewBitmap(View root, float rawX, float rawY, Rect nodeBounds) {
         if (root == null) return null;
         View windowRoot = root.getRootView();
         if (windowRoot == null) windowRoot = root;
         List<View> imageViews = new ArrayList<>();
         collectAllViews(windowRoot, imageViews);
 
+        float nodeAspect = nodeBounds == null ? 0f
+                : nodeBounds.width() / (float) Math.max(1, nodeBounds.height());
         Bitmap bestBmp = null;
         int maxArea = 0;
         for (View v : imageViews) {
             if (v instanceof ImageView || v.getClass().getName().contains("ImageView") || v.getClass().getName().contains("PhotoView")) {
+                int[] loc = new int[2];
+                v.getLocationOnScreen(loc);
+                Rect r = new Rect(loc[0], loc[1], loc[0] + v.getWidth(), loc[1] + v.getHeight());
+                if (nodeBounds != null) {
+                    if (!nodeBounds.contains(r) || r.width() < 32 || r.height() < 32) {
+                        continue;
+                    }
+                    float viewAspect = r.width() / (float) Math.max(1, r.height());
+                    if (viewAspect < nodeAspect * 0.7f || viewAspect > nodeAspect * 1.4f) {
+                        continue;
+                    }
+                }
                 Bitmap bmp = extractImageBitmap(v);
                 if (bmp != null && !bmp.isRecycled() && bmp.getWidth() > 100 && bmp.getHeight() > 100) {
-                    int area = bmp.getWidth() * bmp.getHeight();
-                    int[] loc = new int[2];
-                    v.getLocationOnScreen(loc);
-                    Rect r = new Rect(loc[0], loc[1], loc[0] + v.getWidth(), loc[1] + v.getHeight());
                     if (r.contains((int) rawX, (int) rawY)) {
-                        Log.i(TAG, "findNativeImageViewBitmap: hit under touch (" + bmp.getWidth() + "x" + bmp.getHeight() + ") " + v.getClass().getName());
+                        Log.i(TAG, "findNativeImageViewBitmap: hit under touch (" + bmp.getWidth() + "x" + bmp.getHeight() + ") " + v.getClass().getName()
+                                + (nodeBounds == null ? "" : " node=" + nodeBounds.toShortString()));
                         return bmp;
                     }
+                    int area = bmp.getWidth() * bmp.getHeight();
                     if (area > maxArea) {
                         maxArea = area;
                         bestBmp = bmp;
@@ -4146,6 +4435,42 @@ public final class Bridge {
             Log.i(TAG, "findNativeImageViewBitmap: picked largest candidate (" + bestBmp.getWidth() + "x" + bestBmp.getHeight() + ")");
         }
         return bestBmp;
+    }
+
+    /**
+     * Cheap "is there actually a picture here" check for bitmap payloads that
+     * came from a cropped render: a flat panel / solid background is rejected.
+     */
+    private static boolean bitmapHasContent(Bitmap bitmap) {
+        if (bitmap == null || bitmap.isRecycled()) return false;
+        try {
+            int w = bitmap.getWidth();
+            int h = bitmap.getHeight();
+            if (w < 16 || h < 16) return false;
+            int stepX = Math.max(1, w / 24);
+            int stepY = Math.max(1, h / 24);
+            long sum = 0, sumSq = 0;
+            int n = 0;
+            java.util.HashSet<Integer> colors = new java.util.HashSet<>();
+            for (int y = stepY / 2; y < h; y += stepY) {
+                for (int x = stepX / 2; x < w; x += stepX) {
+                    int c = bitmap.getPixel(x, y);
+                    int lum = ((c >> 16 & 0xff) * 30 + (c >> 8 & 0xff) * 59 + (c & 0xff) * 11) / 100;
+                    sum += lum;
+                    sumSq += (long) lum * lum;
+                    n++;
+                    if (colors.size() < 64) colors.add(c & 0x00f0f0f0);
+                }
+            }
+            if (n < 16) return true;
+            double mean = sum / (double) n;
+            double var = sumSq / (double) n - mean * mean;
+            double std = var <= 0 ? 0 : Math.sqrt(var);
+            Log.d(TAG, "bitmapHasContent std=" + (int) std + " colors=" + colors.size());
+            return std >= 6.0 || colors.size() >= 6;
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     private static Bitmap extractBitmapFromComposeSemantics(Object node) {
@@ -4374,13 +4699,47 @@ public final class Bridge {
             if (owner != null) {
                 Object rootNode = getComposeUnmergedRoot(owner);
                 if (rootNode != null) {
+                    // Bounds-space calibration. Semantics bounds are usually in the
+                    // hosting AndroidComposeView's local space, but for nested
+                    // compositions (LazyColumn inside a Dialog / second ComposeView)
+                    // they are root/window based instead. Testing both spaces
+                    // independently made a node 446px away look like an "exact hit"
+                    // while its distance said otherwise. Pick ONE space: whichever
+                    // one puts the finger inside the composition root, then use it
+                    // for containment, exactness and distance alike.
+                    Rect rootBounds = getComposeNodeBounds(rootNode);
+                    float touchX = localX;
+                    float touchY = localY;
+                    String space = "local";
+                    if (rootBounds != null
+                            && !rootBounds.contains((int) localX, (int) localY)
+                            && rootBounds.contains((int) rawX, (int) rawY)) {
+                        touchX = rawX;
+                        touchY = rawY;
+                        space = "raw";
+                    }
+                    Log.i(TAG, "compose xy raw=(" + (int) rawX + "," + (int) rawY + ")"
+                            + " loc=(" + loc[0] + "," + loc[1] + ")"
+                            + " local=(" + (int) localX + "," + (int) localY + ")"
+                            + " touch=(" + (int) touchX + "," + (int) touchY + ") space=" + space
+                            + " rootBounds=" + (rootBounds == null ? "null" : rootBounds.toShortString()));
+
                     List<ComposeSemanticsMatch> candidates = new ArrayList<>();
-                    collectComposeCandidates(rootNode, 0, localX, localY, rawX, rawY, viewWidth, viewHeight, candidates);
+                    collectComposeCandidates(rootNode, 0, touchX, touchY, touchX, touchY, viewWidth, viewHeight, candidates);
                     Log.i(TAG, "compose owner=" + owner.getClass().getName()
                             + " root=" + rootNode.getClass().getName()
                             + " candidates=" + candidates.size());
 
                     ComposeSemanticsMatch best = pickBestComposeMatch(candidates, viewWidth, viewHeight);
+                    if (best != null) {
+                        Log.i(TAG, "compose pick " + best.describe()
+                                + (best.hasText ? " text=«" + previewText(best.text) + "»" : ""));
+                    }
+                    for (int ci = 0; ci < candidates.size() && ci < 12; ci++) {
+                        ComposeSemanticsMatch cm = candidates.get(ci);
+                        Log.d(TAG, "  cand[" + ci + "] " + cm.describe()
+                                + (cm.hasText ? " «" + previewText(cm.text) + "»" : ""));
+                    }
                     if (best == null && wantBitmap) {
                         ComposeSemanticsMatch geom = pickBestEmptyImageCandidate(candidates, viewWidth, viewHeight);
                         if (geom != null && geom.bounds != null) {
@@ -4400,7 +4759,7 @@ public final class Bridge {
                             Log.i(TAG, "compose hit text=" + best.text.length() + " depth=" + best.depth);
                             return b;
                         }
-                        if (wantBitmap && best.isImageLike && best.bounds != null) {
+                        if (wantBitmap && (best.isImageLike || best.geometryImage) && best.bounds != null) {
                             Rect b = best.bounds;
                             int x = Math.max(0, b.left);
                             int y = Math.max(0, b.top);
@@ -4426,13 +4785,18 @@ public final class Bridge {
                                     }
 
                                     // 3. Try to find any native ImageView / PhotoView in the window hierarchy
-                                    Bitmap winBmp = findNativeImageViewBitmap(actualComposeView, rawX, rawY);
-                                    if (winBmp != null && !winBmp.isRecycled()) {
+                                    Rect nodeScreen = new Rect(loc[0] + x, loc[1] + y,
+                                            loc[0] + x + w, loc[1] + y + h);
+                                    Bitmap winBmp = findNativeImageViewBitmap(actualComposeView, rawX, rawY, nodeScreen);
+                                    if (winBmp != null && !winBmp.isRecycled() && bitmapHasContent(winBmp)) {
                                         Log.i(TAG, "compose hit window ImageView Bitmap " + winBmp.getWidth() + "x" + winBmp.getHeight());
                                         Bundle res = new Bundle();
                                         res.putParcelable("viewBitmap", toSoftwareBitmap(winBmp));
                                         res.putInt("catchType", 2);
                                         return res;
+                                    }
+                                    if (winBmp != null) {
+                                        Log.i(TAG, "compose window ImageView rejected (no content / outside node " + nodeScreen.toShortString() + ")");
                                     }
 
                                     // 4. Compose screenshot fallback with smart segmented trimming
@@ -4446,14 +4810,16 @@ public final class Bridge {
                                         Bitmap clean = trimLetterbox(crop);
                                         if (clean != null && !clean.isRecycled()) {
                                             float cleanAspect = clean.getWidth() / (float) Math.max(1, clean.getHeight());
-                                            if (cleanAspect >= 0.5f && cleanAspect <= 2.0f) {
+                                            if (cleanAspect >= 0.5f && cleanAspect <= 2.0f
+                                                    && bitmapHasContent(clean)) {
                                                 Bundle res = new Bundle();
                                                 res.putParcelable("viewBitmap", toSoftwareBitmap(clean));
                                                 res.putInt("catchType", 2);
                                                 Log.i(TAG, "compose hit image (screenshot fallback cropped) " + clean.getWidth() + "x" + clean.getHeight() + " depth=" + best.depth);
                                                 return res;
                                             } else {
-                                                Log.i(TAG, "compose screenshot cropped bitmap rejected by aspect ratio: " + cleanAspect);
+                                                Log.i(TAG, "compose cropped bitmap rejected (aspect=" + cleanAspect
+                                                        + " empty=" + !bitmapHasContent(clean) + ")");
                                             }
                                         }
                                     } else {
@@ -4476,6 +4842,19 @@ public final class Bridge {
                             b.putString("viewContent", rowText);
                             b.putInt("catchType", 1);
                             Log.i(TAG, "compose hit row subtree text=" + rowText.length());
+                            return b;
+                        }
+                    }
+                    // Finger in a gap between rows: take the single text node
+                    // closest to it instead of the whole visible list.
+                    if (wantText) {
+                        String nearest = nearestComposeText(rootNode, touchX, touchY, 140);
+                        if (!TextUtils.isEmpty(nearest) && isMeaningfulUserText(nearest)) {
+                            Bundle b = new Bundle();
+                            b.putString("viewContent", nearest);
+                            b.putInt("catchType", 1);
+                            Log.i(TAG, "compose hit nearest text=" + nearest.length()
+                                    + " «" + previewText(nearest) + "»");
                             return b;
                         }
                     }
@@ -4566,6 +4945,14 @@ public final class Bridge {
                 clean.recycle();
                 return null;
             }
+            if (!bitmapHasContent(clean)) {
+                // Cropping a flat region means we picked a background / empty
+                // state panel, not a picture. Refuse instead of dragging it.
+                Log.i(TAG, "compose image crop rejected: flat region source=" + source
+                        + " bounds=" + bounds.toShortString());
+                clean.recycle();
+                return null;
+            }
             Bundle result = new Bundle();
             result.putParcelable("viewBitmap", toSoftwareBitmap(clean));
             result.putInt("catchType", 2);
@@ -4578,6 +4965,15 @@ public final class Bridge {
         }
     }
 
+    /**
+     * Geometry-only image candidate, used when no semantics text / image-like
+     * node was found under the finger.
+     *
+     * This used to accept any childless-looking big rectangle, which meant a
+     * press in a gap cropped the whole comment list ("screenshot of the visible
+     * comments"). Now it must be a real leaf, close to the finger, and of
+     * picture-like size — a container is never an image.
+     */
     private static ComposeSemanticsMatch pickBestEmptyImageCandidate(List<ComposeSemanticsMatch> candidates,
                                                                      int viewWidth, int viewHeight) {
         if (candidates == null || candidates.isEmpty()) {
@@ -4589,8 +4985,17 @@ public final class Bridge {
             if (m == null || m.bounds == null || m.hasText || m.isImageLike) {
                 continue;
             }
+            if (m.childCount != 0) {
+                continue;
+            }
+            if (m.distance > 60) {
+                continue;
+            }
             float aspect = m.bounds.width() / (float) Math.max(1, m.bounds.height());
-            if (m.area < viewArea * 0.10f || aspect < 0.5f || aspect > 2.0f) {
+            if (aspect < 0.5f || aspect > 2.0f) {
+                continue;
+            }
+            if (m.area < viewArea * 0.02f || m.area > viewArea * 0.60f) {
                 continue;
             }
             if (best == null || m.area < best.area
@@ -5127,11 +5532,13 @@ public final class Bridge {
         }
         boolean exactHit = boundsContainExactTouch(bounds, localX, localY, rawX, rawY);
         Object config = getComposeConfig(node);
+        List<Object> children = getComposeChildren(node);
         ComposeSemanticsMatch match = buildComposeMatch(node, config, bounds, depth, exactHit, viewWidth, viewHeight);
         if (match != null) {
+            match.childCount = children == null ? 0 : children.size();
+            match.distance = rectDistance(bounds, localX, localY);
             candidates.add(match);
         }
-        List<Object> children = getComposeChildren(node);
         if (children != null) {
             for (Object child : children) {
                 collectComposeCandidates(child, depth + 1, localX, localY, rawX, rawY, viewWidth, viewHeight, candidates);
@@ -5437,6 +5844,15 @@ public final class Bridge {
             List<String> segments = new ArrayList<>();
             int[] visited = new int[]{0};
             collectSubtreeTextsInBounds(cand.node, cand.bounds, 0, visited, segments);
+            // A single comment row / chat bubble holds a handful of text lines.
+            // Twenty of them means we climbed to the list container and are about
+            // to drag "every comment on screen" — refuse that and let the nearest
+            // single text line be picked instead.
+            if (segments.size() > 6) {
+                Log.d(TAG, "compose row text refused: " + segments.size()
+                        + " segments under " + cand.bounds.toShortString() + " depth=" + cand.depth);
+                continue;
+            }
             if (!segments.isEmpty()) {
                 StringBuilder sb = new StringBuilder();
                 for (String seg : segments) {
@@ -5455,8 +5871,7 @@ public final class Bridge {
     }
 
     private static void collectSubtreeTextsInBounds(Object node, Rect rowBounds, int depth,
-                                                    int[] visited, List<String> out) {
-        if (node == null || depth > 24 || visited[0] > 128) return;
+                                                    int[] visited, List<String> out) {        if (node == null || depth > 24 || visited[0] > 128) return;
         visited[0]++;
         Rect nb = getComposeNodeBounds(node);
         if (nb != null && rowBounds != null && !Rect.intersects(nb, rowBounds)) {
@@ -5479,8 +5894,51 @@ public final class Bridge {
         }
     }
 
-    private static String getSemanticsKeyName(Object key) {
-        if (key == null) return null;
+    /**
+     * Last text resort for Compose pages: the text node physically closest to
+     * the finger, even when the finger sits in a gap between rows (such a point
+     * is inside no text node, so the normal candidate walk finds nothing and we
+     * used to drag the whole visible list instead).
+     */
+    private static String nearestComposeText(Object rootNode, float touchX, float touchY, int maxDistance) {
+        if (rootNode == null) return null;
+        Object[] best = new Object[]{null, null};   // {node, text}
+        int[] bestRank = new int[]{Integer.MAX_VALUE};
+        walkNearestText(rootNode, touchX, touchY, maxDistance, 0, new int[]{0}, best, bestRank);
+        return best[1] instanceof String ? (String) best[1] : null;
+    }
+
+    private static void walkNearestText(Object node, float touchX, float touchY, int maxDistance,
+                                        int depth, int[] visited, Object[] best, int[] bestRank) {
+        if (node == null || depth > 24 || visited[0] > 400) return;
+        visited[0]++;
+        Rect bounds = getComposeNodeBounds(node);
+        int distance = rectDistance(bounds, touchX, touchY);
+        if (distance <= maxDistance) {
+            Object config = getComposeConfig(node);
+            String[] textOut = new String[1];
+            boolean[] imgOut = new boolean[1];
+            extractFromSemanticsConfig(config, textOut, imgOut);
+            String attached = extractTextFromLayoutNodeAttached(node, config);
+            String text = pickLongerText(textOut[0], attached);
+            if (!TextUtils.isEmpty(text) && isMeaningfulUserText(text)) {
+                int rank = distance - Math.min(depth, 12);
+                if (rank < bestRank[0]) {
+                    bestRank[0] = rank;
+                    best[0] = node;
+                    best[1] = text;
+                }
+            }
+        }
+        List<Object> children = getComposeChildren(node);
+        if (children != null) {
+            for (Object child : children) {
+                walkNearestText(child, touchX, touchY, maxDistance, depth + 1, visited, best, bestRank);
+            }
+        }
+    }
+
+    private static String getSemanticsKeyName(Object key) {        if (key == null) return null;
         try {
             Method m = key.getClass().getMethod("getName");
             m.setAccessible(true);
@@ -5574,40 +6032,103 @@ public final class Bridge {
         return a.length() >= b.length() ? a : b;
     }
 
+    private static String previewText(String text) {
+        if (text == null) return "";
+        String flat = text.replace('\n', ' ').trim();
+        return flat.length() <= 48 ? flat : flat.substring(0, 48) + "…";
+    }
+
+    /**
+     * Picks the semantics node that owns the drag content.
+     *
+     * Order matters: text only wins when the finger is literally inside that
+     * text node. A comment row is a Compose subtree whose label ("点踩",
+     * "共3条回复") often sits inside the slop radius of the touch point, and
+     * letting it win unconditionally is what turned "long press the picture"
+     * into a 2-character text drag on Bilibili's comment section.
+     */
     private static ComposeSemanticsMatch pickBestComposeMatch(List<ComposeSemanticsMatch> candidates,
                                                              int viewWidth, int viewHeight) {
         if (candidates == null || candidates.isEmpty()) return null;
-        // Priority 1: Pick candidates with real meaningful text (strictly prefer exactHit over slop hit, then deepest / smallest)
-        ComposeSemanticsMatch bestText = null;
+        ComposeSemanticsMatch exactText = bestComposeText(candidates, true);
+        if (exactText != null) return exactText;
+        ComposeSemanticsMatch exactImage = bestComposeImage(candidates, true);
+        if (exactImage != null) return exactImage;
+        ComposeSemanticsMatch leafImage = bestComposeLeafImage(candidates, viewWidth, viewHeight);
+        if (leafImage != null) {
+            leafImage.geometryImage = true;
+            return leafImage;
+        }
+        ComposeSemanticsMatch slopText = bestComposeText(candidates, false);
+        if (slopText != null && slopText.distance <= MAX_TEXT_SLOP_PX) return slopText;
+        return bestComposeImage(candidates, false);
+    }
+
+    /**
+     * Merged semantics containers (a comment row with mergeDescendants) report
+     * the first child's text, so they must lose against a real text leaf that is
+     * only slightly farther away from the finger.
+     */
+    private static final int MERGED_NODE_PENALTY_PX = 48;
+
+    /** A text node farther than this from the finger is not "the text I pressed". */
+    private static final int MAX_TEXT_SLOP_PX = 120;
+
+    private static ComposeSemanticsMatch bestComposeText(List<ComposeSemanticsMatch> candidates, boolean exactOnly) {
+        ComposeSemanticsMatch best = null;
+        int bestRank = Integer.MAX_VALUE;
         for (ComposeSemanticsMatch m : candidates) {
-            if (m.hasText && isMeaningfulUserText(m.text)) {
-                if (bestText == null) {
-                    bestText = m;
-                } else if (m.exactHit != bestText.exactHit) {
-                    if (m.exactHit) bestText = m;
-                } else if (m.depth > bestText.depth
-                        || (m.depth == bestText.depth && m.area < bestText.area)) {
-                    bestText = m;
-                }
+            if (!m.hasText || !isMeaningfulUserText(m.text)) continue;
+            if (exactOnly && !m.exactHit) continue;
+            int rank = m.distance + (m.childCount == 0 ? 0 : MERGED_NODE_PENALTY_PX);
+            if (best == null || rank < bestRank
+                    || (rank == bestRank && m.depth > best.depth)
+                    || (rank == bestRank && m.depth == best.depth && m.area < best.area)) {
+                best = m;
+                bestRank = rank;
             }
         }
-        if (bestText != null) {
-            return bestText;
-        }
-        // Priority 2: Image-like candidates (prefer exactHit first)
-        for (int i = candidates.size() - 1; i >= 0; i--) {
-            ComposeSemanticsMatch m = candidates.get(i);
-            if (m.isImageLike && m.exactHit) {
-                return m;
+        return best;
+    }
+
+    private static ComposeSemanticsMatch bestComposeImage(List<ComposeSemanticsMatch> candidates, boolean exactOnly) {
+        ComposeSemanticsMatch best = null;
+        int bestRank = Integer.MAX_VALUE;
+        for (ComposeSemanticsMatch m : candidates) {
+            if (!m.isImageLike || m.bounds == null) continue;
+            if (exactOnly && !m.exactHit) continue;
+            int rank = m.distance + (m.childCount == 0 ? 0 : MERGED_NODE_PENALTY_PX / 2);
+            if (best == null || rank < bestRank
+                    || (rank == bestRank && m.area > best.area)) {
+                best = m;
+                bestRank = rank;
             }
         }
-        for (int i = candidates.size() - 1; i >= 0; i--) {
-            ComposeSemanticsMatch m = candidates.get(i);
-            if (m.isImageLike) {
-                return m;
+        return best;
+    }
+
+    /**
+     * A picture drawn with a Compose Painter has no text, no ContentDescription
+     * and no Role.Image — it only shows up as an empty leaf semantics node. Pick
+     * the smallest such leaf that the finger is inside, big enough to be a real
+     * image and small enough not to be a background.
+     */
+    private static ComposeSemanticsMatch bestComposeLeafImage(List<ComposeSemanticsMatch> candidates,
+                                                             int viewWidth, int viewHeight) {
+        int viewArea = Math.max(1, viewWidth * viewHeight);
+        ComposeSemanticsMatch best = null;
+        for (ComposeSemanticsMatch m : candidates) {
+            if (m.bounds == null || m.hasText || m.isImageLike || m.childCount != 0) continue;
+            if (!m.exactHit) continue;
+            float aspect = m.bounds.width() / (float) Math.max(1, m.bounds.height());
+            if (aspect < 0.5f || aspect > 2.0f) continue;
+            if (m.area < viewArea * 0.02f || m.area > viewArea * 0.60f) continue;
+            if (best == null || m.area < best.area
+                    || (m.area == best.area && m.depth > best.depth)) {
+                best = m;
             }
         }
-        return null;
+        return best;
     }
 
     private static int compareDirectSemanticsContent(ComposeSemanticsMatch a, ComposeSemanticsMatch b) {
@@ -5630,6 +6151,12 @@ public final class Bridge {
         final boolean exactHit;
         final int area;
         final Object node;
+        /** Children under this node in the semantics tree; 0 means a leaf. */
+        int childCount;
+        /** Pixels from the touch point to this node's bounds; 0 when inside. */
+        int distance;
+        /** Set when this node was picked purely by geometry (empty leaf block). */
+        boolean geometryImage;
 
         ComposeSemanticsMatch(Rect bounds, int depth, String text, boolean isImageLike, boolean isLink, boolean exactHit, Object node) {
             this.bounds = bounds;
@@ -5642,6 +6169,24 @@ public final class Bridge {
             this.area = bounds != null ? Math.max(0, bounds.width()) * Math.max(0, bounds.height()) : 0;
             this.node = node;
         }
+
+        String describe() {
+            return (bounds == null ? "null" : bounds.toShortString())
+                    + (exactHit ? " exact" : " slop")
+                    + (hasText ? " text=" + text.length() : "")
+                    + (isImageLike ? " imageLike" : "")
+                    + " leaf=" + (childCount == 0)
+                    + " d=" + distance
+                    + " depth=" + depth;
+        }
+    }
+
+    /** Distance in pixels from a point (ComposeView-local) to a rect; 0 inside. */
+    private static int rectDistance(Rect rect, float x, float y) {
+        if (rect == null) return Integer.MAX_VALUE / 4;
+        int dx = x < rect.left ? (int) (rect.left - x) : (x > rect.right ? (int) (x - rect.right) : 0);
+        int dy = y < rect.top ? (int) (rect.top - y) : (y > rect.bottom ? (int) (y - rect.bottom) : 0);
+        return (int) Math.sqrt((double) dx * dx + (double) dy * dy);
     }
 
     private static String accessibilityText(View view, PointF point) {
