@@ -19,6 +19,7 @@ anr.txt
 
 # Reverse engineering dumps & scratch binaries
 oppo/
+honor/
 xiaomi/
 .analysis/
 poc/
