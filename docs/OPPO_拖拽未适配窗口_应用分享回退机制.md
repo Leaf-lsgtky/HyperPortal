@@ -1247,6 +1247,110 @@ content://com.github.leaf.hyperportal.files/incoming/xxx; use startActivityAsCal
 `grantUriPermission` 天然合法；我们把面板放进 SystemUI、provider 留在 HyperPortal，
 形成"拖拽源 / provider / 启动者"三个 uid，system_server 无权代授，这才是一路踩坑的源头。
 
+### 6.6 微信聊天页：`_data` 的第二个、方向相反的需求
+
+现象：图片拖到微信聊天页发不出去（弹「发送失败」），文字拖进去正常；
+而「复制图片 → 微信输入框粘贴」能发。
+
+#### 6.6.1 先回答：ColorOS 没有「复制粘贴兜底」
+
+对 `com.oplus.contentportal`（17.4.2）与 `oplus-framework.jar` 做全量检索：
+
+| 产物 | 引用 `android.content.ClipboardManager` 的方法 | `setPrimaryClip` / `getPrimaryClip` 调用点 |
+| :--- | :--- | :--- |
+| `内容传送门_17.4.2.apk` | 2 个：`com.oplus.contentportal.aiunit.d.k`（AI 识别结果的复制）、`androidx.preference.Preference$f.onMenuItemClick`（系统库，复制偏好项文字） | 均不在拖拽路径上 |
+| `oplus-framework.jar`（含整套 `android.view.viewdrag.*`） | 0 | **0** |
+
+也就是说，ColorOS 的拖拽框架从头到尾**不碰剪贴板**。它把文件交给目标 App 的方式是：
+
+```
+IExSystemServiceFileUriHandler.getDragUriFromFile(ParcelFileDescriptor, String, String) → Uri
+```
+
+即由中转站服务进程把一个**真实可读的文件**包成拖拽 URI。目标 App 拿到后按普通
+MediaStore URI 处理即可，因为那条 URI 的 `_data` 本来就指向真实路径。
+
+**结论：没有「拖不动就自动转成复制、让用户去粘贴」这种机制**——系统也无法替别的
+App 触发粘贴。微信能粘不能拖，是微信自己两条链路实现不同，不是 ROM 兜底。
+
+#### 6.6.2 微信聊天页拖拽的真实链路
+
+入口在 `com.tencent.mm.ui.chatting.component.eb.run()`，它给三个 View 装上同一个
+`OnDragListener`（`com.tencent.mm.ui.chatting.component.db`）：
+
+```
+ListView.getParent()  /  ChatFooter  /  ChatFooter 的 EditText
+```
+
+`db.onDrag(View, DragEvent)` 的关键分支：
+
+| 阶段 | 行为 |
+| :--- | :--- |
+| `ACTION_DRAG_STARTED` | **无条件 `return true`**（所以不是 MIME 被拒） |
+| `ACTION_DROP` | 先 `DragAndDropPermissions.requestDragAndDropPermissions()`；`itemCount > 9` → `SelectNoSupportUI` |
+| 逐项 | `item.getUri() != null` → 构造 `com.tencent.mm.pluginsdk.ui.tools.m7`（`MicroMsg.UriFileHelper`） |
+| 解析失败 | `m7.b == 0` → `Log.e("…DragDropComponent", "get file path failed")`，**什么都不发** |
+| `item.getUri() == null` | 走 `getText()` 分支，把文字插进输入框 —— 这就是「文字能拖」 |
+
+`m7.<init>(Context, Uri)` 的判定（反编译原文逻辑）：
+
+```java
+type = resolver.getType(uri);                    // 非空才走 content:// 分支
+cursor = resolver.query(uri, null, null, null, null);   // ← 注意：projection 为 null
+idx = cursor.getColumnIndex("_data");
+if (idx == -1) { Log.e("getFilePath : columnIdx is -1, column with columnName = _data does not exist"); }
+else           { this.a = cursor.getString(idx); }      // a == 文件路径
+if (type != null && this.a != null) { if (type.contains("image")) this.b = 3; }
+```
+
+**`_data` 列不存在 → `m7.a == null` → `m7.b == 0` → 丢弃。**
+
+而 `m7.a == null` 时 `fb.y0(m7, talker)` 的第一件事就是弹
+`string/dbd`（`0x7f100df6`）= **「发送失败」**，然后 `return false`。
+
+#### 6.6.3 关键发现：`_data` 的值不需要可读
+
+`fb.y0()` 的拷贝逻辑自带 URI 兜底：
+
+```java
+long n = vfs.z6.d(m7.a, destDir, false);          // ① 按路径拷
+if (n <= 0) n = vfs.z6.d(m7.c.toString(), destDir, false);  // ② 失败则按 content:// URI 拷
+if (n <= 0) { toast("发送失败"); return false; }
+```
+
+`vfs.z6.d(String,String,boolean)` 在路径不可解析/不可读时返回 `-1`（`catch IOException`），
+**不会抛异常**。所以：**`_data` 只要非空即可**，第一段拷贝必然失败、第二段用 URI 走
+`ContentResolver` 读我们的 exported provider，成功。
+
+#### 6.6.4 修复规则：按 projection 区分两个反向需求
+
+| 调用方 | 查询方式 | 需要 | 我们的应答 |
+| :--- | :--- | :--- | :--- |
+| 微博「发送给好友」 | `query(uri, {"_data"}, …)` | **不能**有 `_data`（有就把 null 当路径） | 显式请求 `_data` → 不返回该列，只给 `_display_name` |
+| 微信聊天页 | `query(uri, null, …)` | **必须**有非空 `_data` | `projection == null` → 返回 `_data` = 私有缓存绝对路径 + `_display_name` + `_size` |
+
+`PortalFileProvider.query()` 因此变成：
+
+```java
+if (projection == null || projection.length == 0) {
+    cols = new String[]{DATA_COLUMN, OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
+} else {
+    // 过滤掉显式请求的 _data，保留其它列并补 _display_name
+}
+```
+
+实测（`adb shell content query`）：
+
+```
+# 无 projection
+Row: 0 _data=/data/user/0/com.github.leaf.hyperportal/cache/incoming/transfer_….png,
+       _display_name=transfer_….png, _size=934311
+# --projection _data
+Row: 0 _display_name=transfer_….png
+```
+
+这条规则同时适用于 QQ、钉钉等共用腾讯 `UriFileHelper` 系解析器的目标。
+
 ## 7. 一句话总结
 
 OPPO 并不是“检测到 App 没适配拖拽”后去查一个适配表，而是：

@@ -41,6 +41,7 @@ public class PortalFileProvider extends ContentProvider {
     public static final String AUTHORITY = "com.github.leaf.hyperportal.files";
     public static final String INCOMING = "incoming";
     private static final String TAG_Q = "PortalFileProvider";
+    private static final String DATA_COLUMN = "_data";
 
     private static volatile boolean sSystemUiActive = false;
 
@@ -314,23 +315,33 @@ public class PortalFileProvider extends ContentProvider {
             return null;
         }
 
-        // Some targets (e.g. Weibo's "发送给好友" →
-        // com.sina.weibo.weiyou.utils.ah.a(Context, Uri)) resolve a content:// URI by
-        // looking for a "_data" column and then opening that path with new File(path).
-        // Our staged file lives in the app-private cacheDir, so every path we could
-        // hand out is unreadable for the receiving app, which makes the upload read
-        // zero bytes.  Those same targets DO have a correct fallback: when the cursor
-        // exposes no "_data" column at all they copy the stream through
-        // openFileDescriptor() into their own cache and send from there.
-        // Therefore: never expose "_data" (not even when explicitly projected), and
-        // always serve DISPLAY_NAME so that fallback can derive a file name.
+        // Two opposite requirements from real drop targets, both verified on-device.
+        //
+        //  * Weibo "发送给好友" (com.sina.weibo.weiyou.utils.ah.a(Context, Uri))
+        //    projects exactly {"_data"} and, when that column exists, returns its
+        //    value verbatim as the upload path. Every path we can hand out lives in
+        //    the app-private cacheDir and is unreadable for the receiving uid, so the
+        //    upload reads zero bytes. When the column is absent it falls back to
+        //    openFileDescriptor() and copies the stream into its own cache.
+        //
+        //  * WeChat's chat-page drop target (com.tencent.mm.ui.chatting.component.db
+        //    .onDrag → com.tencent.mm.pluginsdk.ui.tools.m7, "MicroMsg.UriFileHelper")
+        //    queries with a null projection and gives up with a "发送失败" toast as
+        //    soon as getColumnIndex("_data") == -1. It only uses the value to derive
+        //    the file name and for a first copy attempt; when that copy yields <= 0
+        //    bytes it retries with the content:// URI itself, which our exported
+        //    provider serves fine. So the value never has to be readable.
+        //
+        // The two callers are distinguishable by projection: only Weibo asks for
+        // "_data" explicitly, WeChat asks for every column. Serve "_data" for a null
+        // projection, keep hiding it from an explicit "_data" request.
         String[] cols;
         if (projection == null || projection.length == 0) {
-            cols = new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
+            cols = new String[]{DATA_COLUMN, OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
         } else {
             java.util.LinkedHashSet<String> wanted = new java.util.LinkedHashSet<>();
             for (String col : projection) {
-                if (col == null || "_data".equals(col)) continue;
+                if (col == null || DATA_COLUMN.equals(col)) continue;
                 wanted.add(col);
             }
             wanted.add(OpenableColumns.DISPLAY_NAME);
@@ -345,7 +356,13 @@ public class PortalFileProvider extends ContentProvider {
         MatrixCursor cursor = new MatrixCursor(cols);
         MatrixCursor.RowBuilder row = cursor.newRow();
         for (String col : cols) {
-            if (OpenableColumns.DISPLAY_NAME.equals(col)) {
+            if (DATA_COLUMN.equals(col)) {
+                // Deliberately the app-private path: unreadable on purpose so that
+                // targets which *can* fall back to the stream always take that
+                // branch, while targets that only need a non-null value (WeChat)
+                // still work. See the comment above.
+                row.add(file.getAbsolutePath());
+            } else if (OpenableColumns.DISPLAY_NAME.equals(col)) {
                 row.add(name);
             } else if (OpenableColumns.SIZE.equals(col)) {
                 row.add(file.length());
