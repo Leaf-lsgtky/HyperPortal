@@ -174,6 +174,17 @@ All build and deployment tasks are unified under `tools/`:
   - `updateSystemShadow(boolean inHotZone)`: ColorOS card morphing animation.
   - `notifyPortalDragState(Context ctx, int state, float y)`: Continuous motion IPC dispatch.
   - `root.setOnDragListener(...)`: Window-level drag event handling and cancel fly-back trigger.
+  - **Animated payloads must never be rasterised.** Staging a PNG of the first frame is what
+    made "drag an animated image, save an animated image" fail — the staged file is copied
+    verbatim by share / gallery save / clipboard / the dock. `sniffMime()` reads magic bytes
+    first (`GIF87a`, `GIF89a`, `RIFF…WEBP`, plus QQ's mangled `GHF99\`` sticker header which
+    `copyPfdToPortal()` repairs in-flight), and `preferPngForGif` only applies when the
+    descriptor is not genuinely animated. The bitmap stays the drag shadow only.
+  - **Source apps that hide the file behind a view** (QQ's `com.tencent.image.URLDrawable`)
+    go through `attachAnimatedSource()` / `findAnimatedFile()`: a bounded reflective walk
+    (depth 4, 400 nodes) probing `getURL`/`getSrcUrl`/… and any reachable `File`/`Uri` for a
+    real animated file. `URLDrawable.getURL()` returns `java.net.URL`, **not** `String`, and
+    its `toString()` is `file:/storage/...` with a single slash.
 - **`PortalService.java`**:
   - `GlowView`: Custom AGSL RuntimeShader view rendering ColorOS Aurora glow.
   - `setPhase1Progress(float progress)`: Glow intensity ramp (Phase 1).
