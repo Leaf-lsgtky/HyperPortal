@@ -966,6 +966,7 @@ public final class Bridge {
             }
             Bundle result = extractContentColorOS(view, flags);
             if (result != null && isBundleMeaningful(result)) {
+                attachAnimatedSource(view, result);
                 Log.d(TAG, "preExtract hit type=" + result.getInt("catchType", 0)
                         + " view=" + view.getClass().getName());
                 return result;
@@ -5340,6 +5341,224 @@ public final class Bridge {
                 && (head[20] & 0x02) != 0;           // VP8X flags: ANIMATION
     }
 
+    // ---- Finding the animated original behind a view ------------------------------
+    // QQ's gallery/sticker pages use com.tencent.image.URLImageView: the source file
+    // lives inside a URLDrawable, so getDrawable() only ever yields the decoded bitmap
+    // and the extractor reports file=null / uri=null / cache=null. Walk the view's
+    // object graph (bounded) looking for a File or path that is really an animated
+    // image, then hand it to the normal staging path.
+    private static boolean isAnimatedHead(byte[] head) {
+        if (head == null || head.length < 6) {
+            return false;
+        }
+        if (head[0] == 0x47 && head[1] == 0x49 && head[2] == 0x46) {
+            return true;                                   // GIF87a / GIF89a
+        }
+        if (isMangledGif(head, head.length)) {
+            return true;                                   // QQ sticker GIF
+        }
+        return head.length >= 21
+                && head[0] == 0x52 && head[1] == 0x49 && head[2] == 0x46 && head[3] == 0x46
+                && head[8] == 0x57 && head[9] == 0x45 && head[10] == 0x42 && head[11] == 0x50
+                && head[12] == 0x56 && head[13] == 0x50 && head[14] == 0x38 && head[15] == 0x58
+                && (head[20] & 0x02) != 0;                 // animated WebP
+    }
+
+    private static byte[] readHeadFile(java.io.File file) {
+        java.io.FileInputStream in = null;
+        try {
+            in = new java.io.FileInputStream(file);
+            byte[] buf = new byte[24];
+            int read = 0;
+            while (read < buf.length) {
+                int n = in.read(buf, read, buf.length - read);
+                if (n <= 0) {
+                    break;
+                }
+                read += n;
+            }
+            return read >= 6 ? buf : null;
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            try {
+                if (in != null) {
+                    in.close();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static boolean isAnimatedFile(java.io.File file) {
+        if (file == null) {
+            return false;
+        }
+        try {
+            return file.isFile() && file.length() > 32 && isAnimatedHead(readHeadFile(file));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static java.io.File fileFromString(String value) {
+        if (TextUtils.isEmpty(value) || value.length() > 512) {
+            return null;
+        }
+        try {
+            String path = value;
+            if (path.startsWith("file://")) {
+                path = path.substring(7);
+            }
+            if (!path.startsWith("/")) {
+                return null;
+            }
+            int query = path.indexOf('?');
+            if (query > 0) {
+                path = path.substring(0, query);
+            }
+            return new java.io.File(path);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Only probe where an animated original plausibly exists: QQ's URLDrawable-backed
+     * views. Everything else keeps the old, cheap extraction path.
+     */
+    private static boolean shouldProbeAnimated(View view) {
+        if (!(view instanceof ImageView)) {
+            return false;
+        }
+        try {
+            android.graphics.drawable.Drawable drawable = ((ImageView) view).getDrawable();
+            if (drawable == null) {
+                return false;
+            }
+            if (drawable.getClass().getName().contains("tencent.image")) {
+                return true;
+            }
+            Context ctx = view.getContext();
+            String pkg = ctx == null ? null : ctx.getPackageName();
+            return "com.tencent.mobileqq".equals(pkg) || "com.tencent.mm".equals(pkg);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static java.io.File findAnimatedFile(View root) {
+        if (root == null) {
+            return null;
+        }
+        java.util.IdentityHashMap<Object, Boolean> seen = new java.util.IdentityHashMap<>();
+        java.util.ArrayDeque<Object> queue = new java.util.ArrayDeque<>();
+        java.util.ArrayDeque<Integer> depths = new java.util.ArrayDeque<>();
+        queue.add(root);
+        depths.add(0);
+        int budget = 400;
+        while (!queue.isEmpty() && budget-- > 0) {
+            Object node = queue.poll();
+            Integer depthBox = depths.poll();
+            int depth = depthBox == null ? 0 : depthBox;
+            if (node == null || seen.put(node, Boolean.TRUE) != null) {
+                continue;
+            }
+            if (node instanceof java.io.File) {
+                if (isAnimatedFile((java.io.File) node)) {
+                    return (java.io.File) node;
+                }
+                continue;
+            }
+            if (node instanceof String) {
+                java.io.File candidate = fileFromString((String) node);
+                if (isAnimatedFile(candidate)) {
+                    return candidate;
+                }
+                continue;
+            }
+            if (node instanceof Uri) {
+                java.io.File candidate = fileFromString(((Uri) node).toString());
+                if (isAnimatedFile(candidate)) {
+                    return candidate;
+                }
+                continue;
+            }
+            if (depth >= 4) {
+                continue;
+            }
+            Class<?> type = node.getClass();
+            String typeName = type.getName();
+            if (typeName.startsWith("java.") || typeName.startsWith("android.graphics.Bitmap")) {
+                continue;
+            }
+            // URLDrawable keeps its source in mUrl / mParams rather than in a File.
+            String[] accessors = {"getUrl", "getSrcUrl", "getFilePath", "getLocalPath", "getImagePath"};
+            for (String accessor : accessors) {
+                try {
+                    Object value = type.getMethod(accessor).invoke(node);
+                    if (value != null) {
+                        queue.add(value);
+                        depths.add(depth + 1);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            Class<?> cursor = type;
+            int levels = 0;
+            while (cursor != null && cursor != Object.class && levels++ < 6) {
+                java.lang.reflect.Field[] fields;
+                try {
+                    fields = cursor.getDeclaredFields();
+                } catch (Throwable throwable) {
+                    break;
+                }
+                for (java.lang.reflect.Field field : fields) {
+                    try {
+                        field.setAccessible(true);
+                        Object value = field.get(node);
+                        if (value != null) {
+                            queue.add(value);
+                            depths.add(depth + 1);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                cursor = cursor.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Called from preExtract() when the normal extractor produced only a bitmap.
+     * Records the real animated file so forwardToPortal() can stage the original
+     * bytes instead of a PNG of the first frame.
+     */
+    private static void attachAnimatedSource(View view, Bundle result) {
+        try {
+            if (view == null || result == null) {
+                return;
+            }
+            if (!TextUtils.isEmpty(result.getString("fileName"))) {
+                return;
+            }
+            if (!shouldProbeAnimated(view)) {
+                return;
+            }
+            java.io.File file = findAnimatedFile(view);
+            if (file == null) {
+                return;
+            }
+            result.putString("animatedSourcePath", file.getAbsolutePath());
+            result.putString("mimeType", "image/gif");
+            Log.i(TAG, "attachAnimatedSource " + file.getAbsolutePath()
+                    + " " + file.length() + " bytes");
+        } catch (Throwable throwable) {
+            Log.w(TAG, "attachAnimatedSource failed", throwable);
+        }
+    }
+
     private static String copyPfdToPortal(Context context, ParcelFileDescriptor pfd, Bundle payload) {
         if (context == null || pfd == null) {
             return null;
@@ -5872,6 +6091,31 @@ public final class Bridge {
             if (imageCacheName == null && imageContentUri == null
                     && filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
                 imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+            }
+            String animatedPath = payload.getString("animatedSourcePath");
+            if (imageCacheName == null && imageContentUri == null
+                    && !TextUtils.isEmpty(animatedPath)) {
+                // The extractor only had a bitmap, but preExtract() located the real
+                // animated file behind the view. Stage those bytes; the bitmap stays
+                // as the drag shadow.
+                ParcelFileDescriptor animatedPfd = null;
+                try {
+                    animatedPfd = ParcelFileDescriptor.open(
+                            new java.io.File(animatedPath), ParcelFileDescriptor.MODE_READ_ONLY);
+                    imageCacheName = copyPfdToPortal(context, animatedPfd, payload);
+                    if (imageCacheName != null) {
+                        imageMimeType = "image/gif";
+                    }
+                } catch (Throwable throwable) {
+                    Log.w(TAG, "stage animated source failed: " + animatedPath, throwable);
+                } finally {
+                    try {
+                        if (animatedPfd != null) {
+                            animatedPfd.close();
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
             if (imageCacheName == null && imageContentUri == null && dragBitmap != null) {
                 // Stage full-resolution bitmap into PortalFileProvider as lossless PNG
