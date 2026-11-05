@@ -327,10 +327,11 @@ public class PortalFileProvider extends ContentProvider {
         //  * WeChat's chat-page drop target (com.tencent.mm.ui.chatting.component.db
         //    .onDrag → com.tencent.mm.pluginsdk.ui.tools.m7, "MicroMsg.UriFileHelper")
         //    queries with a null projection and gives up with a "发送失败" toast as
-        //    soon as getColumnIndex("_data") == -1. It only uses the value to derive
-        //    the file name and for a first copy attempt; when that copy yields <= 0
-        //    bytes it retries with the content:// URI itself, which our exported
-        //    provider serves fine. So the value never has to be readable.
+        //    soon as getColumnIndex("_data") == -1. Everything it does with the value
+        //    afterwards goes through WeChat's own VFS (com.tencent.mm.vfs.c8 / z6),
+        //    which parses "scheme://authority/path" and serves the "content" scheme
+        //    through the ContentResolver. Handing it the URI string therefore keeps
+        //    the whole path-based flow working without any world-readable file.
         //
         // The two callers are distinguishable by projection: only Weibo asks for
         // "_data" explicitly, WeChat asks for every column. Serve "_data" for a null
@@ -357,11 +358,12 @@ public class PortalFileProvider extends ContentProvider {
         MatrixCursor.RowBuilder row = cursor.newRow();
         for (String col : cols) {
             if (DATA_COLUMN.equals(col)) {
-                // Deliberately the app-private path: unreadable on purpose so that
-                // targets which *can* fall back to the stream always take that
-                // branch, while targets that only need a non-null value (WeChat)
-                // still work. See the comment above.
-                row.add(file.getAbsolutePath());
+                // Not a filesystem path on purpose: we have none that the receiving
+                // app can read. WeChat pipes this value through its own VFS
+                // (com.tencent.mm.vfs.c8), which parses "scheme://authority/path"
+                // and falls back to the ContentResolver for the "content" scheme -
+                // the same mechanism fb.y0() uses when it retries with m7.c.
+                row.add(uri.toString());
             } else if (OpenableColumns.DISPLAY_NAME.equals(col)) {
                 row.add(name);
             } else if (OpenableColumns.SIZE.equals(col)) {

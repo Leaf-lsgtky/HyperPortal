@@ -1299,35 +1299,62 @@ type = resolver.getType(uri);                    // 非空才走 content:// 分�
 cursor = resolver.query(uri, null, null, null, null);   // ← 注意：projection 为 null
 idx = cursor.getColumnIndex("_data");
 if (idx == -1) { Log.e("getFilePath : columnIdx is -1, column with columnName = _data does not exist"); }
-else           { this.a = cursor.getString(idx); }      // a == 文件路径
+else           { this.a = cursor.getString(idx); }      // a == VFS 源串（路径或 content://）
 if (type != null && this.a != null) { if (type.contains("image")) this.b = 3; }
 ```
 
 **`_data` 列不存在 → `m7.a == null` → `m7.b == 0` → 丢弃。**
 
-而 `m7.a == null` 时 `fb.y0(m7, talker)` 的第一件事就是弹
-`string/dbd`（`0x7f100df6`）= **「发送失败」**，然后 `return false`。
+#### 6.6.3 关键发现：`_data` 里必须放 **URI 本身**，不是路径
 
-#### 6.6.3 关键发现：`_data` 的值不需要可读
+第一版把 `_data` 填成私有缓存绝对路径（`/data/user/0/…/cache/incoming/x.png`），
+结果：**微信查到了，但一个字节都没读**。
 
-`fb.y0()` 的拷贝逻辑自带 URI 兜底：
-
-```java
-long n = vfs.z6.d(m7.a, destDir, false);          // ① 按路径拷
-if (n <= 0) n = vfs.z6.d(m7.c.toString(), destDir, false);  // ② 失败则按 content:// URI 拷
-if (n <= 0) { toast("发送失败"); return false; }
+```
+12:24:48.338 I/PortalFileProvider: query caller=com.tencent.mm(10346) projection=null
+                                  served=[_data, _display_name, _size] size=142023
+（此后 14 次拖拽，全程没有任何 openFile caller=com.tencent.mm）
 ```
 
-`vfs.z6.d(String,String,boolean)` 在路径不可解析/不可读时返回 `-1`（`catch IOException`），
-**不会抛异常**。所以：**`_data` 只要非空即可**，第一段拷贝必然失败、第二段用 URI 走
-`ContentResolver` 读我们的 exported provider，成功。
+也就是说 `fb.y0()` 那段"路径失败就用 URI 重试"的兜底**根本没有被执行**。
+`db.onDrag` 里真正走的是另一条分支：
+
+```
+label_032f → b == 3 → hm.v0(flag, 0, 0, "", m7.a)   // 直接按 m7.a 发送
+```
+
+它把 `m7.a` 当成 VFS 源串交给发送任务，没有二次兜底。
+
+但微信的 VFS 是**统一抽象**的：`com.tencent.mm.vfs.c8.a(String)` 会解析
+`scheme://authority/path`——
+
+```
+"content://com.github.leaf.hyperportal.files/incoming/x.png"
+  → scheme="content", authority="com.github.leaf.hyperportal.files", path="/incoming/x.png"
+```
+
+然后 `f3` 按 scheme 找后端，`content` 走 `ContentResolver`。`fb.y0` 自己用
+`m7.c.toString()` 重试，也正说明 VFS 吃 `content://` 字符串。
+
+**所以 `_data` 应该填 URI 字符串**：`z6.k()` 能拿到真实大小、`z6.q()/z6.n()` 能拿到
+文件名和扩展名、发送时 `c8.a()` 解析成 content 后端走 `ContentResolver` —— 整条
+"按路径"链路在没有任何全局可读文件的情况下就能跑通。
+
+改完后同一操作的日志：
+
+```
+12:31:58.099 I/PortalFileProvider: openFile caller=com.tencent.mm(10346) mode=r isFile=true
+12:31:58.115 I/PortalFileProvider: openFile caller=com.tencent.mm(10346) mode=r isFile=true
+```
+
+微信开始真正读流，图片正常发出。
 
 #### 6.6.4 修复规则：按 projection 区分两个反向需求
 
 | 调用方 | 查询方式 | 需要 | 我们的应答 |
 | :--- | :--- | :--- | :--- |
 | 微博「发送给好友」 | `query(uri, {"_data"}, …)` | **不能**有 `_data`（有就把 null 当路径） | 显式请求 `_data` → 不返回该列，只给 `_display_name` |
-| 微信聊天页 | `query(uri, null, …)` | **必须**有非空 `_data` | `projection == null` → 返回 `_data` = 私有缓存绝对路径 + `_display_name` + `_size` |
+| 微信聊天页 | `query(uri, null, …)` | **必须**有非空 `_data`，且值要能被 VFS 解析 | `projection == null` → 返回 `_data` = **`uri.toString()`** + `_display_name` + `_size` |
 
 `PortalFileProvider.query()` 因此变成：
 
@@ -1337,14 +1364,22 @@ if (projection == null || projection.length == 0) {
 } else {
     // 过滤掉显式请求的 _data，保留其它列并补 _display_name
 }
+// 行数据：_data → uri.toString()
 ```
+
+> 顺带排除的两条错误思路：
+> - `/sdcard/Android/media/<pkg>/.nomedia/` 放文件 —— 加了 `.nomedia` 就不进
+>   MediaStore，目标 App 反而读不到；不加就进相册。两头堵死。
+> - 用 `su <uid>` 去探测"某 App 能不能读某路径" —— **不可靠**。实测连微信读自己的
+>   `/sdcard/Android/data/com.tencent.mm` 都报 Permission denied，因为 SELinux 上下文
+>   仍是 `u:r:ksu:s0` 而不是 `untrusted_app`。判断可读性只能看目标 App 的真实行为日志。
 
 实测（`adb shell content query`）：
 
 ```
 # 无 projection
-Row: 0 _data=/data/user/0/com.github.leaf.hyperportal/cache/incoming/transfer_….png,
-       _display_name=transfer_….png, _size=934311
+Row: 0 _data=content://com.github.leaf.hyperportal.files/incoming/transfer_….png,
+       _display_name=transfer_….png, _size=142023
 # --projection _data
 Row: 0 _display_name=transfer_….png
 ```
