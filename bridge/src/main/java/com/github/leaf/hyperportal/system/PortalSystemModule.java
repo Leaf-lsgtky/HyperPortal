@@ -564,7 +564,8 @@ public final class PortalSystemModule {
                     }
                 } else {
                     sTaskSurface = null;
-                    log(Log.WARN, TAG, "our drag started but no valid fullscreen task found");
+                    log(Log.WARN, TAG, "our drag started but no valid fullscreen task found"
+                            + " tilt=" + sTiltAllowed + " source=" + sDragSourcePackage);
                 }
 
                 notifyPortalState(1, 0f, 0f);
@@ -579,24 +580,81 @@ public final class PortalSystemModule {
         return chain.proceed();
     }
 
+    /**
+     * Looks a WindowState up by the client IWindow binder.
+     *
+     * WindowManagerService.windowForClient(Session, IWindow) additionally requires
+     * the exact Session instance, and callers here have no Session to pass, so it
+     * always answers null. mWindowMap is keyed by the client binder, which we do
+     * have.
+     */
+    private static Object findWindowState(Object wms, Object windowArg) {
+        if (wms == null || windowArg == null) {
+            return null;
+        }
+        try {
+            Object mapObject = getField(wms, "mWindowMap");
+            if (!(mapObject instanceof Map)) {
+                return null;
+            }
+            Object binder = null;
+            if (windowArg instanceof android.os.IInterface) {
+                binder = ((android.os.IInterface) windowArg).asBinder();
+            } else if (windowArg instanceof android.os.IBinder) {
+                binder = windowArg;
+            }
+            if (binder == null) {
+                return null;
+            }
+            Object direct = ((Map<?, ?>) mapObject).get(binder);
+            if (direct != null) {
+                return direct;
+            }
+            // A client Binder and the BinderProxy the service holds for it are not
+            // interchangeable as HashMap keys on every release, so fall back to a
+            // linear scan over the (small) window map.
+            for (Object value : ((Map<?, ?>) mapObject).values()) {
+                Object client = getField(value, "mClient");
+                if (client == null) {
+                    continue;
+                }
+                Object clientBinder = client instanceof android.os.IInterface
+                        ? ((android.os.IInterface) client).asBinder() : client;
+                if (clientBinder == null) {
+                    continue;
+                }
+                if (clientBinder == binder || clientBinder.equals(binder) || binder.equals(clientBinder)) {
+                    return value;
+                }
+            }
+            return null;
+        } catch (Throwable throwable) {
+            log(Log.DEBUG, TAG, "findWindowState failed: " + throwable);
+            return null;
+        }
+    }
+
     private static String resolveDragSourcePackage(Object wms, Object windowArg) {
         if (wms == null || windowArg == null) {
             return null;
         }
         try {
-            Method windowForClient = null;
-            for (Method method : wms.getClass().getDeclaredMethods()) {
-                if ("windowForClient".equals(method.getName())
-                        && method.getParameterTypes().length == 2) {
-                    windowForClient = method;
-                    break;
+            Object callingWin = findWindowState(wms, windowArg);
+            if (callingWin == null) {
+                Method windowForClient = null;
+                for (Method method : wms.getClass().getDeclaredMethods()) {
+                    if ("windowForClient".equals(method.getName())
+                            && method.getParameterTypes().length == 2) {
+                        windowForClient = method;
+                        break;
+                    }
                 }
+                if (windowForClient == null) {
+                    return null;
+                }
+                windowForClient.setAccessible(true);
+                callingWin = windowForClient.invoke(wms, null, windowArg);
             }
-            if (windowForClient == null) {
-                return null;
-            }
-            windowForClient.setAccessible(true);
-            Object callingWin = windowForClient.invoke(wms, null, windowArg);
             if (callingWin == null) {
                 return null;
             }
@@ -629,11 +687,14 @@ public final class PortalSystemModule {
         // 1. Try finding calling window's task from IWindow
         if (windowArg != null && wms != null) {
             try {
-                Method windowForClient = wms.getClass().getDeclaredMethod("windowForClient",
-                        Class.forName("com.android.server.wm.Session"),
-                        Class.forName("android.view.IWindow"));
-                windowForClient.setAccessible(true);
-                Object callingWin = windowForClient.invoke(wms, null, windowArg);
+                Object callingWin = findWindowState(wms, windowArg);
+                if (callingWin == null) {
+                    Method windowForClient = wms.getClass().getDeclaredMethod("windowForClient",
+                            Class.forName("com.android.server.wm.Session"),
+                            Class.forName("android.view.IWindow"));
+                    windowForClient.setAccessible(true);
+                    callingWin = windowForClient.invoke(wms, null, windowArg);
+                }
                 if (callingWin != null) {
                     Object task = invoke(callingWin, "getTask");
                     if (task != null) {
