@@ -15,6 +15,7 @@ import android.provider.OpenableColumns;
 import android.util.Log;
 
 import com.github.leaf.hyperportal.data.HyperPortalPreferences;
+import com.github.leaf.hyperportal.data.PortalStatusStore;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -53,6 +54,7 @@ public class PortalFileProvider extends ContentProvider {
     public Bundle call(String method, String arg, Bundle extras) {
         if ("reportSystemUiActive".equals(method)) {
             sSystemUiActive = true;
+            PortalStatusStore.INSTANCE.recordSystemUiActive(getContext());
             return new Bundle();
         }
         if ("grantDragPermissions".equals(method)) {
@@ -70,6 +72,14 @@ public class PortalFileProvider extends ContentProvider {
         if ("getConfig".equals(method)) {
             Context ctx = getContext();
             if (ctx == null) return null;
+            // This call *is* the AES handshake: Bridge.ensureConfig() is the only thing in a
+            // target app that ever asks for the config, and it does so on a 5s throttle for as
+            // long as the user keeps touching that app. Recording the caller's uid here is what
+            // lets the home page say which app the bridge is live in, and when it last spoke.
+            int callerUid = android.os.Binder.getCallingUid();
+            if (callerUid != android.os.Process.myUid()) {
+                PortalStatusStore.INSTANCE.recordAesHandshake(ctx, callerUid);
+            }
             HyperPortalPreferences.Config cfg = HyperPortalPreferences.INSTANCE.getConfig(ctx);
             Bundle bundle = new Bundle();
             bundle.putBoolean("master_switch", cfg.getMasterSwitch());
