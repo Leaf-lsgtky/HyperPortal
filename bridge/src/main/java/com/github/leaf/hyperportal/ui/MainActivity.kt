@@ -13,6 +13,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -81,6 +82,12 @@ private fun HyperPortalMainScreen(resumeKey: Int) {
         }
     }
 
+    // 一页一个布尔，而不是一个大家共用的计数器：首页据此在自己成为当前页时重新检查。
+    // derivedStateOf 是关键 —— 直接在页面里读 pagerState.currentPage 会让两页都订阅每一次
+    // 翻页；在这里比较、只发布结果，页面就只在「自己这一页的答案变了」时被唤醒。
+    val onHomePage = remember { derivedStateOf { pagerState.currentPage == 0 } }
+    val isHomeCurrent: () -> Boolean = remember(onHomePage) { { onHomePage.value } }
+
     val surfaceColor = MiuixTheme.colorScheme.surface
     val backdrop = rememberMiuixBlurBackdrop()
 
@@ -129,7 +136,12 @@ private fun HyperPortalMainScreen(resumeKey: Int) {
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 when (page) {
-                    0 -> HomePage(bottomPadding = navBarHeight, resumeKey = resumeKey)
+                    0 -> HomePage(
+                        bottomPadding = navBarHeight,
+                        resumeKey = resumeKey,
+                        isCurrent = isHomeCurrent,
+                    )
+
                     else -> SettingsPage(bottomPadding = navBarHeight)
                 }
             }

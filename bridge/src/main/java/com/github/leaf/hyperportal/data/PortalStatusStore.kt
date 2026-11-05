@@ -29,14 +29,32 @@ object PortalStatusStore {
     private const val KEY_AES_ENTRIES = "aes_entries"
     private const val KEY_SYSTEMUI_AT = "systemui_at"
 
-    /** 记多少个不同的包。握手是按包去重的，这里只是防止无限增长。 */
-    private const val MAX_AES_ENTRIES = 8
+    /**
+     * 记多少个不同的包。握手是按包去重的，这里只是防止无限增长。
+     *
+     * 比「首页要显示的个数」宽得多，是因为一次 ACTION_CONFIG_CHANGED 广播会让**每一个**装着
+     * AES 桥的 App 同时来问配置（它们都注册了那个广播），一秒之内就能刷出十几条；上限设成刚
+     * 好够显示，那一波就会把之前真正单独握过手的记录挤掉。
+     */
+    private const val MAX_AES_ENTRIES = 32
 
     /** 同一个包，一分钟内不重复落盘。 */
     private const val WRITE_THROTTLE_MS = 60_000L
 
     private const val SEP_FIELD = '|'
     private const val SEP_LINE = '\n'
+
+    /**
+     * getConfig 的调用方不止 AES 桥一个 —— SystemUI 与 system_server 的钩子也用它读配置
+     * （PortalSystemUiModule.refreshConfig / PortalSystemModule），而它们各自已经有自己的
+     * 状态来源。把它们算进「AES 握手」会让那一行永远显示「系统界面 · 刚刚」，反而盖住了真正
+     * 想知道的事：有没有哪个第三方 App 里的桥和我们说过话。
+     */
+    private val IGNORED_PACKAGES = setOf(
+        "android",
+        "com.android.systemui",
+        "com.github.leaf.hyperportal",
+    )
 
     @Volatile
     private var lastWriteAt = 0L
@@ -53,7 +71,9 @@ object PortalStatusStore {
      */
     fun recordAesHandshake(context: Context?, uid: Int) {
         if (context == null) return
+        if (uid == android.os.Process.SYSTEM_UID) return
         val pkg = packageForUid(context, uid) ?: return
+        if (pkg in IGNORED_PACKAGES) return
         val now = System.currentTimeMillis()
         if (pkg == lastPackage && now - lastWriteAt < WRITE_THROTTLE_MS) return
         try {
@@ -101,7 +121,9 @@ object PortalStatusStore {
                     if (idx <= 0) return@mapNotNull null
                     val pkg = line.substring(0, idx)
                     val at = line.substring(idx + 1).toLongOrNull() ?: return@mapNotNull null
-                    if (pkg.isEmpty()) null else Handshake(pkg, at)
+                    // 也在这里挡一次：旧版本写进去的 SystemUI / system_server 条目还在盘上，
+                    // 不清掉的话那一行会继续显示它们。
+                    if (pkg.isEmpty() || pkg in IGNORED_PACKAGES) null else Handshake(pkg, at)
                 }
                 .sortedByDescending { it.atMillis }
         } catch (_: Throwable) {

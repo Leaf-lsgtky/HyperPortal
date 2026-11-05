@@ -150,6 +150,24 @@ All build and deployment tasks are unified under `tools/`:
 
 ## 5. Critical Code Locations
 
+- **`MainActivity.kt`**: App shell only — a two-page `HorizontalPager` (首页 / 设置) with a
+  blurred `NavigationBar` in the outer `Scaffold`. The bar's height is passed down to each page
+  as `bottomPadding`; each page owns its own `Scaffold` + `TopAppBar` via `PortalPageScaffold`.
+  Back goes to page 0 before leaving the app.
+- **`ui/HomePage.kt`**: Status only, no switches. The big card has four states — paused
+  (master switch off), ready (all three hooks), waiting for an AES handshake, and not activated
+  — laid out like KernelSU / HyperMusicCover / InstallerX / MiuiBackGestureHook: title+summary
+  top-left, working mode bottom-left, oversized icon bleeding off the bottom-right. Tapping it
+  (or the top-bar refresh) re-probes.
+- **`data/PortalStatus.kt`** + **`data/LsposedStatus.kt`** + **`data/PortalStatusStore.kt`**:
+  where the home page's answers come from. `LsposedStatus` binds the libxposed service and reads
+  `runningTargets` (the only authority on which processes the module is injected into; a target
+  counts as system_server by name `system`/`android` or uid 1000). `PortalStatusStore` records
+  the AES handshake — `Bridge.ensureConfig()` calls `getConfig` on `PortalFileProvider`, whose
+  `call()` records the caller's uid. **SystemUI and system_server also call `getConfig`**, so
+  they are filtered out of the AES record; they have their own signals (runningTargets, and
+  SystemUI's `reportSystemUiActive`).
+- **`ui/SettingsPage.kt`**: The screen the app used to open on, unchanged in content.
 - **`Bridge.java`**:
   - `findDeepTouchView(View root, float rawX, float rawY)`: Target view hit testing.
   - `findDeepChildInGroup(ViewGroup group, ...)`: Jetpack Compose / AndroidViewsHandler hybrid tree penetration.

@@ -66,7 +66,7 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
  * 信息卡。点大卡重新检查。
  */
 @Composable
-fun HomePage(bottomPadding: Dp, resumeKey: Int) {
+fun HomePage(bottomPadding: Dp, resumeKey: Int, isCurrent: () -> Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -80,8 +80,10 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int) {
         checked = true
     }
 
-    // 每次回到前台都重新问一次：模块可能在这期间被停用、被更新，或者某个进程刚刚重启。
-    LaunchedEffect(resumeKey) { refresh() }
+    // 成为当前页时问一次，回到前台时再问一次 —— 后者包括「在设置页关掉总开关，切回首页」。
+    // 两页都常驻，所以「切回来」不会重建，只有这个 key 能把新状态叫出来。
+    val current = isCurrent()
+    LaunchedEffect(current, resumeKey) { if (current) refresh() }
 
     // LSPosed 的服务是异步绑上来的，通常晚于第一帧。它一到就再问一次，否则首屏会停在
     // 「钩子未注入」——那不是答案，只是还没问到。
@@ -156,8 +158,9 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int) {
 /**
  * 通栏状态卡。
  *
- * 三个状态而不是两个：只有「全通」才配绿色；钩子在、但还没有任何 App 完成过 AES 握手，是开机
- * 之后的常态，用琥珀色说清楚「还差一步，去长按一个内容」；连钩子都没找到才是红色。
+ * 四个状态而不是两个：总开关关掉时钩子还在，说「已激活」是骗人；钩子在、但还没有任何 App
+ * 完成过 AES 握手，是开机之后的常态，用琥珀色说清楚「还差一步，去长按一个内容」；连钩子都
+ * 没找到才是红色。
  */
 @Composable
 private fun PortalStatusCard(
@@ -166,9 +169,11 @@ private fun PortalStatusCard(
     modifier: Modifier = Modifier,
     onRefresh: () -> Unit,
 ) {
-    val ready = checked && status.allReady
-    val hooksOnly = checked && status.hooksReady && !status.aesReady
-    val problem = checked && !status.hooksReady
+    val paused = checked && !status.masterSwitch
+    val ready = checked && !paused && status.allReady
+    val hooksOnly = checked && !paused && status.hooksReady && !status.aesReady
+    val problem = checked && !paused && !status.hooksReady
+    val attention = paused || hooksOnly
 
     val dark = isSystemInDarkTheme()
     val dynamic = MiuixTheme.isDynamicColor
@@ -177,8 +182,8 @@ private fun PortalStatusCard(
         ready && dynamic -> MiuixTheme.colorScheme.secondaryContainer
         ready && dark -> Color(0xFF1A3825)
         ready -> Color(0xFFDFFAE4)
-        hooksOnly && dark -> Color(0xFF3D3215)
-        hooksOnly -> Color(0xFFFFF3CD)
+        attention && dark -> Color(0xFF3D3215)
+        attention -> Color(0xFFFFF3CD)
         problem && dynamic -> MiuixTheme.colorScheme.errorContainer
         problem && dark -> Color(0xFF3D1C1C)
         problem -> Color(0xFFFDE8E8)
@@ -189,25 +194,27 @@ private fun PortalStatusCard(
     val iconTint = when {
         ready && dynamic -> MiuixTheme.colorScheme.primary.copy(alpha = 0.8f)
         ready -> Color(0xFF36D167)
-        hooksOnly && dark -> Color(0xFFFFC107)
-        hooksOnly -> Color(0xFFFFB300)
+        attention && dark -> Color(0xFFFFC107)
+        attention -> Color(0xFFFFB300)
         problem && dynamic -> MiuixTheme.colorScheme.error.copy(alpha = 0.8f)
         problem -> Color(0xFFDC3545)
         else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
     }
     val icon = when {
         ready -> Icons.Rounded.CheckCircleOutline
-        hooksOnly -> Icons.Rounded.WarningAmber
+        attention -> Icons.Rounded.WarningAmber
         problem -> Icons.Rounded.ErrorOutline
         else -> Icons.Rounded.HourglassEmpty
     }
     val title = when {
+        paused -> "已暂停运行"
         ready -> "HyperPortal 已激活"
         hooksOnly -> "等待 AES 握手"
         problem -> "HyperPortal 未激活"
         else -> "正在检查…"
     }
     val summary = when {
+        paused -> "功能总开关已关闭，长按内容不会触发传送门"
         ready -> "三段钩子全部就绪"
         hooksOnly -> "钩子已注入，长按任意应用里的内容即可完成握手"
         problem -> "LSPosed 中没有找到已注入的进程，请检查模块是否启用"
@@ -302,7 +309,11 @@ private fun aesSummary(context: Context, status: PortalStatus): String {
     val last = status.lastHandshake ?: return "尚未握手"
     val label = appLabel(context, last.packageName)
     val when_ = relativeTime(last.atMillis)
-    return if (when_.isEmpty()) label else "$label · $when_"
+    // 一次配置广播会让所有装着桥的 App 在同一毫秒里一起来问，所以「最近一个」经常只是那一
+    // 波里的某一个。把个数一并说出来，这一行才不会看起来像在随机换名字。
+    val count = status.aesHandshakes.size
+    val who = if (count > 1) "$label 等 $count 个应用" else label
+    return if (when_.isEmpty()) who else "$who · $when_"
 }
 
 /** 一个包名换成人看得懂的名字；查不到就原样显示包名。 */
