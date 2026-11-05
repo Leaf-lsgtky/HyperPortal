@@ -5464,7 +5464,7 @@ public final class Bridge {
         int[] paths = new int[]{0};
         queue.add(root);
         depths.add(0);
-        int budget = 400;
+        int budget = 900;
         while (!queue.isEmpty() && budget-- > 0) {
             Object node = queue.poll();
             Integer depthBox = depths.poll();
@@ -5498,6 +5498,25 @@ public final class Bridge {
                 }
                 continue;
             }
+            if (node instanceof byte[]) {
+                java.io.File fromBytes = bytesToTempFile(root.getContext(), (byte[]) node);
+                if (fromBytes != null) {
+                    Log.i(TAG, "findAnimatedFile hit via byte[] node");
+                    return fromBytes;
+                }
+                continue;
+            }
+            if (node instanceof java.nio.ByteBuffer) {
+                java.nio.ByteBuffer buffer = ((java.nio.ByteBuffer) node).duplicate();
+                byte[] copy = new byte[Math.min(buffer.remaining(), 8 * 1024 * 1024)];
+                buffer.get(copy);
+                java.io.File fromBytes = bytesToTempFile(root.getContext(), copy);
+                if (fromBytes != null) {
+                    Log.i(TAG, "findAnimatedFile hit via ByteBuffer node");
+                    return fromBytes;
+                }
+                continue;
+            }
             if (node instanceof Uri) {
                 java.io.File candidate = fileFromString(((Uri) node).toString());
                 if (isAnimatedFile(candidate)) {
@@ -5513,7 +5532,7 @@ public final class Bridge {
                 }
                 continue;
             }
-            if (depth >= 4) {
+            if (depth >= 5) {
                 continue;
             }
             Class<?> type = node.getClass();
@@ -5522,12 +5541,25 @@ public final class Bridge {
                 continue;
             }
             // URLDrawable keeps its source in mUrl / mParams rather than in a File.
-            String[] accessors = {"getURL", "getUrl", "getSrcUrl", "getFilePath", "getLocalPath",
-                    "getImagePath", "getCacheKey", "getSrcPath", "getPath"};
+            String[] accessors = {"getURL", "getUrl", "getUrlString", "getOriginUrl", "getSrcUrl",
+                    "getSourceUri", "getUri", "getFilePath", "getLocalPath", "getImagePath",
+                    "getPath", "getSrcPath", "getCacheKey", "getRequest", "getImageRequest",
+                    "getParams", "getBytes", "getByteBuffer", "getSourceBytes", "getData",
+                    "getSource", "getDrawable", "getState", "getConstantState", "getOrigin",
+                    "getOriginal", "getTarget", "getContent"};
             for (String accessor : accessors) {
                 try {
                     Object value = type.getMethod(accessor).invoke(node);
                     if (value != null) {
+                        // Libra's GifDrawable (and most GIF wrappers) keep the encoded
+                        // bytes; staging those is more robust than finding a file.
+                        if (value instanceof byte[]) {
+                            java.io.File fromBytes = bytesToTempFile(root.getContext(), (byte[]) value);
+                            if (fromBytes != null) {
+                                Log.i(TAG, "findAnimatedFile hit via " + accessor + " bytes");
+                                return fromBytes;
+                            }
+                        }
                         // URLDrawable.getURL() returns java.net.URL, whose toString is
                         // "file:/storage/..." (single slash). Normalise before judging.
                         String asPath = null;
@@ -5591,6 +5623,204 @@ public final class Bridge {
      * Records the real animated file so forwardToPortal() can stage the original
      * bytes instead of a PNG of the first frame.
      */
+    private static java.io.File bytesToTempFile(Context ctx, byte[] data) {
+        if (ctx == null || data == null || data.length < 64 || !isAnimatedHead(data)) {
+            return null;
+        }
+        try {
+            java.io.File dir = new java.io.File(ctx.getCacheDir(), "hp_anim");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                return null;
+            }
+            java.io.File out = new java.io.File(dir, "anim_" + SystemClock.uptimeMillis() + ".gif");
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
+            try {
+                fos.write(data);
+            } finally {
+                try {
+                    fos.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            Log.i(TAG, "bytesToTempFile " + out + " " + data.length + " bytes");
+            return out;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "bytesToTempFile failed", throwable);
+            return null;
+        }
+    }
+
+    /**
+     * Diagnostic: dump the no-arg getters of the drawable so an unfamiliar image stack
+     * (QQ's Libra) tells us which accessor to use instead of us guessing.
+     */
+    private static void logDrawableApi(View view) {
+        try {
+            if (!(view instanceof ImageView)) {
+                return;
+            }
+            android.graphics.drawable.Drawable drawable = ((ImageView) view).getDrawable();
+            if (drawable == null) {
+                return;
+            }
+            StringBuilder builder = new StringBuilder();
+            int count = 0;
+            for (java.lang.reflect.Method method : drawable.getClass().getMethods()) {
+                if (method.getParameterCount() != 0) {
+                    continue;
+                }
+                String name = method.getName();
+                if (!name.startsWith("get") && !name.startsWith("is")) {
+                    continue;
+                }
+                builder.append(name).append(' ');
+                if (++count >= 40) {
+                    break;
+                }
+            }
+            Log.i(TAG, "drawable api: " + drawable.getClass().getName() + " :: " + builder);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** width/height/frameCount of the drawable, or null when it exposes none. */
+    private static int[] drawableGeometry(android.graphics.drawable.Drawable drawable) {
+        if (drawable == null) {
+            return null;
+        }
+        try {
+            int w = drawable.getIntrinsicWidth();
+            int h = drawable.getIntrinsicHeight();
+            int frames = 0;
+            try {
+                Object value = drawable.getClass().getMethod("getFrameCount").invoke(drawable);
+                if (value instanceof Integer) {
+                    frames = (Integer) value;
+                }
+            } catch (Throwable ignored) {
+            }
+            return new int[]{w, h, frames};
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** GIF header width/height, or null when the file is not a GIF. */
+    private static int[] gifGeometry(java.io.File file) {
+        byte[] head = readHeadFile(file);
+        if (head == null || head[0] != 0x47 || head[1] != 0x49 || head[2] != 0x46) {
+            return null;
+        }
+        return new int[]{(head[6] & 0xFF) | ((head[7] & 0xFF) << 8),
+                (head[8] & 0xFF) | ((head[9] & 0xFF) << 8)};
+    }
+
+    /** Counts graphic-control-extension blocks (0x21 0xF9 0x04) in a GIF. */
+    private static int gifFrameCount(java.io.File file) {
+        java.io.FileInputStream in = null;
+        try {
+            in = new java.io.FileInputStream(file);
+            byte[] buf = new byte[65536];
+            int read;
+            int previous1 = -1;
+            int previous2 = -1;
+            int frames = 0;
+            long total = 0;
+            while ((read = in.read(buf)) > 0) {
+                for (int i = 0; i < read; i++) {
+                    int b = buf[i] & 0xFF;
+                    if (previous2 == 0x21 && previous1 == 0xF9 && b == 0x04) {
+                        frames++;
+                    }
+                    previous2 = previous1;
+                    previous1 = b;
+                }
+                total += read;
+                if (total > 32L * 1024 * 1024) {
+                    break;
+                }
+            }
+            return frames;
+        } catch (Throwable ignored) {
+            return 0;
+        } finally {
+            try {
+                if (in != null) {
+                    in.close();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * QQ's Libra decoder keeps only the decoded frames, so the encoded GIF is gone by the
+     * time we see the view. The sticker pack directories survive on disk though, and the
+     * pack currently on screen is the one whose .jtmp metadata was just rewritten. Match
+     * inside that pack by geometry (intrinsic size + frame count) instead of by name.
+     */
+    private static java.io.File findQqStickerByGeometry(Context ctx, int[] geometry) {
+        if (ctx == null || !"com.tencent.mobileqq".equals(ctx.getPackageName())) {
+            return null;
+        }
+        java.io.File ext = ctx.getExternalFilesDir(null);
+        java.io.File root = ext == null ? null : ext.getParentFile();
+        java.io.File emo = root == null
+                ? null : new java.io.File(root, "Tencent/MobileQQ/.emotionsm");
+        java.io.File[] packs = emo == null ? null : emo.listFiles();
+        if (packs == null) {
+            return null;
+        }
+        long fresh = System.currentTimeMillis() - 30L * 60 * 1000;
+        java.io.File best = null;
+        long bestStamp = 0;
+        int width = geometry == null ? 0 : geometry[0];
+        int height = geometry == null ? 0 : geometry[1];
+        int frames = geometry == null ? 0 : geometry[2];
+        for (java.io.File pack : packs) {
+            if (pack == null || !pack.isDirectory()) {
+                continue;
+            }
+            java.io.File[] files = pack.listFiles();
+            if (files == null) {
+                continue;
+            }
+            long stamp = 0;
+            for (java.io.File f : files) {
+                if (f != null && f.getName().endsWith(".jtmp") && f.lastModified() > fresh) {
+                    stamp = Math.max(stamp, f.lastModified());
+                }
+            }
+            if (stamp == 0) {
+                continue;
+            }
+            for (java.io.File f : files) {
+                if (f == null || !f.isFile()) {
+                    continue;
+                }
+                String name = f.getName();
+                if (name.endsWith(".jtmp") || name.endsWith(".png")) {
+                    continue;
+                }
+                int[] gif = gifGeometry(f);
+                if (gif == null) {
+                    continue;
+                }
+                if (width > 0 && height > 0 && (gif[0] != width || gif[1] != height)) {
+                    continue;
+                }
+                if (frames > 0 && gifFrameCount(f) != frames) {
+                    continue;
+                }
+                if (stamp > bestStamp) {
+                    bestStamp = stamp;
+                    best = f;
+                }
+            }
+        }
+        return best;
+    }
+
     private static boolean isHexHash(String text) {
         if (text == null || text.length() != 32) {
             return false;
@@ -5701,6 +5931,20 @@ public final class Bridge {
                 }
             }
             if (file == null) {
+                Context ctx = view.getContext();
+                android.graphics.drawable.Drawable drawable = view instanceof ImageView
+                        ? ((ImageView) view).getDrawable() : null;
+                int[] geometry = drawableGeometry(drawable);
+                file = findQqStickerByGeometry(ctx, geometry);
+                if (file != null) {
+                    Log.i(TAG, "resolved sticker by geometry "
+                            + (geometry == null ? "-"
+                            : geometry[0] + "x" + geometry[1] + "/" + geometry[2] + "f")
+                            + " -> " + file);
+                }
+            }
+            if (file == null) {
+                logDrawableApi(view);
                 return;
             }
             result.putString("animatedSourcePath", file.getAbsolutePath());
