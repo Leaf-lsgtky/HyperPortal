@@ -193,6 +193,7 @@ public final class Bridge {
                 if (list != null) {
                     sBlacklist = new java.util.HashSet<>(list);
                 }
+                sRuleEngineEnabled = res.getBoolean("drag_rules", true);
                 Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " landscape=" + sLandscapeTrigger
                         + " duration=" + sLongPressDurationMs + " slop=" + sTouchSlopDp
                         + " threshold=" + sTriggerThreshold
@@ -372,6 +373,7 @@ public final class Bridge {
                     sPendingContent = null;
                     sGestureActive = true;
                     sCancelSent = false;
+                    resetRuleHit();
                     sActiveDragView = null;
                     sActiveShadowSquare = false;
                     sShadowMorphProgress = 0f;
@@ -960,6 +962,13 @@ public final class Bridge {
                     Log.i(TAG, "preExtract hit WeChat file: " + wechatFile.getString("fileName"));
                     return wechatFile;
                 }
+            }
+            // Rule first (after the app-specific file shortcuts): a per-app rule
+            // pins this view class to one modality, so the heuristic cascade
+            // below never gets the chance to swap image for caption text.
+            Bundle ruled = applyRule(view, flags);
+            if (ruled != null) {
+                return ruled;
             }
             if (!isPlausibleContentHost(view)) {
                 return null;
@@ -2281,6 +2290,562 @@ public final class Bridge {
         }
     }
 
+    // =========================================================================
+    // ColorOS-style drag rules: "rule first, heuristics as fallback".
+    //
+    // ColorOS never guesses the modality from geometry — its per-app config
+    // (/system_ext/oplus/sys_view_drag_list.xml) pins a *view class* to exactly
+    // one content type, e.g. <view name="XYImageView" type="image"/> next to
+    // <view name="NoteDetailTextView" type="text"/>. A text view can therefore
+    // never yield a bitmap and an image view can never yield text, which is why
+    // "text above, image below" cards are unambiguous there.
+    //
+    // DragRules.java (generated from that file) carries the same table reduced
+    // to the matchers we implement: package, activity, type, view class name,
+    // parent / brother / uncle / nephews class names, resource id, and the
+    // touch-view / bottom-view flags. Apps without a rule keep using the
+    // heuristic cascade in extractContentColorOS().
+    // =========================================================================
+
+    private static final class DragRule {
+        final String type;
+        final String name;
+        final String parent;
+        final String brother;
+        final String id;
+        final String uncle;
+        final String nephews;
+        final boolean touchOnly;
+        final boolean bottomView;
+
+        DragRule(String[] cols) {
+            type = cols[2];
+            name = cols[3];
+            parent = cols.length > 4 ? cols[4] : "";
+            brother = cols.length > 5 ? cols[5] : "";
+            id = cols.length > 6 ? cols[6] : "";
+            uncle = cols.length > 7 ? cols[7] : "";
+            nephews = cols.length > 8 ? cols[8] : "";
+            String flags = cols.length > 9 ? cols[9] : "";
+            touchOnly = flags.indexOf('t') >= 0;
+            bottomView = flags.indexOf('b') >= 0;
+        }
+
+        String describe() {
+            return name + "/" + type;
+        }
+    }
+
+    private static final class RuleHit {
+        final View view;
+        final DragRule rule;
+        final String activity;
+
+        RuleHit(View view, DragRule rule, String activity) {
+            this.view = view;
+            this.rule = rule;
+            this.activity = activity;
+        }
+    }
+
+    private static volatile java.util.HashMap<String, java.util.HashMap<String, java.util.ArrayList<DragRule>>> sRuleTable;
+    private static volatile boolean sRuleTableReady;
+    private static volatile boolean sRuleEngineEnabled = true;
+    private static volatile long sRuleHitGestureAt = -1;
+    private static volatile java.util.ArrayList<RuleHit> sRuleHitCache;
+
+    private static void ensureRuleTable() {
+        if (sRuleTableReady) {
+            return;
+        }
+        synchronized (DragRules.class) {
+            if (sRuleTableReady) {
+                return;
+            }
+            java.util.HashMap<String, java.util.HashMap<String, java.util.ArrayList<DragRule>>> table =
+                    new java.util.HashMap<>();
+            int rows = 0;
+            for (String[] chunk : DragRules.CHUNKS) {
+                for (String row : chunk) {
+                    String[] cols = row.split("\\|", -1);
+                    if (cols.length < 4 || cols[0].isEmpty() || cols[1].isEmpty()) {
+                        continue;
+                    }
+                    DragRule rule = new DragRule(cols);
+                    java.util.HashMap<String, java.util.ArrayList<DragRule>> byActivity = table.get(cols[0]);
+                    if (byActivity == null) {
+                        byActivity = new java.util.HashMap<>();
+                        table.put(cols[0], byActivity);
+                    }
+                    java.util.ArrayList<DragRule> list = byActivity.get(cols[1]);
+                    if (list == null) {
+                        list = new java.util.ArrayList<>();
+                        byActivity.put(cols[1], list);
+                    }
+                    list.add(rule);
+                    rows++;
+                }
+            }
+            sRuleTable = table;
+            sRuleTableReady = true;
+            Log.i(TAG, "drag rules ready: " + rows + " rules / " + table.size() + " packages");
+        }
+    }
+
+    /** Wipes the per-gesture rule cache; called from ACTION_DOWN. */
+    private static void resetRuleHit() {
+        sRuleHitGestureAt = -1;
+        sRuleHitCache = null;
+    }
+
+    private static String currentActivityName() {
+        Activity activity = sLastActivity;
+        if (activity == null) {
+            return null;
+        }
+        String name = activity.getClass().getName();
+        return name == null || name.isEmpty() ? null : name;
+    }
+
+    private static java.util.ArrayList<RuleHit> resolveRuleHits(View root) {
+        if (!sRuleEngineEnabled || root == null) {
+            return null;
+        }
+        if (sRuleHitGestureAt == sDownAt) {
+            return sRuleHitCache;
+        }
+        java.util.ArrayList<RuleHit> hits = null;
+        try {
+            hits = computeRuleHits(root);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "rule resolve failed", throwable);
+        }
+        sRuleHitCache = hits;
+        sRuleHitGestureAt = sDownAt;
+        return hits;
+    }
+
+    /**
+     * Resolves the rule candidates for this gesture, innermost first: the view
+     * the finger is actually on wins over any container rule above it.
+     */
+    private static java.util.ArrayList<RuleHit> computeRuleHits(View root) {
+        ensureRuleTable();
+        Context ctx = currentContext();
+        if (ctx == null) {
+            return null;
+        }
+        String pkg = ctx.getPackageName();
+        if (pkg == null) {
+            return null;
+        }
+        java.util.HashMap<String, java.util.ArrayList<DragRule>> byActivity = sRuleTable.get(pkg);
+        if (byActivity == null) {
+            return null;
+        }
+        String activity = currentActivityName();
+        java.util.ArrayList<DragRule> rules = activity == null ? null : byActivity.get(activity);
+        if (rules == null && activity != null) {
+            int dot = activity.lastIndexOf('.');
+            if (dot > 0) {
+                rules = byActivity.get(activity.substring(dot + 1));
+            }
+        }
+        if (rules == null) {
+            rules = byActivity.get("*");
+        }
+        if (rules == null || rules.isEmpty()) {
+            Log.d(TAG, "rule miss (activity) pkg=" + pkg + " act=" + activity);
+            return null;
+        }
+        float rawX = getTouchRawX();
+        float rawY = getTouchRawY();
+        java.util.ArrayList<View> chain = new java.util.ArrayList<>();
+        collectPointChain(root, rawX, rawY, chain, 0, true);
+        if (chain.isEmpty()) {
+            return null;
+        }
+        java.util.ArrayList<RuleHit> hits = new java.util.ArrayList<>();
+        // Sanity guard on top of the rules: a container-level rule must not
+        // override the modality of what the finger is literally on. Our rule
+        // table is a reduction of ColorOS's (which also lists the leaf views),
+        // so this keeps a partially-covered app from regressing.
+        View innermostView = chain.get(chain.size() - 1);
+        boolean fingerOnText = innermostView instanceof TextView
+                && !TextUtils.isEmpty(((TextView) innermostView).getText());
+        boolean fingerOnImage = innermostView instanceof ImageView
+                && ((ImageView) innermostView).getDrawable() != null;
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            View view = chain.get(i);
+            boolean innermost = i == chain.size() - 1;
+            for (DragRule rule : rules) {
+                if (rule.touchOnly && !innermost) {
+                    continue;
+                }
+                if (!innermost && view != innermostView) {
+                    if (fingerOnText && "image".equals(rule.type)) {
+                        Log.d(TAG, "rule skip image@" + view.getClass().getSimpleName()
+                                + " (finger is on text)");
+                        continue;
+                    }
+                    if (fingerOnImage && "text".equals(rule.type)) {
+                        Log.d(TAG, "rule skip text@" + view.getClass().getSimpleName()
+                                + " (finger is on image)");
+                        continue;
+                    }
+                }
+                if (!ruleMatches(rule, view)) {
+                    continue;
+                }
+                hits.add(new RuleHit(view, rule, activity));
+                break;
+            }
+        }
+        if (hits.isEmpty()) {
+            Log.i(TAG, "rule miss (view) pkg=" + pkg + " act=" + activity
+                    + " rules=" + rules.size() + " chain=" + chain.size());
+            return null;
+        }
+        return hits;
+    }
+
+    /**
+     * Collects the chain of views under the touch point, outermost first.
+     * The last element is the view the finger is really on.
+     */
+    private static void collectPointChain(View view, float rawX, float rawY,
+                                          java.util.List<View> out, int depth, boolean singleBranch) {
+        if (view == null || depth > 32 || view.getVisibility() != View.VISIBLE) {
+            return;
+        }
+        if (!rectContainsPoint(view, rawX, rawY, 0)) {
+            return;
+        }
+        out.add(view);
+        if (!(view instanceof ViewGroup)) {
+            return;
+        }
+        ViewGroup group = (ViewGroup) view;
+        for (int i = group.getChildCount() - 1; i >= 0; i--) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            if (!rectContainsPoint(child, rawX, rawY, 0)) {
+                continue;
+            }
+            collectPointChain(child, rawX, rawY, out, depth + 1, singleBranch);
+            if (singleBranch) {
+                break;
+            }
+        }
+    }
+
+    private static boolean rectContainsPoint(View view, float rawX, float rawY, int slop) {
+        if (view == null) {
+            return false;
+        }
+        try {
+            int[] location = new int[2];
+            view.getLocationOnScreen(location);
+            return rawX >= location[0] - slop && rawX <= location[0] + view.getWidth() + slop
+                    && rawY >= location[1] - slop && rawY <= location[1] + view.getHeight() + slop;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean ruleMatches(DragRule rule, View view) {
+        if (view == null || TextUtils.isEmpty(rule.name)) {
+            return false;
+        }
+        if (!classNameMatches(rule.name, view)) {
+            return false;
+        }
+        if (!TextUtils.isEmpty(rule.parent) && !classNameMatches(rule.parent, viewParentOf(view))) {
+            return false;
+        }
+        if (!TextUtils.isEmpty(rule.brother) && !hasSiblingOfClass(view, rule.brother)) {
+            return false;
+        }
+        if (!TextUtils.isEmpty(rule.id) && !idMatches(view, rule.id)) {
+            return false;
+        }
+        if (!TextUtils.isEmpty(rule.uncle) && !hasUncleOfClass(view, rule.uncle)) {
+            return false;
+        }
+        if (!TextUtils.isEmpty(rule.nephews) && !hasNephewOfClass(view, rule.nephews)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean classNameMatches(String expected, View view) {
+        if (view == null || expected == null || expected.isEmpty()) {
+            return false;
+        }
+        String full = view.getClass().getName();
+        String simple = view.getClass().getSimpleName();
+        if (expected.equals(simple) || expected.equals(full)) {
+            return true;
+        }
+        if (expected.indexOf('.') > 0) {
+            return full.endsWith("." + expected) || full.endsWith(expected);
+        }
+        return false;
+    }
+
+    private static View viewParentOf(View view) {
+        try {
+            android.view.ViewParent parent = view.getParent();
+            return parent instanceof View ? (View) parent : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean hasSiblingOfClass(View view, String expected) {
+        View parent = viewParentOf(view);
+        if (!(parent instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) parent;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View sibling = group.getChildAt(i);
+            if (sibling == null || sibling == view) {
+                continue;
+            }
+            if (classNameMatches(expected, sibling)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasUncleOfClass(View view, String expected) {
+        View parent = viewParentOf(view);
+        View grandParent = parent == null ? null : viewParentOf(parent);
+        if (!(grandParent instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) grandParent;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View uncle = group.getChildAt(i);
+            if (uncle == null || uncle == parent) {
+                continue;
+            }
+            if (classNameMatches(expected, uncle) || hasDescendantOfClass(uncle, expected, 2)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasNephewOfClass(View view, String expected) {
+        View parent = viewParentOf(view);
+        if (!(parent instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) parent;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View sibling = group.getChildAt(i);
+            if (sibling == null || sibling == view) {
+                continue;
+            }
+            if (hasDescendantOfClass(sibling, expected, 2)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasDescendantOfClass(View view, String expected, int depth) {
+        if (view == null || depth < 0) {
+            return false;
+        }
+        if (classNameMatches(expected, view)) {
+            return true;
+        }
+        if (!(view instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            if (hasDescendantOfClass(group.getChildAt(i), expected, depth - 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean idMatches(View view, String expected) {
+        try {
+            int id = view.getId();
+            if (id == View.NO_ID || view.getResources() == null) {
+                return false;
+            }
+            String entry = view.getResources().getResourceEntryName(id);
+            return expected.equals(entry);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isAncestorOf(View ancestor, View view) {
+        if (ancestor == null || view == null) {
+            return false;
+        }
+        if (ancestor == view) {
+            return true;
+        }
+        android.view.ViewParent parent = view.getParent();
+        int guard = 0;
+        while (parent != null && guard++ < 64) {
+            if (parent == ancestor) {
+                return true;
+            }
+            parent = parent.getParent();
+        }
+        return false;
+    }
+
+    /**
+     * Called from preExtract() before any heuristic. The rule's view wins even
+     * when AES offers us one of its descendants, so a card declared as "image"
+     * is never turned into its caption text.
+     */
+    private static Bundle applyRule(View view, int flags) {
+        if (!sRuleEngineEnabled || view == null) {
+            return null;
+        }
+        java.util.ArrayList<RuleHit> hits = resolveRuleHits(view.getRootView());
+        if (hits == null || hits.isEmpty()) {
+            return null;
+        }
+        // Prefer a hit whose view is the queried view or one of its ancestors;
+        // if AES is asking about an ancestor of every hit (it climbed past the
+        // rule target), the innermost hit is still the right answer.
+        Bundle result = tryRuleHits(hits, view, flags, true);
+        if (result == null) {
+            result = tryRuleHits(hits, view, flags, false);
+        }
+        return result;
+    }
+
+    private static Bundle tryRuleHits(java.util.ArrayList<RuleHit> hits, View view,
+                                      int flags, boolean requireAncestor) {
+        for (RuleHit hit : hits) {
+            if (requireAncestor && !isAncestorOf(hit.view, view)) {
+                continue;
+            }
+            Bundle extracted = extractRuleContent(hit, flags);
+            if (extracted == null || !isBundleMeaningful(extracted)) {
+                continue;
+            }
+            extracted.putString("ruleHit", hit.rule.describe());
+            Log.i(TAG, "preExtract rule=" + hit.rule.describe()
+                    + " view=" + hit.view.getClass().getName()
+                    + " asked=" + view.getClass().getName()
+                    + (requireAncestor ? "" : " (fallback)"));
+            return extracted;
+        }
+        return null;
+    }
+
+    private static Bundle extractRuleContent(RuleHit hit, int flags) {
+        View view = hit.view;
+        String type = hit.rule.type;
+        Bundle result = null;
+        try {
+            if ("text".equals(type)) {
+                result = extractTextStrict(view);
+            } else if ("image".equals(type)) {
+                result = extractFile(view);
+                if (!isBundleMeaningful(result)) {
+                    Bitmap bitmap = extractImageBitmap(view);
+                    if (bitmap != null) {
+                        Bundle bundle = new Bundle();
+                        bundle.putParcelable("viewBitmap", bitmap);
+                        bundle.putInt("catchType", 2);
+                        result = bundle;
+                    }
+                } else {
+                    attachAnimatedSource(view, result);
+                }
+            } else if ("file".equals(type) || "video".equals(type)) {
+                result = extractFile(view);
+            } else if ("web".equals(type)) {
+                result = webViewBundle(view);
+            } else if ("compose".equals(type)) {
+                float rawX = getTouchRawX();
+                float rawY = getTouchRawY();
+                result = extractHybridComposeContent(view, rawX, rawY, true, true);
+                if (!isBundleMeaningful(result)) {
+                    result = extractCompose(view, rawX, rawY, true, true);
+                }
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "extractRuleContent failed", throwable);
+        }
+        return result;
+    }
+
+    /** Text extraction bound to exactly this view (no class-name guessing). */
+    private static Bundle extractTextStrict(View view) {
+        if (view == null) {
+            return null;
+        }
+        if (view instanceof TextView) {
+            Bundle text = extractTextView((TextView) view);
+            if (isBundleMeaningful(text)) {
+                return text;
+            }
+        }
+        Bundle custom = extractCustomText(view, true);
+        if (isBundleMeaningful(custom)) {
+            return custom;
+        }
+        CharSequence description = view.getContentDescription();
+        if (isMeaningfulUserText(description)) {
+            Bundle bundle = new Bundle();
+            bundle.putString("viewContent", description.toString().trim());
+            bundle.putInt("catchType", 1);
+            return bundle;
+        }
+        if (view instanceof ViewGroup) {
+            Bundle group = extractViewGroupText((ViewGroup) view);
+            if (isBundleMeaningful(group)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rule-free fallback: the direct child that the finger is really on.
+     * Used instead of aggregating every TextView of the card.
+     */
+    private static View childContainingPoint(ViewGroup group, float rawX, float rawY) {
+        if (group == null) {
+            return null;
+        }
+        int count = group.getChildCount();
+        for (int i = count - 1; i >= 0; i--) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            if (isPassthroughOverlay(child)) {
+                continue;
+            }
+            if (!rectContainsPoint(child, rawX, rawY, 0)) {
+                continue;
+            }
+            return child;
+        }
+        return null;
+    }
+
     private static Bundle extractContentColorOS(View view, int flags) {
         if (view == null) {
             return null;
@@ -2380,6 +2945,19 @@ public final class Bridge {
         // TextViews and ImageViews.
         View candidate = target;
         if (candidate instanceof ViewGroup && !isComposeView(candidate) && !isWebViewLike(candidate)) {
+            // 4a. Point-anchored descent (ColorOS parity): follow the child the
+            // finger is really on. Only when no child covers the touch point do
+            // we fall through to whole-card text aggregation below — that
+            // aggregation is what turned "long press the image" into "the
+            // caption text" on mixed text+image cards.
+            View anchored = childContainingPoint((ViewGroup) candidate, rawX, rawY);
+            if (anchored != null) {
+                Bundle deep = extractContentColorOS(anchored, flags);
+                if (deep != null && isBundleMeaningful(deep)) {
+                    Log.d(TAG, "point-anchored hit " + anchored.getClass().getName());
+                    return deep;
+                }
+            }
             if (wantText) {
                 Bundle grpText = extractViewGroupText((ViewGroup) candidate);
                 if (grpText != null && isBundleMeaningful(grpText)) {
@@ -2699,7 +3277,23 @@ public final class Bridge {
      * to the normal TextView path but expose a CharSequence field or getter.
      */
     private static Bundle extractCustomText(View view) {
-        if (view == null || view instanceof TextView || !isTextLikeView(view)) {
+        return extractCustomText(view, false);
+    }
+
+    /**
+     * @param force when true the class-name heuristic is skipped: the caller
+     *              (a per-app drag rule) already declared this view as text.
+     */
+    private static Bundle extractCustomText(View view, boolean force) {
+        if (view == null) {
+            return null;
+        }
+        if (force) {
+            // Never lift an editable/password field, even when a rule names it.
+            if (view instanceof EditText) {
+                return null;
+            }
+        } else if (view instanceof TextView || !isTextLikeView(view)) {
             return null;
         }
         String best = null;

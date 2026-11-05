@@ -524,3 +524,67 @@ ColorOS 的高命中率**建立在逐 app 云控规则上**（详见 §2.8：
 
 我们的优势是**零规则、通用启发**（不挑 app，装机即用）；代价就是这套瀑布会在"图文同格"的形态下按顺序排错。
 所以修复方向不是照抄它的规则系统，而是**把它唯一正确的那个结构性决定抄过来：先定 target，再由 target 定模态。**
+
+---
+
+## 10. 落地实现（规则优先 + 点锚定回退）
+
+上面 §6 的两条改法已经落地，落点在 AES 进程内（`Bridge.preExtract` 入口），因此**对所有走 AES 的长按统一生效**，与 app 侧实现无关。
+
+### 10.1 规则从哪来
+
+- 从 ColorOS 17 的 `super.img` 里把 `/system_ext/oplus/sys_view_drag_list.xml`（312,717 B）原样取出来，
+  用 `tools/gen_drag_rules.py` 归约成 AES 内置的规则表 `aes/src/dev/dragshare/catcher/DragRules.java`。
+- 归约结果：**2,107 条规则 / 149 个包 / 766 个 package+activity 组合**
+  （image 1026、text 999、web 36、file 22、video 13、compose 8、none 3；其中 `touch-view` 230 条、`bottom-view` 12 条）。
+- 只保留我们实现得了的匹配器：`name`（视图类名）、`parent`、`brother`、`uncle`、`nephews`、`id`、
+  `touch-view`、`bottom-view`；OPPO 的反射路径（`text-field-path` / `newPath` / `targetField` / `evaluate-js`）丢弃——
+  这些我们本来就有自己的实现（微信/QQ/微博专用提取器）。
+- 生成物是纯 `String[][]`，不依赖 asset：AES 的 APK 只换 dex（`repack_apk` 只替换 `classes.dex`/`classes2.dex`），
+  往 APK 里塞 assets 反而要改打包流程。
+
+### 10.2 运行期判定顺序
+
+```
+ACTION_DOWN
+  └─ Bridge.ping()：resetRuleHit()（清掉上一手势的规则缓存）
+
+长按 → AES walk → Bridge.preExtract(view)
+  1. isTouchInsideView(view)                      越界直接放弃
+  2. view.getTag() 是 file/value                   → extractFile
+  3. WeChat 专用文件提取                            → extractWeChatFile
+  4. ★ 规则优先 applyRule(view, flags)
+       resolveRuleHits()：按"当前包 + 当前 Activity"取规则（每手势只算一次，缓存到 sDownAt）
+       collectPointChain()：从 DecorView 沿"包含触点"的单一路径往下收集，最内层 = 手指真正按住的视图
+       规则按 **由内向外** 匹配，命中即用；`touch-view=true` 的规则只允许最内层视图命中
+       → 命中后只抽该规则声明的模态：text / image / file / video / web / compose
+  5. 没有规则（或规则抽不出内容）→ 原启发式级联 extractContentColorOS()
+       4a. ★ 点锚定回退：childContainingPoint(candidate) 沿触点下钻，不再一上来就整格文本聚合
+       其余步骤保持不变（Compose / WebView / 自定义文本 / Accessibility / contentDescription）
+```
+
+几条实现上的取舍：
+
+- **由内向外**而不是照抄 OPPO 的由外向内：我们的规则表是其子集（少了反射路径），
+  若先匹配外层容器规则，会在"容器被声明为 image、内部文字类没被收录"时把文字判成图片。
+- **模态护栏**：手指按在真正的 `TextView` 上时，跳过外层 `type=image` 的规则；反之亦然。
+  这条只在"内层视图没有任何规则命中"时才起作用，是给规则表不完整兜的底。
+- `bottom-view` / `nest` 只解析不特别处理：由内向外本身就等价于"取最深命中"。
+- 命中/未命中都打点，便于逐 app 校准：
+  `rule hit pkg=… act=… rule=XYImageView/image view=…`、
+  `rule miss (activity) pkg=… act=…`、`rule miss (view) … chain=N`、`preExtract rule=… asked=…`。
+
+### 10.3 与 ColorOS 的行为差异（有意为之）
+
+| | ColorOS | 我们现在 |
+|---|---|---|
+| 未命中规则 | 该页面**完全不支持拖拽** | 回退到通用启发式（不挑 app） |
+| 规则来源 | RUS 云控，可远程更新 | 编译期内置，随 AES 版本更新 |
+| 命中优先级 | 由外向内（`touchView` 标志可改） | 由内向外 + 模态护栏 |
+| 新版本 app 改了类名 | 云控补规则 | 规则失效 → 自动回退启发式 |
+
+### 10.4 尚未验证（设备 ADB 断开）
+
+编译与静态校验已通过（`python tools/build.py aes` 成功；规则表 0 条畸形行）；
+另用等价的 Python 模拟器把 8 组典型调用（微博图文/小红书笔记/B站/微信表情/未知 app/护栏场景）跑了一遍，判定全部符合预期。
+真机仍需确认三条：① 规则命中的日志是否如期出现；② 已适配 app 的原有行为无回归；③ 未适配 app 仍走回退且不再抓到整格文字。
