@@ -45,14 +45,34 @@ public class PortalFileProvider extends ContentProvider {
     private static final String DATA_COLUMN = "_data";
 
     private static volatile boolean sSystemUiActive = false;
+    private static volatile int sSystemUiPid = 0;
 
+    /**
+     * True only while the SystemUI overlay that reported itself is still the
+     * live SystemUI process. The flag lives in this process, which outlives
+     * SystemUI, so without the pid check a SystemUI that was killed (for
+     * example by the cold-boot input ANR) would keep telling PortalService
+     * "SystemUI is handling the portal" and no overlay would ever appear.
+     */
     public static boolean isSystemUiActive() {
-        return sSystemUiActive;
+        if (!sSystemUiActive) {
+            return false;
+        }
+        int pid = sSystemUiPid;
+        if (pid <= 0) {
+            return true;
+        }
+        if (new File("/proc/" + pid).exists()) {
+            return true;
+        }
+        sSystemUiActive = false;
+        return false;
     }
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
         if ("reportSystemUiActive".equals(method)) {
+            sSystemUiPid = android.os.Binder.getCallingPid();
             sSystemUiActive = true;
             PortalStatusStore.INSTANCE.recordSystemUiActive(getContext());
             return new Bundle();

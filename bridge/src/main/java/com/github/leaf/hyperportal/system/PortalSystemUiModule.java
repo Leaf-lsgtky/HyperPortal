@@ -106,9 +106,27 @@ public final class PortalSystemUiModule {
     private static volatile Context sSysUiContext;
     private static volatile SystemUiOverlay sOverlay;
     private static final Handler sHandler = new Handler(Looper.getMainLooper());
+    /**
+     * Everything that touches the module's ContentProvider, PackageManager or
+     * icon decoding runs here. SystemUI's main thread must stay responsive
+     * during boot: a >5s stall makes the input dispatcher declare an ANR on
+     * the first gesture and the system kills and restarts SystemUI.
+     */
+    private static final ExecutorService sBgExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "hyperportal-sysui");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public static void initSystemUi(XposedInterface xposed, XposedModuleInterface.PackageLoadedParam param) {
         sXposed = xposed;
+        if (isSecondarySystemUiProcess()) {
+            // Only the main SystemUI process owns the portal window and may
+            // claim reportSystemUiActive; a ":xxx" helper process doing so
+            // would make PortalService skip its own overlay for nothing.
+            Log.i(TAG, "skipping portal overlay in secondary SystemUI process");
+            return;
+        }
         try {
             if (xposed.getModuleApplicationInfo() != null) {
                 TargetRuleStore.setModuleApkPath(xposed.getModuleApplicationInfo().sourceDir);
@@ -164,13 +182,52 @@ public final class PortalSystemUiModule {
         }
     }
 
+    private static boolean isSecondarySystemUiProcess() {
+        try {
+            String process = Application.getProcessName();
+            return process != null && process.startsWith("com.android.systemui:");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static long msSinceProcessStart() {
+        try {
+            return SystemClock.elapsedRealtime() - android.os.Process.getStartElapsedRealtime();
+        } catch (Throwable t) {
+            return -1L;
+        }
+    }
+
     private static void initOverlay(Context context) {
         if (context == null || sOverlay != null) {
             return;
         }
-        try {
-            sOverlay = new SystemUiOverlay(context);
-            sOverlay.registerReceivers();
+        synchronized (PortalSystemUiModule.class) {
+            if (sOverlay != null) {
+                return;
+            }
+            try {
+                long started = SystemClock.uptimeMillis();
+                SystemUiOverlay overlay = new SystemUiOverlay(context);
+                // Register first: from here on every drag is handled, even
+                // while the rest of the warm-up is still running.
+                overlay.registerReceivers();
+                sOverlay = overlay;
+                Log.i(TAG, "drag receiver registered in "
+                        + (SystemClock.uptimeMillis() - started) + "ms ("
+                        + msSinceProcessStart() + "ms after process start)");
+                overlay.warmUp();
+            } catch (Throwable t) {
+                Log.e(TAG, "Failed to instantiate SystemUiOverlay", t);
+                return;
+            }
+        }
+        // Both of these are binder calls into the HyperPortal app process and
+        // can cold-start it (jieba dictionary copy included). Never do that on
+        // SystemUI's main thread: it blocked input dispatch for seconds right
+        // after a cold boot and got SystemUI ANR-killed.
+        sBgExecutor.execute(() -> {
             try {
                 Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
                 context.getContentResolver().call(uri, "reportSystemUiActive", null, null);
@@ -190,9 +247,7 @@ public final class PortalSystemUiModule {
                 Log.w(TAG, "start portal keepAlive service failed", throwable);
             }
             Log.i(TAG, "SystemUiOverlay attached and listening for drag events!");
-        } catch (Throwable t) {
-            Log.e(TAG, "Failed to instantiate SystemUiOverlay", t);
-        }
+        });
     }
 
     private static final class SystemUiOverlay {
@@ -208,6 +263,7 @@ public final class PortalSystemUiModule {
         private long mLastHapticTime = 0L;
         private float mTriggerThreshold = 0.76f;
         private String mTriggerPosition = "bottom";
+        private boolean mLandscapeAllowed = false;
 
         // Current dragged content payload
         private String mText;
@@ -222,11 +278,33 @@ public final class PortalSystemUiModule {
         private String mDetectedQrContent = null;
         private TransferDockController mTransferDockController;
 
+        // Cold-boot safety. The overlay used to build its target list (three
+        // PackageManager queries plus an icon decode per share activity) and
+        // read the config provider from SystemUI's main thread while SystemUI
+        // was still starting up. That blocked input dispatch long enough for
+        // the first gesture after a cold boot to ANR, so SystemUI was killed
+        // and restarted; the first drag therefore never showed the glow or the
+        // shelf (only the system_server tilt survived, since it does not
+        // depend on SystemUI). Views are now built lazily, config and targets
+        // are prepared on sBgExecutor, and nothing on the drag path blocks.
+        private static final long CONFIG_TTL_MS = 60_000L;
+        private volatile boolean mViewsReady = false;
+        private volatile boolean mConfigLoaded = false;
+        private volatile boolean mConfigRefreshing = false;
+        private volatile long mConfigFetchedAt = 0L;
+        private volatile boolean mMasterEnabled = true;
+        private volatile boolean mTargetsBuilding = false;
+        private volatile boolean mTargetsDirty = false;
+        private volatile List<String> mPinnedOrder = new ArrayList<>();
+        private boolean mFirstDragLogged = false;
+        private int mCurrentState = 0;
+
         public SystemUiOverlay(Context context) {
+            // Deliberately trivial. initOverlay() registers the drag-state
+            // receiver as soon as this returns; warmUp() fills in the rest
+            // without blocking the main thread.
             this.mContext = context;
             this.mWindowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
-            buildTargets();
-            buildViewHierarchy();
         }
 
         private int dp(float value) {
@@ -238,14 +316,157 @@ public final class PortalSystemUiModule {
         private List<ShareTargetEntry> mCachedShareTargets = null;
         private long mLastShareTargetsQueryTime = 0;
 
-        private void buildTargets() {
-            buildTargets(mBitmap != null || mImageUri != null);
+        /** Starts the background warm-up; called once, right after registration. */
+        void warmUp() {
+            // The overlay window has to exist before a drag starts: a window
+            // added mid-drag never receives ACTION_DRAG_STARTED, so its drop
+            // targets would be dead for that drag. Building the views is cheap
+            // (no provider or PackageManager work), unlike the target list.
+            sHandler.post(this::ensureViews);
+            refreshConfigAsync();
+            requestTargetsAsync();
         }
 
-        private void buildTargets(boolean isImage) {
+        /**
+         * Builds the overlay views on demand. View inflation and the AGSL
+         * shader compile are cheap compared with the provider/icon work, but
+         * they still do not belong in SystemUI's boot window.
+         */
+        private boolean ensureViews() {
+            if (mViewsReady) {
+                return true;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                sHandler.post(this::ensureViews);
+                return false;
+            }
+            try {
+                long started = SystemClock.uptimeMillis();
+                buildViewHierarchy();
+                mViewsReady = true;
+                Log.i(TAG, "view hierarchy ready in "
+                        + (SystemClock.uptimeMillis() - started) + "ms");
+            } catch (Throwable t) {
+                Log.e(TAG, "buildViewHierarchy failed", t);
+            }
+            return mViewsReady;
+        }
+
+        /** Reads master switch / threshold / trigger edge without blocking. */
+        private void refreshConfigAsync() {
+            if (mConfigRefreshing) {
+                return;
+            }
+            mConfigRefreshing = true;
+            sBgExecutor.execute(() -> {
+                Bundle result = null;
+                long started = SystemClock.uptimeMillis();
+                try {
+                    Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                    result = mContext.getContentResolver().call(uri, "getConfig", null, null);
+                } catch (Throwable t) {
+                    Log.w(TAG, "getConfig failed", t);
+                }
+                final Bundle snapshot = result;
+                final long cost = SystemClock.uptimeMillis() - started;
+                sHandler.post(() -> applyConfig(snapshot, cost));
+            });
+        }
+
+        private void applyConfig(Bundle result, long cost) {
+            mConfigRefreshing = false;
+            mConfigFetchedAt = SystemClock.uptimeMillis();
+            if (result == null) {
+                Log.w(TAG, "config unavailable after " + cost + "ms, keeping defaults");
+                return;
+            }
+            mConfigLoaded = true;
+            if (mDockBar != null) {
+                mDockBar.setEdgeScrollMarginDp(result.getInt("edge_scroll_margin", 86));
+            }
+            int thresholdPct = result.getInt("trigger_threshold", 76);
+            if (thresholdPct >= 50 && thresholdPct <= 95) {
+                mTriggerThreshold = thresholdPct / 100.0f;
+            }
+            String pos = result.getString("trigger_position");
+            if (pos != null) {
+                mTriggerPosition = pos;
+            }
+            mLandscapeAllowed = result.getBoolean("landscape_trigger", false);
+            mMasterEnabled = result.getBoolean("master_switch", true);
+            ArrayList<String> pinnedOrder = result.getStringArrayList("target_order");
+            if (pinnedOrder == null) {
+                pinnedOrder = result.getStringArrayList("target_pinned");
+            }
+            mPinnedOrder = pinnedOrder == null ? new ArrayList<>() : pinnedOrder;
+            Log.i(TAG, "config applied in " + cost + "ms master=" + mMasterEnabled
+                    + " threshold=" + thresholdPct + " pos=" + mTriggerPosition);
+        }
+
+        /** Builds the shelf contents off the main thread; safe from any thread. */
+        private void requestTargetsAsync() {
+            if (mTargetsBuilding) {
+                mTargetsDirty = true;
+                return;
+            }
+            mTargetsBuilding = true;
+            mTargetsDirty = false;
+            // Snapshot the payload: the main thread may replace it with the
+            // next drag while this build runs.
+            final String text = mText;
+            final String mime = mImageMime;
+            final boolean isImage = (mBitmap != null || mImageUri != null);
+            sBgExecutor.execute(() -> {
+                long started = SystemClock.uptimeMillis();
+                List<AppTarget> built = null;
+                try {
+                    built = buildTargetsNow(text, mime, isImage);
+                } catch (Throwable t) {
+                    Log.w(TAG, "buildTargets failed", t);
+                }
+                final List<AppTarget> result = built;
+                final long cost = SystemClock.uptimeMillis() - started;
+                sHandler.post(() -> applyTargets(result, cost));
+            });
+        }
+
+        private void applyTargets(List<AppTarget> built, long cost) {
+            mTargetsBuilding = false;
+            if (built == null) {
+                return;
+            }
             mTargets.clear();
+            mTargets.addAll(built);
+            mAppTargetsResolved = !built.isEmpty();
+            if (mDockBar != null) {
+                List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
+                for (AppTarget target : built) {
+                    dockItems.add(new ColorOSDockBar.DockItem(
+                            target.key, target.name, target.icon, target));
+                }
+                mDockBar.setItems(dockItems);
+            }
+            Log.i(TAG, "targets ready: " + built.size() + " in " + cost + "ms");
+            if (mTargetsDirty) {
+                requestTargetsAsync();
+                return;
+            }
+            // A drag may have crossed the hot zone before the first target
+            // list was ready (cold boot). Reveal the shelf now instead of
+            // waiting for the next drag.
+            if (mCurrentState == 2 && mShowing && mDockBar != null
+                    && mDockBar.getVisibility() != View.VISIBLE) {
+                mDockBar.resetScroll();
+                mDockBar.setVisibility(View.VISIBLE);
+                mDockBar.setTranslationX(0f);
+                mDockBar.setTranslationY(0f);
+                mDockBar.setAlpha(1f);
+            }
+        }
+
+        private List<AppTarget> buildTargetsNow(String text, String mime, boolean isImage) {
             TargetConfig config = TargetConfig.fromProvider(mContext);
-            Set<String> contentKinds = TargetRepository.contentKinds(mText, isImage, mImageMime);
+            Set<String> contentKinds = TargetRepository.contentKinds(text, isImage, mime);
             List<ShareTargetEntry> candidates = new ArrayList<>();
             candidates.addAll(TargetRepository.builtInEntries(isImage));
             long now = SystemClock.uptimeMillis();
@@ -256,14 +477,15 @@ public final class PortalSystemUiModule {
             candidates.addAll(mCachedShareTargets);
             List<ShareTargetEntry> ordered = TargetRanker.rank(
                     mContext, candidates, contentKinds, config);
+            List<AppTarget> targets = new ArrayList<>(ordered.size());
             for (ShareTargetEntry entry : ordered) {
-                mTargets.add(new AppTarget(entry, createTargetAction(entry)));
+                targets.add(new AppTarget(entry, createTargetAction(entry)));
             }
-            mAppTargetsResolved = !ordered.isEmpty();
             Log.i(TAG, "targets rebuilt kinds=" + contentKinds
                     + " candidates=" + candidates.size()
                     + " shown=" + ordered.size()
                     + " limit=" + config.limit);
+            return targets;
         }
 
         private DropAction createTargetAction(final ShareTargetEntry entry) {
@@ -490,17 +712,13 @@ public final class PortalSystemUiModule {
             return digits;
         }
 
+        /**
+         * Rebuilds the shelf contents in the background. Callers on the main
+         * thread (drag receiver, ACTION_SHOW, boot broadcast) return at once;
+         * the dock is filled by applyTargets() when the build finishes.
+         */
         private void updateDockTargets() {
-            boolean isImage = (mBitmap != null || mImageUri != null);
-            buildTargets(isImage);
-            if (mDockBar != null) {
-                List<ColorOSDockBar.DockItem> dockItems = new ArrayList<>();
-                for (AppTarget target : mTargets) {
-                    dockItems.add(new ColorOSDockBar.DockItem(
-                            target.key, target.name, target.icon, target));
-                }
-                mDockBar.setItems(dockItems);
-            }
+            requestTargetsAsync();
         }
 
         private void openTextSegmentation(Context ctx, String text) {
@@ -1012,11 +1230,15 @@ public final class PortalSystemUiModule {
 
 
         private void recordTargetUse(String key) {
-            try {
-                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                mContext.getContentResolver().call(uri, "recordTargetUse", key, null);
-            } catch (Throwable ignored) {
-            }
+            // Fire-and-forget provider write: keep it off the main thread so a
+            // cold HyperPortal process cannot stall the drop.
+            sBgExecutor.execute(() -> {
+                try {
+                    Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                    mContext.getContentResolver().call(uri, "recordTargetUse", key, null);
+                } catch (Throwable ignored) {
+                }
+            });
         }
 
         private void toast(String msg) {
@@ -1028,6 +1250,7 @@ public final class PortalSystemUiModule {
             filter.addAction(ACTION_DRAG_STATE);
             filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
+            filter.addAction("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
             filter.addAction(TransferDockDragGuard.ACTION_STATE);
             filter.addAction("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK");
             filter.addAction("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
@@ -1066,39 +1289,62 @@ public final class PortalSystemUiModule {
             }
         }
 
+        /**
+         * Answers from the cached config snapshot. This is called from the
+         * drag listener on the input path, so it must never do a blocking
+         * provider call: a cold-started HyperPortal process used to stall
+         * SystemUI's main thread here for seconds. A stale or missing
+         * snapshot just schedules a background refresh; the current drag
+         * keeps the previous answer.
+         */
         private boolean isMasterEnabled() {
-            try {
-                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                Bundle res = mContext.getContentResolver().call(uri, "getConfig", null, null);
-                if (res != null) {
-                    if (mDockBar != null) {
-                        mDockBar.setEdgeScrollMarginDp(res.getInt("edge_scroll_margin", 86));
-                    }
-                    int thresholdPct = res.getInt("trigger_threshold", 76);
-                    if (thresholdPct >= 50 && thresholdPct <= 95) {
-                        mTriggerThreshold = thresholdPct / 100.0f;
-                    }
-                    String pos = res.getString("trigger_position");
-                    if (pos != null) {
-                        mTriggerPosition = pos;
-                    }
-                    boolean landscapeAllowed = res.getBoolean("landscape_trigger", false);
-                    if (!landscapeAllowed && isLandscape()) {
-                        return false;
-                    }
-                    return res.getBoolean("master_switch", true);
-                }
-            } catch (Throwable ignored) {
+            long age = SystemClock.uptimeMillis() - mConfigFetchedAt;
+            if (!mConfigRefreshing && (!mConfigLoaded || age > CONFIG_TTL_MS)) {
+                refreshConfigAsync();
             }
-            if (isLandscape()) {
+            if (!mLandscapeAllowed && isLandscape()) {
                 return false;
             }
-            return true;
+            return mMasterEnabled;
+        }
+
+        /**
+         * Applies the settings the app just broadcast, so the cached snapshot
+         * is never stale for more than one broadcast. No provider call.
+         */
+        private void applyConfigBroadcast(Intent intent) {
+            if (intent.hasExtra("master_switch")) {
+                mMasterEnabled = intent.getBooleanExtra("master_switch", mMasterEnabled);
+            }
+            if (intent.hasExtra("landscape_trigger")) {
+                mLandscapeAllowed = intent.getBooleanExtra("landscape_trigger", mLandscapeAllowed);
+            }
+            int thresholdPct = intent.getIntExtra("trigger_threshold", -1);
+            if (thresholdPct >= 50 && thresholdPct <= 95) {
+                mTriggerThreshold = thresholdPct / 100.0f;
+            }
+            String pos = intent.getStringExtra("trigger_position");
+            if (pos != null) {
+                mTriggerPosition = pos;
+            }
+            if (mDockBar != null && intent.hasExtra("edge_scroll_margin")) {
+                mDockBar.setEdgeScrollMarginDp(intent.getIntExtra("edge_scroll_margin", 86));
+            }
+            mConfigLoaded = true;
+            mConfigFetchedAt = SystemClock.uptimeMillis();
+            Log.i(TAG, "config broadcast applied master=" + mMasterEnabled
+                    + " threshold=" + mTriggerThreshold + " pos=" + mTriggerPosition);
+            // Target limit / pin / hidden changes need a rebuilt shelf.
+            requestTargetsAsync();
         }
 
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            if ("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED".equals(action)) {
+                applyConfigBroadcast(intent);
+                return;
+            }
             if (TransferDockDragGuard.ACTION_STATE.equals(action)) {
                 mTransferDockBroadcastDragging = intent.getIntExtra("state", 0) == 1;
                 if (mTransferDockBroadcastDragging) {
@@ -1209,6 +1455,13 @@ public final class PortalSystemUiModule {
             if (state > 0 && (TransferDockDragGuard.isDragging() || mTransferDockBroadcastDragging)) {
                 return;
             }
+            if (state > 0 && !mFirstDragLogged) {
+                mFirstDragLogged = true;
+                Log.i(TAG, "first drag after process start: state=" + state
+                        + " at " + msSinceProcessStart() + "ms views=" + mViewsReady
+                        + " targets=" + mTargets.size() + " config=" + mConfigLoaded);
+            }
+            mCurrentState = state;
 
             if (state == 0) {
                 // Drag ended / cancelled
@@ -1228,6 +1481,10 @@ public final class PortalSystemUiModule {
                 mBitmap = null;
                 mImageUri = null;
                 mImageMime = null;
+                return;
+            }
+
+            if (!ensureViews()) {
                 return;
             }
 
@@ -1335,15 +1592,17 @@ public final class PortalSystemUiModule {
             if (mBitmap == null && mImageUri == null) {
                 return;
             }
-            TargetConfig config = TargetConfig.fromProvider(mContext);
-            if (!config.enableQrScan || config.hiddenKeys.contains("builtin:qr")) {
-                Log.i(TAG, "QR scan skipped: disabled in config");
-                return;
-            }
             final Bitmap bmpToScan = mBitmap;
             final Uri uriToScan = mImageUri;
             mQrExecutor.execute(() -> {
                 try {
+                    // TargetConfig.fromProvider() is a blocking provider call:
+                    // keep it off SystemUI's main thread.
+                    TargetConfig config = TargetConfig.fromProvider(mContext);
+                    if (!config.enableQrScan || config.hiddenKeys.contains("builtin:qr")) {
+                        Log.i(TAG, "QR scan skipped: disabled in config");
+                        return;
+                    }
                     String qrResult = null;
                     if (bmpToScan != null && !bmpToScan.isRecycled()) {
                         qrResult = QrCodeScanner.scan(bmpToScan);
@@ -1404,10 +1663,12 @@ public final class PortalSystemUiModule {
             Drawable icon = BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_QR);
             AppTarget qrTarget = new AppTarget("builtin:qr", label, icon, action);
 
-            TargetConfig config = TargetConfig.fromProvider(mContext);
+            // Pinned order comes from the cached config snapshot: reading it
+            // from the provider here would block the main thread mid-drag.
+            List<String> pinnedOrder = mPinnedOrder;
             int insertIndex = 0;
-            if (config.pinnedOrder.contains("builtin:qr")) {
-                insertIndex = Math.min(mTargets.size(), Math.max(0, config.pinnedOrder.indexOf("builtin:qr")));
+            if (pinnedOrder.contains("builtin:qr")) {
+                insertIndex = Math.min(mTargets.size(), Math.max(0, pinnedOrder.indexOf("builtin:qr")));
             }
             mTargets.add(insertIndex, qrTarget);
 
