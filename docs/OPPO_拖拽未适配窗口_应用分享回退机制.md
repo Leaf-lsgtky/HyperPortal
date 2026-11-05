@@ -1386,6 +1386,54 @@ Row: 0 _display_name=transfer_….png
 
 这条规则同时适用于 QQ、钉钉等共用腾讯 `UriFileHelper` 系解析器的目标。
 
+### 6.7 拖拽「取消」的语义：ColorOS 没有额外手势
+
+结论：**ColorOS 内容传送门不存在「拖出来不动就取消」或「拖回起点取消」的逻辑。**
+取消只有一条路径，就是 AOSP 原生的「投不中 → 阴影飞回」。
+
+证据（`内容传送门_17.4.2.apk`）：
+
+`com.oplus.contentportal.drag.DragEventReceiver` 是传送门唯一的拖拽状态机，
+`DragEventReceiver$DragState` 枚举只有 6 个值：
+
+```
+IDLE / START / ENTER / EXIT / DROP / END      // 没有 CANCEL
+```
+
+`DragEventReceiver.g(View, DragEvent)` 的事件映射：
+
+| DragEvent action | 行为 |
+| :--- | :--- |
+| `ACTION_DRAG_STARTED` (1) | → `START`；若落点已在面板范围内，额外补发一个 `ENTER` |
+| `ACTION_DRAG_LOCATION` (2) | → `ENTER` |
+| `ACTION_DROP` (3) | → `DROP` |
+| `ACTION_DRAG_ENDED` (4) | → `END` |
+| `ACTION_DRAG_ENTERED` (5) | `return true`，无动作 |
+| `ACTION_DRAG_EXITED` (6) | `return true`，**无动作** |
+
+`DragEventReceiver.l(DragState, float x, float y, callback)` 只做「状态变了 → 显示/隐藏面板」，
+没有任何位移距离判定，也不记录起点坐标，因此不可能实现「拖回起点」这类手势。
+
+两个容易误判的线索：
+
+- **`ACTION_DRAG_CANCEL`** 只是 `l0/d.g(int)` 里给 `AccessibilityNodeInfo.AccessibilityAction`
+  起名字的查表项（与 `ACTION_DRAG_START` / `ACTION_DRAG_DROP` 并列），不是真实的拖拽事件。
+- **`cancelDragAndDrop()`** 全 APK 只有一处调用，位于 `k0/a0$o` —— 一个 ViewCompat 风格的
+  反射兼容壳（`a`=cancelDragAndDrop、`d`=setPointerIcon、`e`=startDragAndDrop、
+  `f`=updateDragShadow），与传送门流程无关。
+
+所以「取消 = 没投中」：
+
+```
+目标窗口不消费 ACTION_DROP
+  → DragDropController.reportDropResult(consumed=false)
+  → WMS DragState.createCancelAnimationLocked
+  → 阴影飞回起点
+```
+
+本项目已按此实现（`Bridge` 与 `PortalService` 的 `ACTION_DROP` 命中不到目标时一律 `return false`）。
+**若要「拖回原点取消」需要自行新增，属于超出 ColorOS 行为的功能，不是对齐项。**
+
 ## 7. 一句话总结
 
 OPPO 并不是“检测到 App 没适配拖拽”后去查一个适配表，而是：
