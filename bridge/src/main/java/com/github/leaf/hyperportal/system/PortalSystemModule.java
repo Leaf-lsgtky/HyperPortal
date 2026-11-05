@@ -1009,6 +1009,12 @@ public final class PortalSystemModule {
         if (send == null) {
             return false;
         }
+        // The drag URI belongs to HyperPortal's own provider (app-private cache).
+        // startActivityAsUser's GRANT_READ flag alone is not enough for legacy
+        // share entries that call openFileDescriptor(uri,"r") themselves; grant
+        // the target package explicitly so Weibo's fallback copy (into its OWN
+        // cache, never the gallery) can read the bytes across UIDs.
+        grantShareUris(context, send, targetPkg);
         if (context.getPackageManager().resolveActivity(send, 0) == null) {
             log(Log.INFO, TAG, "dropToShare skip: no ACTION_SEND entry in " + targetPkg
                     + " type=" + send.getType());
@@ -1264,6 +1270,45 @@ public final class PortalSystemModule {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    private static void grantShareUris(Context context, Intent send, String targetPkg) {
+        int granted = 0;
+        try {
+            Uri stream = send.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (stream != null) {
+                context.grantUriPermission(targetPkg, stream,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                granted++;
+            }
+            java.util.ArrayList<Uri> streams =
+                    send.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (streams != null) {
+                for (Uri uri : streams) {
+                    if (uri != null) {
+                        context.grantUriPermission(targetPkg, uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        granted++;
+                    }
+                }
+            }
+            ClipData clip = send.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri uri = clip.getItemAt(i).getUri();
+                    if (uri != null) {
+                        context.grantUriPermission(targetPkg, uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        granted++;
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "dropToShare grantUriPermission failed: " + throwable);
+        }
+        if (granted > 0) {
+            log(Log.INFO, TAG, "dropToShare granted " + granted + " uri(s) to " + targetPkg);
+        }
     }
 
     private static void startActivityWithUser(Context context, Intent intent,

@@ -40,6 +40,7 @@ public class PortalFileProvider extends ContentProvider {
 
     public static final String AUTHORITY = "com.github.leaf.hyperportal.files";
     public static final String INCOMING = "incoming";
+    private static final String TAG_Q = "PortalFileProvider";
 
     private static volatile boolean sSystemUiActive = false;
 
@@ -222,6 +223,8 @@ public class PortalFileProvider extends ContentProvider {
             throw new FileNotFoundException("cannot create cache dir");
         }
         File file = new File(dir, name);
+        Log.i(TAG_Q, "openFile caller=" + callerLabel(android.os.Binder.getCallingUid())
+                + " name=" + name + " mode=" + mode + " isFile=" + file.isFile());
         if (mode == null || mode.isEmpty() || mode.startsWith("r")) {
             if (!file.isFile()) {
                 throw new FileNotFoundException("missing " + name);
@@ -269,6 +272,14 @@ public class PortalFileProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
+        String resolved = resolveType(uri);
+        Log.i(TAG_Q, "getType caller=" + callerLabel(android.os.Binder.getCallingUid())
+                + " name=" + (uri != null ? uri.getLastPathSegment() : null)
+                + " -> " + resolved);
+        return resolved;
+    }
+
+    private String resolveType(Uri uri) {
         if (uri != null) {
             String name = uri.getLastPathSegment();
             if (name != null) {
@@ -293,23 +304,30 @@ public class PortalFileProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
+        int uid = android.os.Binder.getCallingUid();
+        String caller = callerLabel(uid);
         if (uri == null || getContext() == null) return null;
         String name = uri.getLastPathSegment();
         if (name == null) return null;
         File file = new File(new File(getContext().getCacheDir(), INCOMING), name);
-        if (!file.exists()) return null;
+        if (!file.exists()) {
+            Log.i(TAG_Q, "query MISSING caller=" + caller + " name=" + name);
+            return null;
+        }
 
-        // Legacy share entries (e.g. Weibo "发送给微博好友" / WeiyouShareDispatcher)
-        // resolve content:// URIs to a local path via the MediaStore "_data" column
-        // before they accept the file.  They only use the path for a <=10MB size
-        // check; the actual bytes are still read through openFileDescriptor() on
-        // the granted URI.  Returning the absolute path (a short string, no copy)
-        // keeps those entries from bailing out with "暂不支持该格式分享到微博".
-        // FileProvider-style providers normally omit "_data", which is exactly why
-        // QQ (openInputStream) worked while Weibo (query _data) did not.
+        // Deliberately DO NOT expose a "_data" column.  Legacy share entries
+        // (Weibo "发送给微博好友") treat _data as a real file path and read it
+        // with new File(path): our cacheDir is app-private, so the target app's
+        // File.exists()/open() fails and the send stalls at "正在发送文件 0/1".
+        // With no _data column the target falls back to copying through
+        // openFileDescriptor(uri,"r") into its own cache (never the gallery),
+        // which works across UIDs as long as the URI is granted to that app.
         String[] cols = projection != null ? projection : new String[]{
-                OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE, "_data"
+                OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE
         };
+        Log.i(TAG_Q, "query caller=" + caller + " name=" + name
+                + " projection=" + java.util.Arrays.toString(projection)
+                + " size=" + file.length());
         MatrixCursor cursor = new MatrixCursor(cols);
         MatrixCursor.RowBuilder row = cursor.newRow();
         for (String col : cols) {
@@ -317,13 +335,23 @@ public class PortalFileProvider extends ContentProvider {
                 row.add(name);
             } else if (OpenableColumns.SIZE.equals(col)) {
                 row.add(file.length());
-            } else if ("_data".equals(col)) {
-                row.add(file.getAbsolutePath());
             } else {
                 row.add(null);
             }
         }
         return cursor;
+    }
+
+    private String callerLabel(int uid) {
+        try {
+            Context ctx = getContext();
+            if (ctx != null) {
+                String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
+                if (pkgs != null && pkgs.length > 0) return pkgs[0] + "(" + uid + ")";
+            }
+        } catch (Throwable ignored) {
+        }
+        return String.valueOf(uid);
     }
 
     @Override
