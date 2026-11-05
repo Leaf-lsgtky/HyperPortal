@@ -5237,12 +5237,38 @@ public final class Bridge {
      * No size limit, no Binder byte[] and no ParcelFileDescriptor in the
      * startService Intent, so the original file survives untouched.
      */
+    /** Best-effort MIME sniffing for descriptors that arrive without a type. */
+    private static String sniffMime(ParcelFileDescriptor pfd) {
+        if (pfd == null) {
+            return null;
+        }
+        try {
+            android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFileDescriptor(
+                    pfd.getFileDescriptor(), null, options);
+            if (!TextUtils.isEmpty(options.outMimeType)) {
+                return options.outMimeType;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     private static String copyPfdToPortal(Context context, ParcelFileDescriptor pfd, Bundle payload) {
         if (context == null || pfd == null) {
             return null;
         }
         String name = payload.getString("fileName");
         String mime = payload.getString("mimeType");
+        if (TextUtils.isEmpty(mime) || "application/octet-stream".equals(mime)) {
+            // Weibo's image cache hands over an extension-less name and no MIME
+            // type. Sniff the descriptor so the staged file can still be typed.
+            String sniffed = sniffMime(pfd);
+            if (!TextUtils.isEmpty(sniffed)) {
+                mime = sniffed;
+            }
+        }
         String suffix = ".bin";
         String lowerMime = mime == null ? "" : mime.toLowerCase(Locale.US);
         if (lowerMime.contains("png")) {
@@ -5264,6 +5290,12 @@ public final class Bridge {
         }
         if (TextUtils.isEmpty(name)) {
             name = "drag_" + SystemClock.uptimeMillis() + suffix;
+        } else if (name.lastIndexOf('.') <= 0) {
+            // A staged file with no extension is untyped for every receiver that
+            // derives the MIME type from the name - WeChat's chat drop handler only
+            // accepts it when getType() contains "image"/"video"/"audio", and it
+            // falls back to the file name. Weibo stages 64-hex-character names.
+            name = name + suffix;
         }
         name = name.replaceAll("[/\\\\\\x00-\\x1f]", "_");
         Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
@@ -5307,6 +5339,74 @@ public final class Bridge {
                 context.getContentResolver().delete(target, null, null);
             } catch (Throwable ignored) {
             }
+            return null;
+        }
+    }
+
+    /** True when the URI is already served by this app's staging provider. */
+    private static boolean isPortalUri(Uri uri) {
+        return uri != null
+                && "content".equals(uri.getScheme())
+                && "com.github.leaf.hyperportal.files".equals(uri.getAuthority());
+    }
+
+    private static String queryDisplayName(Context context, Uri uri) {
+        try (android.database.Cursor cursor = context.getContentResolver().query(uri,
+                new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    String name = cursor.getString(index);
+                    if (!TextUtils.isEmpty(name)) {
+                        return name;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Re-stages a third-party image URI into PortalFileProvider.
+     *
+     * A drag that carries somebody else's content:// URI is opaque to the receiver:
+     * WeChat's drop handler (com.tencent.mm.pluginsdk.ui.tools.m7) queries for a
+     * "_data" column, and a foreign provider either refuses the query or exposes
+     * none, which ends in its "发送失败" toast. Streaming the bytes into our own
+     * provider makes every drag we start carry a URI we can describe.
+     */
+    private static String copyUriToPortal(Context context, Uri uri, Bundle payload) {
+        if (context == null || uri == null) {
+            return null;
+        }
+        try (ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(uri, "r")) {
+            if (pfd == null) {
+                Log.w(TAG, "copyUriToPortal no fd for " + uri);
+                return null;
+            }
+            Bundle meta = new Bundle(payload == null ? Bundle.EMPTY : payload);
+            String mime = meta.getString("mimeType");
+            if (TextUtils.isEmpty(mime)) {
+                mime = context.getContentResolver().getType(uri);
+            }
+            if (TextUtils.isEmpty(mime)) {
+                mime = mimeForUri(uri, null);
+            }
+            if (!TextUtils.isEmpty(mime)) {
+                meta.putString("mimeType", mime);
+            }
+            if (TextUtils.isEmpty(meta.getString("fileName"))) {
+                String displayName = queryDisplayName(context, uri);
+                if (!TextUtils.isEmpty(displayName)) {
+                    meta.putString("fileName", displayName);
+                }
+            }
+            String staged = copyPfdToPortal(context, pfd, meta);
+            Log.i(TAG, "copyUriToPortal " + uri + " -> " + staged + " mime=" + mime);
+            return staged;
+        } catch (Throwable throwable) {
+            Log.w(TAG, "copyUriToPortal failed for " + uri, throwable);
             return null;
         }
     }
@@ -5655,6 +5755,17 @@ public final class Bridge {
         // only when there is no bitmap to convert.
         boolean preferPngForGif = sourceIsGif && dragBitmap != null;
         if (prepareDrag) {
+            // A URI owned by the source app (Weibo's own provider, a photo-picker
+            // grant, ...) is opaque to the drop target. Re-stage it so every drag
+            // we start carries a URI this app can describe.
+            if (imageCacheName == null && imageContentUri != null
+                    && !isPortalUri(imageContentUri) && context != null) {
+                String restaged = copyUriToPortal(context, imageContentUri, payload);
+                if (restaged != null) {
+                    imageCacheName = restaged;
+                    imageContentUri = null;
+                }
+            }
             if (imageCacheName == null && imageContentUri == null
                     && filePfd instanceof ParcelFileDescriptor && !preferPngForGif) {
                 imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
