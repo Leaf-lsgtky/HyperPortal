@@ -5479,9 +5479,10 @@ public final class Bridge {
             }
             if (node instanceof String) {
                 String text = (String) node;
-                if (text.length() <= 512
-                        && (text.startsWith("/") || text.startsWith("file://") || text.contains("://"))) {
-                    if (paths[0]++ < 6) {
+                if (text.length() <= 512) {
+                    if (paths[0] < 6
+                            && (text.startsWith("/") || text.startsWith("file:") || text.contains("://"))) {
+                        paths[0]++;
                         diag.append(" [").append(text).append(']');
                     }
                     java.io.File candidate = fileFromString(text);
