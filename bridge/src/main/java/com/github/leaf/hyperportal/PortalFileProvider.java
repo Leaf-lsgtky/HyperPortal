@@ -223,8 +223,11 @@ public class PortalFileProvider extends ContentProvider {
             throw new FileNotFoundException("cannot create cache dir");
         }
         File file = new File(dir, name);
-        Log.i(TAG_Q, "openFile caller=" + callerLabel(android.os.Binder.getCallingUid())
-                + " name=" + name + " mode=" + mode + " isFile=" + file.isFile());
+        int uid = android.os.Binder.getCallingUid();
+        if (uid != android.os.Process.myUid()) {
+            Log.i(TAG_Q, "openFile caller=" + callerLabel(uid)
+                    + " name=" + name + " mode=" + mode + " isFile=" + file.isFile());
+        }
         if (mode == null || mode.isEmpty() || mode.startsWith("r")) {
             if (!file.isFile()) {
                 throw new FileNotFoundException("missing " + name);
@@ -272,11 +275,7 @@ public class PortalFileProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
-        String resolved = resolveType(uri);
-        Log.i(TAG_Q, "getType caller=" + callerLabel(android.os.Binder.getCallingUid())
-                + " name=" + (uri != null ? uri.getLastPathSegment() : null)
-                + " -> " + resolved);
-        return resolved;
+        return resolveType(uri);
     }
 
     private String resolveType(Uri uri) {
@@ -305,13 +304,13 @@ public class PortalFileProvider extends ContentProvider {
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
         int uid = android.os.Binder.getCallingUid();
-        String caller = callerLabel(uid);
+        boolean external = uid != android.os.Process.myUid();
         if (uri == null || getContext() == null) return null;
         String name = uri.getLastPathSegment();
         if (name == null) return null;
         File file = new File(new File(getContext().getCacheDir(), INCOMING), name);
         if (!file.exists()) {
-            Log.i(TAG_Q, "query MISSING caller=" + caller + " name=" + name);
+            if (external) Log.i(TAG_Q, "query MISSING caller=" + callerLabel(uid) + " name=" + name);
             return null;
         }
 
@@ -337,10 +336,12 @@ public class PortalFileProvider extends ContentProvider {
             wanted.add(OpenableColumns.DISPLAY_NAME);
             cols = wanted.toArray(new String[0]);
         }
-        Log.i(TAG_Q, "query caller=" + caller + " name=" + name
-                + " projection=" + java.util.Arrays.toString(projection)
-                + " served=" + java.util.Arrays.toString(cols)
-                + " size=" + file.length());
+        if (external) {
+            Log.i(TAG_Q, "query caller=" + callerLabel(uid) + " name=" + name
+                    + " projection=" + java.util.Arrays.toString(projection)
+                    + " served=" + java.util.Arrays.toString(cols)
+                    + " size=" + file.length());
+        }
         MatrixCursor cursor = new MatrixCursor(cols);
         MatrixCursor.RowBuilder row = cursor.newRow();
         for (String col : cols) {

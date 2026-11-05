@@ -1124,33 +1124,128 @@ system_server (PortalSystemModule)
 
 ---
 
-### 6.5 兼容性修复：微博「发送给好友」提示"暂不支持该格式分享到微博"
+### 6.5 兼容性修复：微博「发送给好友」
 
-**现象**：同一张 `image/png`，拖到 QQ 好友正常，选微博"发送给好友"却弹
+**现象 A**：同一张 `image/png`，拖到 QQ 好友正常，选微博「发送给好友」弹
 `抱歉，暂不支持该格式分享到微博`（`string/sharefail_not_support` / `0x7f131d3f`）。
 发微博（`ComposerDispatchActivity`）不受影响。
 
+**现象 B**：把 `_data` 补成真实路径后，能进到发送流程，但提示「发送失败，请重试」，
+收件方只看到一张空图。
+
 **定位**（`com.sina.weibo` base.apk 反编译）：
 
-- `cmd package query-activities` 确认微博 `SEND image/png` 有两个入口：
-  `composerinde.ComposerDispatchActivity`（发微博）、`weiyou.share.WeiyouShareDispatcher`（发给好友）。
-- `WeiyouShareDispatcher.onCreate()` 对 `ACTION_SEND + image/*` 会先调
-  `weiyou.utils.ah.a(context, uri)` 把 `EXTRA_STREAM` 的 URI 解析成**本地文件路径**：
-  - `content://` 分支 `query(uri, null, ...)` 逐列找 `_data`，命中直接返回路径字符串；
-  - 找不到走 `ah.a(context, cursor, uri)` 兜底（query `_display_name` + `openFileDescriptor` 拷贝到自己缓存）；
-  - 返回 null 即 `TextUtils.isEmpty(path)` → toast `sharefail_not_support` + `finish()`。
-- 路径只用于 `dj.k(path)`（`new File(path)` → `dj.i` 的 `exists/isFile/length`）
-  做 ≤10MB 检查；**真正转发用的仍是 EXTRA_STREAM 的 URI**（`SHARE_FILES_ARRY`）。
-- 中转站 chip 拖出的 URI = `content://com.github.leaf.hyperportal.files/incoming/transfer_xxx.png`
-  （`TransferDockManager.exportItemUri` → 自写 `PortalFileProvider`）。该 provider 的
-  `query()` 默认只返回 `{_display_name, _size}`，**没有 `_data` 列**；QQ 走标准
-  `openInputStream` 不受影响，微博这个老入口强依赖 `_data` 因而失败。
+1. `SEND image/png` 有两个入口：`composerinde.ComposerDispatchActivity`（发微博）、
+   `weiyou.share.WeiyouShareDispatcher`（发给好友）。
+2. `WeiyouShareDispatcher.onCreate()` 先调 `weiyou.utils.ah.a(context, uri)` 把
+   `EXTRA_STREAM` 解析成**本地文件路径**；结果为空即 toast `sharefail_not_support` + `finish()`。
+3. `weiyou.utils.ah.a(Context, Uri)` 的分支是整个问题的核心：
 
-**修复**：`PortalFileProvider.query()` 默认列补 `_data`，值为缓存文件的
-`getAbsolutePath()` —— 只是一个路径字符串，**不传图像数据、零拷贝**。
-`dj.k` 用 `File.length()` 取大小，跨 app 读私有目录返回 0（不抛异常），0 ≤ 10MB
-正常放行；文件内容仍由微博通过已授权的 URI `openFileDescriptor` 读取
-（`grantDragPermissions` 已把 `com.sina.weibo` 列入授权名单）。
+   ```java
+   if ("content".equals(uri.getScheme())) {
+       Cursor c = resolver.query(uri, new String[]{"_data"}, null, null, null);
+       if (c != null) {
+           for (String col : c.getColumnNames())
+               if ("_data".equals(col)) { c.moveToFirst(); return c.getString(idx); } // 直接用，不拷贝
+           return ah.a(context, c, uri);   // 没有 _data 列 → openFileDescriptor 拷贝到自己的缓存
+       }
+   } else if ("file".equals(uri.getScheme())) {
+       return uri.getPath();
+   }
+   return null;
+   ```
+
+4. `ah.a(Context, Cursor, Uri)`（拷贝兜底）：query `_display_name` → 目标文件名 =
+   `System.currentTimeMillis() + name` → 目标目录 `weiyou_chat` → `openFileDescriptor(uri,"r")`
+   逐块复制 → 返回该路径。缓存根实测为
+   `/sdcard/Android/data/com.sina.weibo/files/sina/weibo/storage/weiyou_chat/`。
+5. `WeiyouShareComposerActivity$a.doInBackground()` 对每个附件再调一次 `ah.a` 拿 path，
+   然后 `a(path, uri, true, "localfile")`。
+6. `WeiyouShareComposerActivity$a.a(String path, Uri uri, boolean, String)`：
+   `new File(path).exists() && isFile()` 不成立就**静默 return**（无 toast）；
+   图片分支 `SendImageJob.sendImageMsg(ctx, mode, sessionId, isGroup, path, false, isStranger, sendFrom, "outfile")`
+   —— **第 5 个参数是 path，Uri 根本没传**。只有「文件」分支 `SendCommFileJob.sendFileMsg(...)`
+   才把 Uri 一起传下去。
+7. `SendImageJob.onRun()` → `new fileupload.i(filePath, user, uuid)` 上传，`i.i()` 取 fid；
+   fid 为空 → `imageLog.k("upload dm_pic get fid null")` → 消息置失败 → 「发送失败，请重试」。
+
+> **结论：微博发图片是 100% 走本地文件路径，`content://` 的 Uri 只在发「文件」时才用。**
+
+**第一次修复（错误，已回滚）**：给 `query()` 补 `_data` = 暂存文件的 `getAbsolutePath()`。
+微博确实拿到了路径并通过了 `dj.k(path)` 的 ≤10MB 检查，但仍然发不出去：
+
+- 暂存文件在 app 私有 `cacheDir`，微博 uid 打不开；
+- 改成镜像到 `Download/.hyperportal` 依然失败——微博只有 `READ_MEDIA_IMAGES`
+  （`MANAGE_EXTERNAL_STORAGE` 为 `default`），而该文件被登记在 `MediaStore.Downloads`
+  （`media_type=0`），不在 `images` 集合里，`READ_MEDIA_IMAGES` 覆盖不到；
+- 实测 `su 10376 sh -c "ls/dd <mirror>"` → `Permission denied`（uid 2000 可读）；
+- 上传读到 0 字节 → 拿不到 fid → 发送失败。
+
+**最终修复**：`PortalFileProvider.query()` **永不返回 `_data` 列**（即使调用方显式投影 `_data`），
+并且始终返回 `_display_name`。微博随即走进它自己的拷贝兜底，通过 `openFileDescriptor`
+把内容复制进 `weiyou_chat` 后从那里上传。
+
+> 旧代码 `projection != null ? projection : 默认列` 在微博投影 `["_data"]` 时会构造出一列
+> 值为 `null` 的 `_data`；微博的 `if ("_data".equals(col)) return getString(idx)` 命中并返回
+> `null`。**这才是最初「暂不支持」的真正原因——不是缺列，而是有列但值为空。**
+
+**验证**：`content query --projection _data` 只返回 `_display_name`；发送成功后
+`weiyou_chat/` 下出现 `<millis><原名>.png`（实测 934,311 字节）。
+
+**关于 URI 授权**：`system_server` 用 `startActivity` 携带第三方 provider 的 Uri 时，
+`UriGrantsManagerService` 会拒绝代授权：
+
+```text
+For security reasons, the system cannot issue a Uri permission grant to
+content://com.github.leaf.hyperportal.files/incoming/xxx; use startActivityAsCaller() instead
+```
+
+`PortalSystemModule.grantShareUris()` 跑在 system_server 里，因此无效。但本 provider 声明为
+`exported="true"` 且没有 `readPermission`，目标 App 可以直接 `openFileDescriptor`，
+所以这条路径**不依赖**该授权。
+
+### 6.5.1 附带结论：MediaStore 隐藏目录（实测）
+
+| 路径 | MediaStore 归类 | 相册可见 | 可用性 |
+| :--- | :--- | :--- | :--- |
+| `Download/.hyperportal` | `downloads`，`media_type=0` | 否 | 可插入，但目标 App 读不到 |
+| `Pictures/.hyperportal` | — | — | 插入被静默拒绝 |
+| `DCIM/.hyperportal` | — | — | 插入被静默拒绝 |
+| `/sdcard/Android/media/<pkg>/` | `images` | **是** | 违反"不进相册"约束，不可用 |
+
+即使执行 `content call --uri content://media --method scan_volume --arg external_primary`
+之后，`Download/.hyperportal` 仍然不会出现在 `images` 集合中。
+
+### 6.5.2 对照：ColorOS 中转站是怎么把文件交给目标 App 的
+
+拆 `内容传送门_17.4.2.apk`（`com.oplus.contentportal`，targetSdk 37）得到：
+
+- **它没有 FileProvider**（3 个 provider：2× Epona、1× androidx.startup），
+  即中转站不对外发布自己的 `content://`。
+- 声明了 `MANAGE_EXTERNAL_STORAGE` / `READ_EXTERNAL_STORAGE` / `READ_MEDIA_IMAGES`。
+- `com.oplus.contentportal.notice.FileAccessPermissionNotice`：弹窗标题「开启"所有文件访问"权限」，
+  正文「"内容传送门"需要使用所有文件访问权限以使用、存储和访问所有文件」，按钮直接跳
+  `android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION`。
+- `com.oplus.contentportal.utils.o0`（`UriPermissionUtils`）的 `grantUriPermissionForUser(pkg, uri, userId)`：
+  先 `removeUserInfoFromUri("content://<userId>@…")`，再 `addUserInfo(currentUser)`；
+  跨用户时依次尝试 `IActivityManager.grantUriPermissionFromOwner`（反射）→ `ActivityManager` 路径 →
+  `grantUriPermissionFromOwner`，最后兜底 `context.grantUriPermission(pkg, uri, FLAG_GRANT_READ_URI_PERMISSION)`。
+- OPPO system_server 的回退对 `file://` 有专门处理（`ifNeedDisbaleStrictMode` +
+  `safelyStartChooseActivity` + `StrictMode.disableDeathOnFileUriExposure`），
+  说明其拖拽数据里允许出现 `file://`。
+
+三方对照：
+
+| 维度 | ColorOS | 我们（修复前） | 我们（修复后） |
+| :--- | :--- | :--- | :--- |
+| URI 持有方 | 中转站 app 自己 | HyperPortal（provider） | HyperPortal（provider） |
+| 拖拽源 uid | 中转站 app（同一个） | `com.android.systemui` | `com.android.systemui` |
+| 授权者 | 中转站进程内 `grantUriPermission` | system_server（被系统拒绝） | 不需要（provider 已 exported） |
+| 目标取内容方式 | 真实路径 / `file://` + 自身存储权限 | 读 `_data`（失败） | `openFileDescriptor` 拷贝到自身缓存 |
+
+**根因归纳**：ColorOS 的"URI 持有方 = 拖拽源 = 授权者"是同一个 uid，所以它的
+`grantUriPermission` 天然合法；我们把面板放进 SystemUI、provider 留在 HyperPortal，
+形成"拖拽源 / provider / 启动者"三个 uid，system_server 无权代授，这才是一路踩坑的源头。
 
 ## 7. 一句话总结
 
