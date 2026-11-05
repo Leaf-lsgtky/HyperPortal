@@ -299,8 +299,16 @@ public class PortalFileProvider extends ContentProvider {
         File file = new File(new File(getContext().getCacheDir(), INCOMING), name);
         if (!file.exists()) return null;
 
+        // Legacy share entries (e.g. Weibo "发送给微博好友" / WeiyouShareDispatcher)
+        // resolve content:// URIs to a local path via the MediaStore "_data" column
+        // before they accept the file.  They only use the path for a <=10MB size
+        // check; the actual bytes are still read through openFileDescriptor() on
+        // the granted URI.  Returning the absolute path (a short string, no copy)
+        // keeps those entries from bailing out with "暂不支持该格式分享到微博".
+        // FileProvider-style providers normally omit "_data", which is exactly why
+        // QQ (openInputStream) worked while Weibo (query _data) did not.
         String[] cols = projection != null ? projection : new String[]{
-                OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE
+                OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE, "_data"
         };
         MatrixCursor cursor = new MatrixCursor(cols);
         MatrixCursor.RowBuilder row = cursor.newRow();
@@ -309,6 +317,8 @@ public class PortalFileProvider extends ContentProvider {
                 row.add(name);
             } else if (OpenableColumns.SIZE.equals(col)) {
                 row.add(file.length());
+            } else if ("_data".equals(col)) {
+                row.add(file.getAbsolutePath());
             } else {
                 row.add(null);
             }

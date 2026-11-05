@@ -1099,6 +1099,15 @@ system_server (PortalSystemModule)
     不学 OPPO 用 `disableDeathOnFileUriExposure` 绕过）。
 - 与 OPPO 的差异：**不套 `createChooser`**，直接隐式启动已 `setPackage` 的
   send intent——唯一命中直接进目标 App 分享入口，多命中系统自动出小选单。
+- **必须 `setLaunchTaskId(目标 task)`（第一版踩坑，已修）**：隐式 SEND 命中目标 App
+  多个分享入口时，系统会路由到 `com.android.intentresolver/.ResolverActivity`。
+  若不给 launchTaskId，resolver 会进自己的新 task；拖拽收尾逻辑紧接着把**目标 App
+  自己的 task** 移到最前（`wm_task_to_front`），resolver 立刻失焦，ChooserActivity
+  检测到非前台就自杀（`wm_finish_activity … app-request`），表现为“分享菜单闪一下就关”。
+  OPPO 在 `preReportDropResult` 里 `options.setLaunchTaskId(task.mTaskId)` 正是为了
+  把面板放进目标 task 顶部，任何后续抬 task 的动作受益的都是面板本身。
+  本项目现在同样传 launchTaskId（`ActivityOptions.setLaunchTaskId` 反射），并把启动
+  延迟 250ms 排在 `endDragLocked` 与 dock 收尾之后，双保险。
 - 分身/多用户：反射 `getOwningUid()`（回退字段 `mOwnerUid`）→
   `UserHandle.getUserHandleForUid(uid)` → 反射 `Context.startActivityAsUser`
   （该方法在 SDK 37 桩中为 @hide，system_server 内无隐藏 API 限制）。
@@ -1114,6 +1123,34 @@ system_server (PortalSystemModule)
 > ⚠️ 该 hook 在 `system_server`，安装后需**冷重启一次**才生效（规则 7：不自动重启）。
 
 ---
+
+### 6.5 兼容性修复：微博「发送给好友」提示"暂不支持该格式分享到微博"
+
+**现象**：同一张 `image/png`，拖到 QQ 好友正常，选微博"发送给好友"却弹
+`抱歉，暂不支持该格式分享到微博`（`string/sharefail_not_support` / `0x7f131d3f`）。
+发微博（`ComposerDispatchActivity`）不受影响。
+
+**定位**（`com.sina.weibo` base.apk 反编译）：
+
+- `cmd package query-activities` 确认微博 `SEND image/png` 有两个入口：
+  `composerinde.ComposerDispatchActivity`（发微博）、`weiyou.share.WeiyouShareDispatcher`（发给好友）。
+- `WeiyouShareDispatcher.onCreate()` 对 `ACTION_SEND + image/*` 会先调
+  `weiyou.utils.ah.a(context, uri)` 把 `EXTRA_STREAM` 的 URI 解析成**本地文件路径**：
+  - `content://` 分支 `query(uri, null, ...)` 逐列找 `_data`，命中直接返回路径字符串；
+  - 找不到走 `ah.a(context, cursor, uri)` 兜底（query `_display_name` + `openFileDescriptor` 拷贝到自己缓存）；
+  - 返回 null 即 `TextUtils.isEmpty(path)` → toast `sharefail_not_support` + `finish()`。
+- 路径只用于 `dj.k(path)`（`new File(path)` → `dj.i` 的 `exists/isFile/length`）
+  做 ≤10MB 检查；**真正转发用的仍是 EXTRA_STREAM 的 URI**（`SHARE_FILES_ARRY`）。
+- 中转站 chip 拖出的 URI = `content://com.github.leaf.hyperportal.files/incoming/transfer_xxx.png`
+  （`TransferDockManager.exportItemUri` → 自写 `PortalFileProvider`）。该 provider 的
+  `query()` 默认只返回 `{_display_name, _size}`，**没有 `_data` 列**；QQ 走标准
+  `openInputStream` 不受影响，微博这个老入口强依赖 `_data` 因而失败。
+
+**修复**：`PortalFileProvider.query()` 默认列补 `_data`，值为缓存文件的
+`getAbsolutePath()` —— 只是一个路径字符串，**不传图像数据、零拷贝**。
+`dj.k` 用 `File.length()` 取大小，跨 app 读私有目录返回 0（不抛异常），0 ≤ 10MB
+正常放行；文件内容仍由微博通过已授权的 URI `openFileDescriptor` 读取
+（`grantDragPermissions` 已把 `com.sina.weibo` 列入授权名单）。
 
 ## 7. 一句话总结
 

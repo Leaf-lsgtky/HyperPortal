@@ -1037,22 +1037,60 @@ public final class PortalSystemModule {
             targetUser = android.os.UserHandle.getUserHandleForUid(ownerUid);
         }
 
+        // OPPO parity (preReportDropResult): launch INSIDE the target app's own
+        // task. Without setLaunchTaskId the disambiguation ResolverActivity gets
+        // its own task; the drag-end cleanup then raises the target app's task
+        // and the Chooser detects it is no longer resumed and immediately
+        // self-finishes ("app-request"), which looked like the share menu
+        // closing by itself.
+        int launchTaskId = -1;
         try {
-            if (targetUser != null) {
-                // Context.startActivityAsUser(Intent, UserHandle) is @hide in the
-                // SDK 37 stubs but present at runtime; inside system_server there
-                // is no hidden-API enforcement.
-                invoke(context, "startActivityAsUser", send, targetUser);
-            } else {
-                context.startActivity(send);
+            Object task = invoke(targetWin, "getTask");
+            if (task != null) {
+                Object id = getField(task, "mTaskId");
+                if (id instanceof Integer) {
+                    launchTaskId = (Integer) id;
+                }
             }
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "dropToShare start failed for " + targetPkg + ": " + throwable);
-            return false;
+        } catch (Throwable ignored) {
         }
-        log(Log.INFO, TAG, "dropToShare: " + sourcePkg + " -> " + targetPkg
-                + " action=" + send.getAction() + " type=" + send.getType()
-                + " items=" + clip.getItemCount() + " ownerUid=" + ownerUid);
+
+        Bundle options = null;
+        try {
+            android.app.ActivityOptions activityOptions = android.app.ActivityOptions.makeBasic();
+            if (launchTaskId >= 0) {
+                // @hide, but reflection inside system_server has no hidden-API gate.
+                Method setLaunchTaskId = android.app.ActivityOptions.class
+                        .getMethod("setLaunchTaskId", int.class);
+                setLaunchTaskId.invoke(activityOptions, launchTaskId);
+            }
+            options = activityOptions.toBundle();
+        } catch (Throwable ignored) {
+        }
+
+        // Fire the panel only after endDragLocked() and the dock's drag-end
+        // task reshuffling have run, so the panel is the last thing on top.
+        final Intent finalSend = send;
+        final Bundle finalOptions = options;
+        final android.os.UserHandle finalUser = targetUser;
+        final int finalTaskId = launchTaskId;
+        final int finalOwnerUid = ownerUid;
+        final String finalSource = sourcePkg;
+        final int finalItemCount = clip.getItemCount();
+        sHandler.postDelayed(() -> {
+            try {
+                startActivityWithUser(context, finalSend, finalOptions, finalUser);
+                log(Log.INFO, TAG, "dropToShare: " + finalSource + " -> " + targetPkg
+                        + " action=" + finalSend.getAction() + " type=" + finalSend.getType()
+                        + " items=" + finalItemCount + " ownerUid=" + finalOwnerUid
+                        + " task=" + finalTaskId);
+            } catch (Throwable throwable) {
+                Throwable cause = throwable instanceof java.lang.reflect.InvocationTargetException
+                        ? ((java.lang.reflect.InvocationTargetException) throwable).getTargetException()
+                        : throwable;
+                log(Log.WARN, TAG, "dropToShare start failed for " + targetPkg + ": " + cause);
+            }
+        }, 250L);
         return true;
     }
 
@@ -1226,6 +1264,27 @@ public final class PortalSystemModule {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    private static void startActivityWithUser(Context context, Intent intent,
+            Bundle options, android.os.UserHandle user) throws Throwable {
+        if (user != null) {
+            try {
+                Method m = Context.class.getMethod("startActivityAsUser",
+                        Intent.class, Bundle.class, android.os.UserHandle.class);
+                m.invoke(context, intent, options, user);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+            try {
+                Method m = Context.class.getMethod("startActivityAsUser",
+                        Intent.class, android.os.UserHandle.class);
+                m.invoke(context, intent, user);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        context.startActivity(intent, options);
     }
 
     private static Context resolveWmContext(Object wms) {
