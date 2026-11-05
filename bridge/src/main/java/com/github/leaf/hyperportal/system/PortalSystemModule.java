@@ -128,6 +128,13 @@ public final class PortalSystemModule {
     private static volatile boolean sLoggedGateOverride = false;
     private static volatile Object sWms;
     private static volatile String sDragSourcePackage;
+    /**
+     * False when the drag was started by a SystemUI-hosted surface (the transfer
+     * dock panel, the shelf) instead of by an app window. Such a drag has no app
+     * task of its own, so tilting "the topmost fullscreen task" would distort an
+     * unrelated app that merely happens to be behind the panel.
+     */
+    private static volatile boolean sTiltAllowed = true;
 
     private static final Handler sHandler = new Handler(Looper.getMainLooper());
     private static final Runnable sTicker = new Runnable() {
@@ -544,13 +551,17 @@ public final class PortalSystemModule {
                 }
                 Object root = getField(wms, "mRoot");
 
+                sTiltAllowed = !isOverlayDragSource(sDragSourcePackage);
                 Object task = resolveTargetTask(wms, root, windowArg);
                 sTask = task;
                 if (task != null) {
                     sTaskSurface = (SurfaceControl) getField(task, "mSurfaceControl");
                     log(Log.INFO, TAG, "our drag started target task=" + task
-                            + " surface=" + sTaskSurface);
-                    prepareWallpaperSurface(task);
+                            + " surface=" + sTaskSurface + " tilt=" + sTiltAllowed
+                            + " source=" + sDragSourcePackage);
+                    if (sTiltAllowed) {
+                        prepareWallpaperSurface(task);
+                    }
                 } else {
                     sTaskSurface = null;
                     log(Log.WARN, TAG, "our drag started but no valid fullscreen task found");
@@ -596,6 +607,16 @@ public final class PortalSystemModule {
             log(Log.DEBUG, TAG, "resolveDragSourcePackage failed: " + throwable);
             return null;
         }
+    }
+
+    /**
+     * SystemUI and this module host drag sources as overlay windows: the transfer
+     * dock panel and the portal shelf. They are not app tasks, so the 3D tilt must
+     * stay off for them.
+     */
+    private static boolean isOverlayDragSource(String pkg) {
+        return "com.android.systemui".equals(pkg)
+                || "com.github.leaf.hyperportal".equals(pkg);
     }
 
     /**
@@ -809,6 +830,7 @@ public final class PortalSystemModule {
                     }
                     sTask = null;
                     sTaskSurface = null;
+                    sTiltAllowed = true;
                 }
             }, 300);
             log(Log.INFO, TAG, "our drag closed, restoring");
@@ -1468,6 +1490,11 @@ public final class PortalSystemModule {
     }
 
     private static void applyTaskProgress(float progress) {
+        if (!sTiltAllowed) {
+            // Overlay-hosted drag (transfer dock / shelf): never touch the task that
+            // happens to be behind the panel.
+            return;
+        }
         SurfaceControl surface = sTaskSurface;
         if (surface == null || !surface.isValid()) {
             return;
