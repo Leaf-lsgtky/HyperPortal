@@ -315,18 +315,31 @@ public class PortalFileProvider extends ContentProvider {
             return null;
         }
 
-        // Deliberately DO NOT expose a "_data" column.  Legacy share entries
-        // (Weibo "发送给微博好友") treat _data as a real file path and read it
-        // with new File(path): our cacheDir is app-private, so the target app's
-        // File.exists()/open() fails and the send stalls at "正在发送文件 0/1".
-        // With no _data column the target falls back to copying through
-        // openFileDescriptor(uri,"r") into its own cache (never the gallery),
-        // which works across UIDs as long as the URI is granted to that app.
-        String[] cols = projection != null ? projection : new String[]{
-                OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE
-        };
+        // Some targets (e.g. Weibo's "发送给好友" →
+        // com.sina.weibo.weiyou.utils.ah.a(Context, Uri)) resolve a content:// URI by
+        // looking for a "_data" column and then opening that path with new File(path).
+        // Our staged file lives in the app-private cacheDir, so every path we could
+        // hand out is unreadable for the receiving app, which makes the upload read
+        // zero bytes.  Those same targets DO have a correct fallback: when the cursor
+        // exposes no "_data" column at all they copy the stream through
+        // openFileDescriptor() into their own cache and send from there.
+        // Therefore: never expose "_data" (not even when explicitly projected), and
+        // always serve DISPLAY_NAME so that fallback can derive a file name.
+        String[] cols;
+        if (projection == null || projection.length == 0) {
+            cols = new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
+        } else {
+            java.util.LinkedHashSet<String> wanted = new java.util.LinkedHashSet<>();
+            for (String col : projection) {
+                if (col == null || "_data".equals(col)) continue;
+                wanted.add(col);
+            }
+            wanted.add(OpenableColumns.DISPLAY_NAME);
+            cols = wanted.toArray(new String[0]);
+        }
         Log.i(TAG_Q, "query caller=" + caller + " name=" + name
                 + " projection=" + java.util.Arrays.toString(projection)
+                + " served=" + java.util.Arrays.toString(cols)
                 + " size=" + file.length());
         MatrixCursor cursor = new MatrixCursor(cols);
         MatrixCursor.RowBuilder row = cursor.newRow();
