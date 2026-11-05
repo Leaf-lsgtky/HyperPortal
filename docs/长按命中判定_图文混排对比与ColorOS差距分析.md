@@ -69,7 +69,13 @@ View.dispatchTouchEvent
             ACTION_DOWN → 把"这一路上每个 view"塞进 touchViews（WeakReference）
             ACTION_UP   → 清空
 
-长按触发 → OplusViewDragManager.handleActionMove(ev, ctx, decor)
+ACTION_DOWN → OplusViewDragManager.isFeatureEnabled(view)              :30896
+  └─ 按"当前窗口标题(activity)"装载 mWhiteViewList / mBlackViewList
+     来自本包配置 PackageDragConfigInfo（云控 XML 切片，见 §2.8）；没有配置 → 拖拽根本不启动
+
+长按触发 → OplusViewDragManager.handleActionMove(ev, ctx, decor)        :30884
+  ├ !mIsSupportDrag → return（全局开关 / app 禁用名单）
+  ├ tryPluginDrag(...)  ← 第三方 App 自己注册 OplusDragContentPlugin 时优先走这条
   └─ findTouchTargetView(ev, decor)                                    OplusViewDragManager:30859
        ├ 首试 findTouchTargetViewWithEventDispatch(ev)  ← dispatch 链       :30861
        │    遍历 touchViews（外→内）：isInvalidView? → 跳过
@@ -214,6 +220,83 @@ ColorOS 侧没有对应实现：文本只可能来自 `getTextViewText(命中的
 
 单个容差都不大，但它们串起来就把"图片"和"上一行文字"的边界抹掉了。
 
+### 2.8 ColorOS 的"黑白名单"到底是什么（云端配置实证）
+
+> 常见误解：*"ColorOS 没有黑白名单，是纯通用的。"*
+> 实测结论：**它有，而且拖拽完全依赖它** —— 只是它不叫"黑白名单"、也不在设置里给你看。
+
+**配置文件（两处，取版本号大的那个）** —— `OplusViewDragRusHelper.init()`：
+
+```java
+File dataFile = new File("data/oplus/os/sys_view_drag_list.xml");            // RUS 云控下发落盘
+File sysFile  = new File("system_ext/oplus/sys_view_drag_list.xml");         // ROM 内置
+// 各自 getVersion(xml)，谁大用谁
+```
+
+- `OplusViewDragRusHelper extends com.android.server.pm.RomUpdateHelper`
+  —— **RUS = OPPO 的 ROM Update Service（云控/配置中心）**，基类就是那套"带版本的配置下发"框架；
+  `initRusHelper()` 里注册的配置名是 `sys_view_drag_list`。
+- 下发链路：
+  `system_server: OplusViewDragSystemServer.preBindApplication`
+  → Bundle 键 `view_drag_package_raw_xml_gz_bundle_key` / `view_drag_package_raw_xml_bundle_key` / `view_drag_global_config_bundle_key` / `view_drag_bundle_key`
+  → 应用进程 `OplusActivityThreadExtImpl.hookHandleBindApplication` 取出
+  → `OplusViewDragPackageConfigParser.parse()` → `PackageDragConfigInfo` → `mPackageDragConfig`。
+  （即：**每个 App 启动时由 system_server 把"你自己那一份"XML 塞进启动 Bundle**；
+  system_server 侧用 `getPackageDragConfig(pkg)` / `extractPackageXmlFromList()` 按包名切片，带 LruCache。）
+
+**XML 结构**（`OplusViewDragPackageConfigParser.handleStartTag` + `createViewDragInfo` 的标签/属性名）：
+
+```xml
+<root>
+  <whiteList>                                   <!-- 规则表 -->
+    <package name="com.xxx">
+      <activity name=".MainActivity" supportFileDrag="true">
+        <view name="android.widget.ImageView"   <!-- 匹配：name/parent/brother/uncle/cousin/nephews/id/nest/max-depth/source/entryName -->
+              type="image"                      <!-- 模态：text | image | file | video -->
+              touch-view="true"                 <!-- 只认 dispatch 链命中的那个 -->
+              bottom-view="false"               <!-- 取最深命中 -->
+              image-path="..." drawable-ref-method-name="..."
+              text-field-path="..." text-key-word="..." />
+        <view name="android.widget.TextView" type="text" ... />
+      </activity>
+    </package>
+  </whiteList>
+  <blackList>                                   <!-- 同一 app 内要排除的视图规则 -->
+    <package name="com.xxx"> <activity ...> <view .../> </activity> </package>
+  </blackList>
+</root>
+```
+
+**两组容易混淆的"名单"**：
+
+| 名称 | 实质 | 粒度 | 存在哪 |
+|---|---|---|---|
+| `whiteList` / `blackList`（XML 里） | **视图规则表**（不是应用名单）：白=可以被拖的视图及其模态，黑=该 app 里要跳过的视图 | package → activity → view 类名/层级 | `sys_view_drag_list.xml`（ROM + RUS 云控） |
+| `OPLUS_VIEW_DRAG_DISABLED_APP_LIST` | **真正的应用禁用名单**（字符串列表） | package | `Settings.System["oplus_view_drag_disabled_app_list"]` |
+| `OPLUS_VIEW_DRAG_SWITCH` | 传送门总开关 | 全局 | `Settings.System["oplus_view_drag_switch"]` |
+
+**硬门槛**（`isFeatureEnabled`，`:30896`）：
+
+```java
+if (mPackageDragConfig == null) return false;                  // 该包没配置 → 不支持
+String activity = getWindowTitle(view);  if (activity == null) return false;
+List<ActivityDragInfo> white = mPackageDragConfig.getWhiteList();
+if (white == null || white.isEmpty()) { log "whiteActivityDragList is null or size is 0"; return false; }
+mWhiteViewList = findViewDragList(white, activity);            // 按当前 activity 过滤
+if (mWhiteViewList == null || mWhiteViewList.isEmpty()) return false;
+```
+
+也就是说：**XML 里没有这个应用（或没有这个 Activity）→ `findTouchTargetView` 永远返回 null → 长按不拖**，
+唯一例外是 App 自己实现 `OplusDragContentPlugin`（`tryPluginDrag` 优先于 ROM 配置路径）。
+用户在设置里只看得到"传送门"总开关，看不到这份名单 —— 这就是"感觉没有黑白名单"的来源。
+
+**对我们的三点启示**：
+
+1. ColorOS 长按图片"永远对"，**不是因为它的命中算法更聪明，而是因为这个视图被点名写了 `type=image`**；
+   图文混排里文字和图片是两条独立规则、各自绑定自己的视图，天然不可能串。
+2. 我们的通用启发式在**未适配 app** 上覆盖面更广（不用逐 app 写规则），代价就是必须自己解决"同格多模态"的判定问题。
+3. 因此修复方向不是照搬它的规则系统，而是把它那个结构性优点拿过来：**先定 target，再由 target 定模态**。
+
 ---
 
 ## 3. 为什么"文字在上、图片在下"我们必错（四条具体链路）
@@ -273,7 +356,7 @@ View touchTarget = findDeepTouchView(root, sDownRawX, sDownRawY);   // Bridge.ja
 | 容器候选资格 | 必须 clickable/longClickable | 无 | 正确性 |
 | 图片合格线 | 1 条（drawable==null） | 5+ 条（尺寸/类名/资源名/包名…） | 召回 |
 | 命中容差 | 0 | 5~48px | 精确性 |
-| 逐 app 适配 | **强依赖云控规则** | 无规则，纯通用启发 | 覆盖面（我们占优） |
+| 逐 app 适配 | **强依赖**：`sys_view_drag_list.xml` 里没有该 app/Activity → 根本不拖（见 §2.8） | 无规则，纯通用启发 | 覆盖面（我们占优） |
 | 可解释性 | 每条日志带 `Target View info = …` | 仅 `preExtract hit type=1/2` | 排障 |
 
 ---
@@ -414,12 +497,30 @@ hitPick: xy=(540,1280) level=3 view=NineGridLayout rect=[24,900][1056,1500]
 | `OplusTextViewDragProcessor.isSupport` :30664 | `info.getType() == "text"` 且缓存 `textFieldPath/textKeyWord/newFilePath` |
 | `OplusImageViewDragProcessor.isSupport` :30631 | `info.getType() == "image"` |
 | `bean/ViewDragInfo` 字段 | `mType`、`mTextFieldPath`、`mTextKeyWord`、`mImagePath`、`mFilePath`、`mViewName`、`mParent`、`mBrother`、`mUncle`、`mCousin`、`mNephews`、`mId`、`mEntryName`、`mSemanticsKeys`、`mEvaluateJs`、`mMaxDepth`、`mNest`；flags：`FLAG_BOTTOM_VIEW` / `FLAG_TOUCH_VIEW` / `FLAG_DRAW_COVER` / `FLAG_UNCLE_VISIBILITY` |
+| `…isFeatureEnabled(view)` :30896 | **配置硬门槛**：无 `mPackageDragConfig` / 无该 activity 的 whiteList → false，拖拽不启动 |
+| `…isSupportDrag(ctx)` :30900 | 全局开关 `oplus_view_drag_switch` + app 禁用名单 |
+| `…getViewDragDisabledAppList(ctx)` :30880 | `Settings.System["oplus_view_drag_disabled_app_list"]`（真正的应用黑名单） |
+| `OplusViewDragPackageConfigParser.handleStartTag` :30941 / `createViewDragInfo` | 云控 XML 的解析骨架：`whiteList/blackList → package → activity(supportFileDrag) → view(type, touch-view, bottom-view, text-key-word, image-path, parent, brother, uncle, cousin, nephews, id, nest, max-depth, semantics-keys, evaluate-js …)` |
+
+### 8.3 ColorOS 云控配置链路（`oppo/oplus-services.jar`，system_server 侧）
+
+| 位置 | 内容 |
+|---|---|
+| `com.android.server.viewdrag.OplusViewDragRusHelper extends com.android.server.pm.RomUpdateHelper` | RUS（ROM Update Service）配置助手，配置名 `sys_view_drag_list` |
+| `OplusViewDragRusHelper.init()` | 读 `data/oplus/os/sys_view_drag_list.xml`（云控落盘）与 `system_ext/oplus/sys_view_drag_list.xml`（ROM 内置），比对 `<version>` 取新 |
+| `…getPackageDragConfig(pkg)` / `extractPackageXmlFromList(...)` | 按包名切片出该 App 的 XML（LruCache 缓存），无该包 → null |
+| `OplusViewDragSystemServer.preBindApplication` | 把 `view_drag_package_raw_xml_gz_bundle_key` / `view_drag_global_config_bundle_key` / `view_drag_bundle_key` 塞进 bind-application Bundle |
+| `android.app.OplusActivityThreadExtImpl.hookHandleBindApplication` | App 进程侧取上述 Bundle 键 → `setPendingGzDragConfig` / `setRawDragConfigXml` |
+| `OplusViewDragManager.loadPendingConfigOnBackground` :30907 | gz 解压 → `parse()` → `mPackageDragConfig`（同时把 `mRawConfigXml` 存下，调试用） |
+| `OplusDragSystemServerSupplement.getSwitchClosed` | 读 `oplus_view_drag_switch` 全局开关 |
 
 ## 9. 一个值得记住的差别（产品视角）
 
-ColorOS 的高命中率**建立在逐 app 云控规则上**（`setRawDragConfigXml` / `setPendingGzDragConfig` / `beginTrace`），
+ColorOS 的高命中率**建立在逐 app 云控规则上**（详见 §2.8：
+`sys_view_drag_list.xml`（ROM 内置 + RUS 云控）→ `preBindApplication` 切片下发 → 每 App 一份 `PackageDragConfigInfo`），
 规则里明确写死"哪个类的哪个子视图是 text、哪个是 image"。它没有"通用图文混排正确性"，
-只有"已适配列表内的正确性"；未适配应用的命中率同样会掉。
+只有"已适配列表内的正确性"；**未适配的应用连拖拽都不会起来**（`isFeatureEnabled` 直接 false），
+除非 App 自己实现 `OplusDragContentPlugin`。
 
-我们的优势是**零规则、通用启发**；代价就是这套瀑布会在"图文同格"的形态下按顺序排错。
+我们的优势是**零规则、通用启发**（不挑 app，装机即用）；代价就是这套瀑布会在"图文同格"的形态下按顺序排错。
 所以修复方向不是照抄它的规则系统，而是**把它唯一正确的那个结构性决定抄过来：先定 target，再由 target 定模态。**
