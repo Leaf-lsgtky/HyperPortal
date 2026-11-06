@@ -1080,16 +1080,17 @@ public final class PortalSystemModule {
     }
 
     /**
-     * ColorOS-style drop consumption animation.
+     * ColorOS-style drag settlement animation (both consumed success and unconsumed cancel).
      *
-     * In native Android / HyperOS, when a drop is consumed (dragResult == true),
-     * DragState.endDragLocked immediately invokes closeLocked(), destroying the
-     * shadow surface with 0ms transition (abrupt disappearance).
+     * In native Android / HyperOS:
+     *   - Consumed (dragResult == true): DragState.endDragLocked immediately invokes
+     *     closeLocked(), destroying the shadow surface with 0ms transition.
+     *   - Unconsumed (dragResult == false): WMS plays return animation translating
+     *     (x, y) all the way back to the start coordinate.
      *
-     * ColorOS instead plays an in-place shrink-and-fade animation centered at
-     * the drop position:
-     *   - scale: 1.0f -> 0.8f (483ms, spring/ease-out)
-     *   - alpha: 0.85f -> 0.0f (617ms, spring/ease-out)
+     * ColorOS instead plays an in-place spring animation centered at the drop point:
+     *   - Consumed success: scale 1.0f -> 0.8f (483ms), alpha 0.85f -> 0.0f (617ms) (吸入消散)
+     *   - Unconsumed cancel/failure: scale 1.0f -> 1.45f (617ms), alpha 0.85f -> 0.0f (834ms) (放大消散，不飞回)
      * When the animation finishes, it notifies DragDropController (MSG_ANIMATION_END)
      * to execute closeLocked().
      */
@@ -1106,7 +1107,7 @@ public final class PortalSystemModule {
                 return chain.proceed();
             }
 
-            if (!dragResult || relinquish || !sColorosConsumeAnim) {
+            if (relinquish || !sColorosConsumeAnim) {
                 return chain.proceed();
             }
 
@@ -1119,8 +1120,8 @@ public final class PortalSystemModule {
                 return chain.proceed();
             }
 
-            if (playColorosSuccessAnimation(dragState)) {
-                return null;
+            if (playColorosEndAnimation(dragState, dragResult)) {
+                return null; // Handled by custom ColorOS animation, skip native return/close
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "onEndDragLocked hook failed: " + throwable);
@@ -1145,7 +1146,7 @@ public final class PortalSystemModule {
         return false;
     }
 
-    private static boolean playColorosSuccessAnimation(Object dragState) {
+    private static boolean playColorosEndAnimation(Object dragState, boolean success) {
         try {
             Object surfaceObj = getField(dragState, "mSurfaceControl");
             if (!(surfaceObj instanceof SurfaceControl)) {
@@ -1204,30 +1205,42 @@ public final class PortalSystemModule {
             final int surfHeight = height;
 
             // Set dragState drop result
-            setField(dragState, "mDragResult", true);
+            setField(dragState, "mDragResult", success);
             setField(dragState, "mRelinquishDragSurfaceToDropTarget", false);
 
-            // Start restoring 3D tilt concurrently with the drop absorption animation
+            // Start restoring 3D tilt concurrently with the settlement animation
             sCurrentState = 0;
             sTargetProgress = 0f;
             startTicker();
             notifyPortalState(0, 0f, 0f);
 
+            // ColorOS timing parameters:
+            // Success: alpha 617ms, scale 483ms (1.0 -> 0.8)
+            // Cancel/Failure: alpha 834ms, scale 617ms (1.0 -> 1.45)
+            final long totalDuration = success ? 617L : 834L;
+            final long scaleDuration = success ? 483L : 617L;
+
             ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
-            animator.setDuration(617);
-            Interpolator scaleInterpolator = new PathInterpolator(0.3f, 0f, 0.1f, 1.0f);
-            Interpolator alphaInterpolator = new PathInterpolator(0.35f, 0f, 0.1f, 1.0f);
+            animator.setDuration(totalDuration);
+            Interpolator scaleInterpolator = success
+                    ? new PathInterpolator(0.3f, 0f, 0.1f, 1.0f)
+                    : new PathInterpolator(0.4f, 0f, 0.1f, 1.0f);
+            Interpolator alphaInterpolator = success
+                    ? new PathInterpolator(0.35f, 0f, 0.1f, 1.0f)
+                    : new PathInterpolator(0.4f, 0f, 0.1f, 1.0f);
 
             animator.addUpdateListener(animation -> {
                 try {
                     long playTime = animation.getCurrentPlayTime();
-                    float scaleProgress = Math.min(1.0f, playTime / 483.0f);
-                    float alphaProgress = Math.min(1.0f, playTime / 617.0f);
+                    float scaleProgress = Math.min(1.0f, playTime / (float) scaleDuration);
+                    float alphaProgress = Math.min(1.0f, playTime / (float) totalDuration);
 
                     float scaleInterp = scaleInterpolator.getInterpolation(scaleProgress);
                     float alphaInterp = alphaInterpolator.getInterpolation(alphaProgress);
 
-                    float scale = 1.0f - 0.2f * scaleInterp; // 1.0 -> 0.8
+                    float scale = success
+                            ? (1.0f - 0.2f * scaleInterp)    // 1.0 -> 0.8
+                            : (1.0f + 0.45f * scaleInterp);  // 1.0 -> 1.45
                     float alpha = 0.85f * (1.0f - alphaInterp); // 0.85 -> 0.0
 
                     float offsetX = (1.0f - scale) * surfWidth / 2.0f;
@@ -1247,7 +1260,7 @@ public final class PortalSystemModule {
                         t.close();
                     }
                 } catch (Throwable t) {
-                    log(Log.WARN, TAG, "ColorOS success animation update error: " + t);
+                    log(Log.WARN, TAG, "ColorOS end animation update error: " + t);
                 }
             });
 
@@ -1270,9 +1283,9 @@ public final class PortalSystemModule {
                     try {
                         setField(dragState, "mAnimationCompleted", true);
                         invoke(controller, "sendHandlerMessage", 2, null);
-                        log(Log.INFO, TAG, "ColorOS success animation ended, closed drag state");
+                        log(Log.INFO, TAG, "ColorOS end animation ended (success=" + success + "), closed drag state");
                     } catch (Throwable t) {
-                        log(Log.WARN, TAG, "ColorOS success animation finish failed: " + t);
+                        log(Log.WARN, TAG, "ColorOS end animation finish failed: " + t);
                     }
                 }
             };
@@ -1280,10 +1293,11 @@ public final class PortalSystemModule {
             animator.addListener(listener);
             setField(dragState, "mAnimator", animator);
             animHandler.post(animator::start);
-            log(Log.INFO, TAG, "started ColorOS success animation (shrink to 0.8 & fade out)");
+            log(Log.INFO, TAG, "started ColorOS end animation (success=" + success
+                    + (success ? ", shrink to 0.8" : ", expand to 1.45, no fly-back") + ")");
             return true;
         } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "playColorosSuccessAnimation failed: " + throwable);
+            log(Log.WARN, TAG, "playColorosEndAnimation failed: " + throwable);
             return false;
         }
     }

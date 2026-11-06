@@ -144,11 +144,11 @@ fun SettingsPage(bottomPadding: Dp) {
                     },
                 )
                 SwitchPreference(
-                    title = "ColorOS 风格消费动画",
+                    title = "ColorOS 风格拖拽结算动效",
                     summary = if (colorosConsumeAnim) {
-                        "拖拽被目标消费时，在落点缩小淡出（吸入动效），而非瞬间消失"
+                        "拖拽结束使用 ColorOS 原地动效（成功缩小吸入，未消费放大消散，不飞回原位）"
                     } else {
-                        "原生效果：拖拽被消费后阴影立即消失"
+                        "原生动效：成功瞬间消失，未消费飞回起点"
                     },
                     checked = colorosConsumeAnim,
                     enabled = masterSwitch,
