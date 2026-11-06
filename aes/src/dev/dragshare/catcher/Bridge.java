@@ -8624,8 +8624,9 @@ public final class Bridge {
         }
         sShadowDim = dim;
         try {
-            if (android.os.Build.VERSION.SDK_INT >= 24 && view.isAttachedToWindow()) {
-                view.updateDragShadow(new PreviewShadow(sActiveDragText, sActiveDragBitmap,
+            View dragView = sActiveDragView != null ? sActiveDragView : view;
+            if (android.os.Build.VERSION.SDK_INT >= 24 && dragView.isAttachedToWindow()) {
+                dragView.updateDragShadow(new PreviewShadow(sActiveDragText, sActiveDragBitmap,
                         sActiveDragDensity, sActiveDragSourceWidth, sActiveDragScreenWidth,
                         sActiveDragScreenHeight, sShadowMorphProgress, dim));
             }
