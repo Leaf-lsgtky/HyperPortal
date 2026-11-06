@@ -9,6 +9,11 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Bundle;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
+import android.view.animation.Interpolator;
+import android.view.animation.PathInterpolator;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -133,6 +138,7 @@ public final class PortalSystemModule {
      * (split screen, floating window, another Activity) stay valid targets.
      */
     private static volatile boolean sSameWindowGuard = true;
+    private static volatile boolean sColorosConsumeAnim = true;
     private static volatile boolean sLoggedGateOverride = false;
     private static volatile Object sWms;
     private static volatile String sDragSourcePackage;
@@ -236,6 +242,10 @@ public final class PortalSystemModule {
                     // the drop (and cannot consume it as "send").
                     sXposed.hook(method).setId("drag-reportDropWindow").intercept(PortalSystemModule::onReportDropWindowLock);
                     log(Log.INFO, TAG, "hooked reportDropWindowLock " + method);
+                } else if ("endDragLocked".equals(method.getName())
+                        && method.getParameterCount() == 2) {
+                    sXposed.hook(method).setId("drag-endDragLocked").intercept(PortalSystemModule::onEndDragLocked);
+                    log(Log.INFO, TAG, "hooked endDragLocked " + method);
                 }
             }
 
@@ -1069,6 +1079,215 @@ public final class PortalSystemModule {
         }
     }
 
+    /**
+     * ColorOS-style drop consumption animation.
+     *
+     * In native Android / HyperOS, when a drop is consumed (dragResult == true),
+     * DragState.endDragLocked immediately invokes closeLocked(), destroying the
+     * shadow surface with 0ms transition (abrupt disappearance).
+     *
+     * ColorOS instead plays an in-place shrink-and-fade animation centered at
+     * the drop position:
+     *   - scale: 1.0f -> 0.8f (483ms, spring/ease-out)
+     *   - alpha: 0.85f -> 0.0f (617ms, spring/ease-out)
+     * When the animation finishes, it notifies DragDropController (MSG_ANIMATION_END)
+     * to execute closeLocked().
+     */
+    private static Object onEndDragLocked(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args == null || args.size() < 2) {
+                return chain.proceed();
+            }
+            boolean dragResult = Boolean.TRUE.equals(args.get(0));
+            boolean relinquish = Boolean.TRUE.equals(args.get(1));
+            Object dragState = chain.getThisObject();
+            if (dragState == null) {
+                return chain.proceed();
+            }
+
+            if (!dragResult || relinquish || !sColorosConsumeAnim) {
+                return chain.proceed();
+            }
+
+            if (!isOurDrag(dragState)) {
+                return chain.proceed();
+            }
+
+            Object existingAnimator = getField(dragState, "mAnimator");
+            if (existingAnimator != null) {
+                return chain.proceed();
+            }
+
+            if (playColorosSuccessAnimation(dragState)) {
+                return null;
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "onEndDragLocked hook failed: " + throwable);
+        }
+        return chain.proceed();
+    }
+
+    private static boolean isOurDrag(Object dragState) {
+        if (sDragActive) {
+            return true;
+        }
+        try {
+            Object clipObject = getField(dragState, "mData");
+            if (clipObject instanceof ClipData) {
+                ClipDescription description = ((ClipData) clipObject).getDescription();
+                if (description != null && description.filterMimeTypes(DRAG_MIME) != null) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean playColorosSuccessAnimation(Object dragState) {
+        try {
+            Object surfaceObj = getField(dragState, "mSurfaceControl");
+            if (!(surfaceObj instanceof SurfaceControl)) {
+                return false;
+            }
+            SurfaceControl surface = (SurfaceControl) surfaceObj;
+            if (!surface.isValid()) {
+                return false;
+            }
+
+            Object wms = getField(dragState, "mService");
+            if (wms == null) {
+                return false;
+            }
+            Handler animHandler = null;
+            try {
+                Object handlerObj = getField(wms, "mAnimationHandler");
+                if (handlerObj instanceof Handler) {
+                    animHandler = (Handler) handlerObj;
+                }
+            } catch (Throwable ignored) {
+            }
+            if (animHandler == null) {
+                animHandler = sHandler;
+            }
+
+            Object controller = getField(dragState, "mDragDropController");
+            if (controller == null) {
+                return false;
+            }
+
+            float currentX = ((Number) getField(dragState, "mCurrentDisplayX")).floatValue();
+            float currentY = ((Number) getField(dragState, "mCurrentDisplayY")).floatValue();
+            float thumbX = ((Number) getField(dragState, "mThumbOffsetX")).floatValue();
+            float thumbY = ((Number) getField(dragState, "mThumbOffsetY")).floatValue();
+
+            int width = 0;
+            int height = 0;
+            try {
+                Method getWidth = SurfaceControl.class.getMethod("getWidth");
+                Method getHeight = SurfaceControl.class.getMethod("getHeight");
+                width = ((Number) getWidth.invoke(surface)).intValue();
+                height = ((Number) getHeight.invoke(surface)).intValue();
+            } catch (Throwable ignored) {
+            }
+            if (width <= 0) {
+                width = Math.round(thumbX * 2f);
+            }
+            if (height <= 0) {
+                height = Math.round(thumbY * 2f);
+            }
+            if (width <= 0) width = dp(80);
+            if (height <= 0) height = dp(80);
+
+            final int surfWidth = width;
+            final int surfHeight = height;
+
+            // Set dragState drop result
+            setField(dragState, "mDragResult", true);
+            setField(dragState, "mRelinquishDragSurfaceToDropTarget", false);
+
+            // Start restoring 3D tilt concurrently with the drop absorption animation
+            sCurrentState = 0;
+            sTargetProgress = 0f;
+            startTicker();
+            notifyPortalState(0, 0f, 0f);
+
+            ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
+            animator.setDuration(617);
+            Interpolator scaleInterpolator = new PathInterpolator(0.3f, 0f, 0.1f, 1.0f);
+            Interpolator alphaInterpolator = new PathInterpolator(0.35f, 0f, 0.1f, 1.0f);
+
+            animator.addUpdateListener(animation -> {
+                try {
+                    long playTime = animation.getCurrentPlayTime();
+                    float scaleProgress = Math.min(1.0f, playTime / 483.0f);
+                    float alphaProgress = Math.min(1.0f, playTime / 617.0f);
+
+                    float scaleInterp = scaleInterpolator.getInterpolation(scaleProgress);
+                    float alphaInterp = alphaInterpolator.getInterpolation(alphaProgress);
+
+                    float scale = 1.0f - 0.2f * scaleInterp; // 1.0 -> 0.8
+                    float alpha = 0.85f * (1.0f - alphaInterp); // 0.85 -> 0.0
+
+                    float offsetX = (1.0f - scale) * surfWidth / 2.0f;
+                    float offsetY = (1.0f - scale) * surfHeight / 2.0f;
+                    float posX = currentX - thumbX + offsetX;
+                    float posY = currentY - thumbY + offsetY;
+
+                    SurfaceControl.Transaction t = new SurfaceControl.Transaction();
+                    try {
+                        if (surface.isValid()) {
+                            t.setAlpha(surface, alpha);
+                            t.setScale(surface, scale, scale);
+                            t.setPosition(surface, posX, posY);
+                            t.apply();
+                        }
+                    } finally {
+                        t.close();
+                    }
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "ColorOS success animation update error: " + t);
+                }
+            });
+
+            AnimatorListenerAdapter listener = new AnimatorListenerAdapter() {
+                private boolean mDone = false;
+
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    finish();
+                }
+
+                @Override
+                public void onAnimationCancel(Animator animation) {
+                    finish();
+                }
+
+                private void finish() {
+                    if (mDone) return;
+                    mDone = true;
+                    try {
+                        setField(dragState, "mAnimationCompleted", true);
+                        invoke(controller, "sendHandlerMessage", 2, null);
+                        log(Log.INFO, TAG, "ColorOS success animation ended, closed drag state");
+                    } catch (Throwable t) {
+                        log(Log.WARN, TAG, "ColorOS success animation finish failed: " + t);
+                    }
+                }
+            };
+
+            animator.addListener(listener);
+            setField(dragState, "mAnimator", animator);
+            animHandler.post(animator::start);
+            log(Log.INFO, TAG, "started ColorOS success animation (shrink to 0.8 & fade out)");
+            return true;
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "playColorosSuccessAnimation failed: " + throwable);
+            return false;
+        }
+    }
+
     /** DragState.reportDropWindowLock() resolves its token through this map. */
     private static Object findWindowByInputToken(Object wms, Object token) {
         if (wms == null || token == null) {
@@ -1681,6 +1900,10 @@ public final class PortalSystemModule {
                             sSameWindowGuard = intent.getBooleanExtra("same_window_guard", true);
                             log(Log.INFO, TAG, "same-window guard updated: " + sSameWindowGuard);
                         }
+                        if (intent.hasExtra("coloros_consume_anim")) {
+                            sColorosConsumeAnim = intent.getBooleanExtra("coloros_consume_anim", true);
+                            log(Log.INFO, TAG, "coloros consume anim updated: " + sColorosConsumeAnim);
+                        }
                     }
                 }
             };
@@ -1714,6 +1937,8 @@ public final class PortalSystemModule {
                     }
                     sSameWindowGuard = res.getBoolean("same_window_guard", sSameWindowGuard);
                     log(Log.INFO, TAG, "same-window guard queried: " + sSameWindowGuard);
+                    sColorosConsumeAnim = res.getBoolean("coloros_consume_anim", sColorosConsumeAnim);
+                    log(Log.INFO, TAG, "coloros consume anim queried: " + sColorosConsumeAnim);
                 }
             } catch (Throwable ignored) {
             }
@@ -1936,6 +2161,21 @@ public final class PortalSystemModule {
                 Field field = type.getDeclaredField(name);
                 field.setAccessible(true);
                 return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(name + " in " + target.getClass());
+    }
+
+    private static void setField(Object target, String name, Object value) throws Exception {
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+                return;
             } catch (NoSuchFieldException ignored) {
                 type = type.getSuperclass();
             }

@@ -40,6 +40,9 @@ object HyperPortalPreferences {
     const val KEY_SAME_WINDOW_GUARD = "same_window_guard"
     const val DEFAULT_SAME_WINDOW_GUARD = true
 
+    const val KEY_COLOROS_CONSUME_ANIM = "coloros_consume_anim"
+    const val DEFAULT_COLOROS_CONSUME_ANIM = true
+
     const val KEY_TRIGGER_THRESHOLD = "trigger_threshold"
     const val DEFAULT_TRIGGER_THRESHOLD = 76
     const val MIN_TRIGGER_THRESHOLD = 50
@@ -121,6 +124,7 @@ object HyperPortalPreferences {
         val longPressDuration: Int,
         val touchSlop: Int,
         val sameWindowGuard: Boolean,
+        val colorosConsumeAnim: Boolean,
         val triggerThreshold: Int,
         val triggerPosition: String,
         val blacklist: Set<String>,
@@ -166,6 +170,7 @@ object HyperPortalPreferences {
             longPressDuration = prefs.getInt(KEY_LONG_PRESS_DURATION, DEFAULT_LONG_PRESS_DURATION),
             touchSlop = prefs.getInt(KEY_TOUCH_SLOP, DEFAULT_TOUCH_SLOP),
             sameWindowGuard = prefs.getBoolean(KEY_SAME_WINDOW_GUARD, DEFAULT_SAME_WINDOW_GUARD),
+            colorosConsumeAnim = prefs.getBoolean(KEY_COLOROS_CONSUME_ANIM, DEFAULT_COLOROS_CONSUME_ANIM),
             triggerThreshold = prefs.getInt(KEY_TRIGGER_THRESHOLD, DEFAULT_TRIGGER_THRESHOLD),
             triggerPosition = prefs.getString(KEY_TRIGGER_POSITION, DEFAULT_TRIGGER_POSITION) ?: DEFAULT_TRIGGER_POSITION,
             blacklist = prefs.getStringSet(KEY_BLACKLIST, emptySet())?.toSet() ?: emptySet(),
@@ -222,6 +227,11 @@ object HyperPortalPreferences {
 
     fun setSameWindowGuard(context: Context, enabled: Boolean) {
         getPrefs(context).edit { putBoolean(KEY_SAME_WINDOW_GUARD, enabled) }
+        notifyChanged(context)
+    }
+
+    fun setColorosConsumeAnim(context: Context, enabled: Boolean) {
+        getPrefs(context).edit { putBoolean(KEY_COLOROS_CONSUME_ANIM, enabled) }
         notifyChanged(context)
     }
 
@@ -365,6 +375,7 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_LONG_PRESS_DURATION, cfg.longPressDuration)
             intent.putExtra(KEY_TOUCH_SLOP, cfg.touchSlop)
             intent.putExtra(KEY_SAME_WINDOW_GUARD, cfg.sameWindowGuard)
+            intent.putExtra(KEY_COLOROS_CONSUME_ANIM, cfg.colorosConsumeAnim)
             intent.putExtra(KEY_TRIGGER_THRESHOLD, cfg.triggerThreshold)
             intent.putExtra(KEY_TRIGGER_POSITION, cfg.triggerPosition)
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)

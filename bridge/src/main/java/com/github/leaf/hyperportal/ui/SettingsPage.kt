@@ -56,6 +56,9 @@ fun SettingsPage(bottomPadding: Dp) {
     var sameWindowGuard by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).sameWindowGuard)
     }
+    var colorosConsumeAnim by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).colorosConsumeAnim)
+    }
     var triggerThreshold by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).triggerThreshold)
     }
@@ -81,6 +84,7 @@ fun SettingsPage(bottomPadding: Dp) {
                 longPressDuration = config.longPressDuration
                 touchSlop = config.touchSlop
                 sameWindowGuard = config.sameWindowGuard
+                colorosConsumeAnim = config.colorosConsumeAnim
                 triggerThreshold = config.triggerThreshold
                 triggerPosition = config.triggerPosition
                 blacklist = config.blacklist
@@ -137,6 +141,20 @@ fun SettingsPage(bottomPadding: Dp) {
                     onCheckedChange = { checked ->
                         sameWindowGuard = checked
                         HyperPortalPreferences.setSameWindowGuard(context, checked)
+                    },
+                )
+                SwitchPreference(
+                    title = "ColorOS 风格消费动画",
+                    summary = if (colorosConsumeAnim) {
+                        "拖拽被目标消费时，在落点缩小淡出（吸入动效），而非瞬间消失"
+                    } else {
+                        "原生效果：拖拽被消费后阴影立即消失"
+                    },
+                    checked = colorosConsumeAnim,
+                    enabled = masterSwitch,
+                    onCheckedChange = { checked ->
+                        colorosConsumeAnim = checked
+                        HyperPortalPreferences.setColorosConsumeAnim(context, checked)
                     },
                 )
                 SwitchPreference(
