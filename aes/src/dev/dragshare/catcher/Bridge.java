@@ -272,6 +272,8 @@ public final class Bridge {
     private static volatile int sActiveDragScreenHeight;
     private static volatile boolean sActiveShadowSquare;
     private static volatile float sShadowMorphProgress;
+    /** True while the shadow is dimmed because the finger is back inside the drag circle. */
+    private static volatile boolean sShadowDim;
     private static volatile ValueAnimator sShadowMorphAnimator;
     private static volatile boolean sShadowReceiverRegistered;
     // MediaStore is only a transport fallback when the portal provider cannot be
@@ -8563,7 +8565,7 @@ public final class Bridge {
                 if (android.os.Build.VERSION.SDK_INT >= 24 && view != null && view.isAttachedToWindow()) {
                     view.updateDragShadow(new PreviewShadow(sActiveDragText,
                             sActiveDragBitmap, sActiveDragDensity, sActiveDragSourceWidth,
-                            sActiveDragScreenWidth, sActiveDragScreenHeight, sShadowMorphProgress));
+                            sActiveDragScreenWidth, sActiveDragScreenHeight, sShadowMorphProgress, sShadowDim));
                 }
             } catch (Throwable ignored) {
             }
@@ -8578,7 +8580,7 @@ public final class Bridge {
                         if (android.os.Build.VERSION.SDK_INT >= 24 && view != null && view.isAttachedToWindow()) {
                             view.updateDragShadow(new PreviewShadow(sActiveDragText,
                                     sActiveDragBitmap, sActiveDragDensity, sActiveDragSourceWidth,
-                                    sActiveDragScreenWidth, sActiveDragScreenHeight, target));
+                                    sActiveDragScreenWidth, sActiveDragScreenHeight, target, sShadowDim));
                         }
                     } catch (Throwable ignored) {
                     }
@@ -8602,6 +8604,34 @@ public final class Bridge {
         } else {
             action.run();
         }
+    }
+
+    /**
+     * Dims the drag shadow while the finger is back inside the drag circle,
+     * i.e. while releasing would cancel the drag. Only called from the source
+     * window's ACTION_DRAG_LOCATION, which by definition means the pointer is
+     * over that window.
+     */
+    private static void refreshShadowDim(View view, float screenX, float screenY) {
+        if (view == null || sDragOriginX < 0f) {
+            return;
+        }
+        float density = view.getResources().getDisplayMetrics().density;
+        float radius = Math.max(8f, sTouchSlopDp * density);
+        boolean dim = Math.hypot(screenX - sDragOriginX, screenY - sDragOriginY) < radius;
+        if (dim == sShadowDim) {
+            return;
+        }
+        sShadowDim = dim;
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 24 && view.isAttachedToWindow()) {
+                view.updateDragShadow(new PreviewShadow(sActiveDragText, sActiveDragBitmap,
+                        sActiveDragDensity, sActiveDragSourceWidth, sActiveDragScreenWidth,
+                        sActiveDragScreenHeight, sShadowMorphProgress, dim));
+            }
+        } catch (Throwable ignored) {
+        }
+        Log.i(TAG, "shadow dim=" + dim);
     }
 
     private static int sLastNotifiedState = -1;
@@ -8811,6 +8841,7 @@ public final class Bridge {
                             v.getLocationOnScreen(loc);
                             float screenX = loc[0] + event.getX();
                             float screenY = loc[1] + event.getY();
+                            refreshShadowDim(v, screenX, screenY);
                             if (sDragStartY < 0f) {
                                 sDragStartY = sDownRawY > 0 ? sDownRawY : screenY;
                             }
@@ -8884,6 +8915,7 @@ public final class Bridge {
                             dismissTextSelectionUi(v);
                             cancelShadowMorphAnimator();
                             sShadowMorphProgress = 0f;
+                            sShadowDim = false;
                             sActiveShadowSquare = false;
                             // A MediaStore item is only a transport fallback for the
                             // drag URI. Clean up all temporary MediaStore transport items
@@ -8915,6 +8947,7 @@ public final class Bridge {
             sActiveDragScreenHeight = screenH;
             sActiveShadowSquare = false;
             sShadowMorphProgress = 0f;
+            sShadowDim = false;
             cancelShadowMorphAnimator();
             boolean started = target.startDragAndDrop(clip, shadow, null,
                     View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ | View.DRAG_FLAG_GLOBAL_URI_WRITE);
@@ -9956,6 +9989,8 @@ public final class Bridge {
         private final int screenWidth;
         private final int screenHeight;
         private final float morphProgress;
+        /** Dimmed while the finger is back inside the drag circle: releasing now cancels. */
+        private final boolean dim;
 
         private int width;
         private int height;
@@ -9972,6 +10007,10 @@ public final class Bridge {
         }
 
         PreviewShadow(String text, Bitmap bitmap, float density, int sourceWidth, int screenWidth, int screenHeight, float morphProgress) {
+            this(text, bitmap, density, sourceWidth, screenWidth, screenHeight, morphProgress, false);
+        }
+
+        PreviewShadow(String text, Bitmap bitmap, float density, int sourceWidth, int screenWidth, int screenHeight, float morphProgress, boolean dim) {
             this.text = text;
             this.bitmap = bitmap;
             this.density = density > 0 ? density : 3.0f;
@@ -9979,6 +10018,7 @@ public final class Bridge {
             this.screenWidth = screenWidth > 0 ? screenWidth : 1080;
             this.screenHeight = screenHeight > 0 ? screenHeight : 2400;
             this.morphProgress = Math.max(0f, Math.min(1f, morphProgress));
+            this.dim = dim;
 
             initMetrics();
         }
@@ -10093,6 +10133,20 @@ public final class Bridge {
 
         @Override
         public void onDrawShadow(Canvas canvas) {
+            int restore = -1;
+            if (dim) {
+                restore = canvas.saveLayerAlpha(new RectF(0f, 0f, width, height), Math.round(255f * 0.45f));
+            }
+            try {
+                drawShadowContent(canvas);
+            } finally {
+                if (restore >= 0) {
+                    canvas.restoreToCount(restore);
+                }
+            }
+        }
+
+        private void drawShadowContent(Canvas canvas) {
             canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
             float p = morphProgress;
             int targetBox = dp(76);
