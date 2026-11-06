@@ -120,10 +120,11 @@ public final class Bridge {
     private static volatile String sTriggerPosition = "bottom";
     private static volatile int sLongPressDurationMs = 800;
     private static volatile int sTouchSlopDp = 24;
-    // Movement (dp) required after the preview exists before the real system
-    // drag starts. Deliberately separate from sTouchSlopDp: that circle guards
-    // the phase *before* the long press fires, this one guards the preview.
-    private static volatile int sDragStartSlopDp = 10;
+    // Centre of the drag circle: the finger position at the moment the long
+    // press completed. Re-baselined there (not at ACTION_DOWN) so a drift
+    // during the hold cannot shrink the "drag out to start" distance.
+    private static volatile float sDragOriginX = -1f;
+    private static volatile float sDragOriginY = -1f;
     private static volatile float sTriggerThreshold = 0.76f;
     private static volatile java.util.Set<String> sBlacklist = new java.util.HashSet<>();
     private static volatile long sLastConfigCheckTime = 0;
@@ -186,7 +187,6 @@ public final class Bridge {
                 sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
                 sLongPressDurationMs = res.getInt("long_press_duration", 800);
                 sTouchSlopDp = res.getInt("touch_slop", 24);
-                sDragStartSlopDp = res.getInt("drag_start_slop", 10);
                 int thresholdPct = res.getInt("trigger_threshold", 76);
                 if (thresholdPct >= 50 && thresholdPct <= 95) {
                     sTriggerThreshold = thresholdPct / 100.0f;
@@ -201,8 +201,7 @@ public final class Bridge {
                 }
                 sRuleEngineEnabled = res.getBoolean("drag_rules", true);
                 Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " landscape=" + sLandscapeTrigger
-                        + " duration=" + sLongPressDurationMs + " slop=" + sTouchSlopDp
-                        + " startSlop=" + sDragStartSlopDp
+                        + " duration=" + sLongPressDurationMs + " radius=" + sTouchSlopDp
                         + " threshold=" + sTriggerThreshold
                         + " blacklist=" + sBlacklist.size());
             }
@@ -403,6 +402,8 @@ public final class Bridge {
                     }
                     sDownRawX = rawX;
                     sDownRawY = rawY;
+                    sDragOriginX = rawX;
+                    sDragOriginY = rawY;
                     sLastMoveRawX = rawX;
                     sLastMoveRawY = rawY;
                     sLastTouchPoint = new PointF(rawX, rawY);
@@ -440,22 +441,24 @@ public final class Bridge {
                     float dist = (float) Math.hypot(dx, dy);
 
                     float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
-                    // Preview -> real drag gate. Used to be a hard-coded 24px
-                    // (≈8dp on a 3x panel), which made a hand tremor start a
-                    // system drag and let the source app swallow the drop.
-                    float startSlopPx = Math.max(4f, sDragStartSlopDp * density);
-                    if (dist > startSlopPx && sPendingPayload != null) {
-                        sMovedSinceDown = true;
-                    }
-                    // Anti-mistouch circle for the pre-long-press phase. The old
-                    // Math.max(80f, …) floor silently disabled the lower half of
-                    // the 8–48dp slider on high-density screens.
                     float slopPx = Math.max(8f, sTouchSlopDp * density);
+                    // Anti-mistouch for the pre-long-press phase: drift beyond
+                    // the circle cancels the pending long press.
                     if (dist > slopPx) {
                         sMovedSinceDown = true;
                         sMainHandler.removeCallbacks(sWebPrefetchRunnable);
                         if (sGestureState.get() == STATE_IDLE) {
                             sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+                        }
+                    }
+                    // Drag gate for the post-long-press phase: the same radius,
+                    // but measured from the point where the long press
+                    // completed. Inside the circle the shadow does not exist.
+                    if (sPendingPayload != null && sDragOriginX >= 0f) {
+                        float originDx = rawX - sDragOriginX;
+                        float originDy = rawY - sDragOriginY;
+                        if (Math.hypot(originDx, originDy) > slopPx) {
+                            sMovedSinceDown = true;
                         }
                     }
 
@@ -588,6 +591,10 @@ public final class Bridge {
                 sGestureState.set(STATE_DRAGGING);
                 forwardToPortal(content, null, true);
             } else {
+                // Long press completed here: this is the centre of the drag
+                // circle the user has to pull out of.
+                sDragOriginX = getTouchRawX();
+                sDragOriginY = getTouchRawY();
                 sPendingPayload = content;
                 sPendingContent = null;
                 sGestureState.set(STATE_IDLE);
@@ -1400,6 +1407,8 @@ public final class Bridge {
                 sGestureState.set(STATE_DRAGGING);
                 forwardToPortal(bundle, null, true);
             } else {
+                sDragOriginX = getTouchRawX();
+                sDragOriginY = getTouchRawY();
                 sPendingPayload = bundle;
                 sPendingContent = null;
                 sPendingGeneration = sGestureGeneration;
@@ -7001,10 +7010,12 @@ public final class Bridge {
                     payload.putString("coordinate", (String) coordinate);
                 }
                 // AES has already completed its long-press and extraction
-                // pipeline. Show the preview immediately, but do NOT mark the
-                // gesture as moved: a stationary long-press must still reach
-                // the app (Weibo multi-select etc.). The actual system drag is
-                // started later by ping() when the finger really moves.
+                // pipeline. Do NOT mark the gesture as moved: a stationary
+                // long-press must still reach the app (Weibo multi-select
+                // etc.). The system drag starts later, once the finger leaves
+                // the drag circle, by ping().
+                sDragOriginX = getTouchRawX();
+                sDragOriginY = getTouchRawY();
                 sPendingPayload = payload;
                 sPendingContent = content;
                 sPendingGeneration = sGestureGeneration;
