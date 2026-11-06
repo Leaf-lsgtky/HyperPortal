@@ -288,6 +288,10 @@ public final class Bridge {
             }
             final int state = intent.getIntExtra("state", 0);
             Log.i(TAG, "shadow receiver state=" + state);
+            if (state == 0) {
+                cancelShadowMorphAnimator();
+                return;
+            }
             if (Looper.myLooper() == Looper.getMainLooper()) {
                 updateSystemShadow(state >= 2);
             } else {
@@ -8904,10 +8908,7 @@ public final class Bridge {
                         if (action == DragEvent.ACTION_DROP) {
                             sDragStartY = -1f;
                             sDragStartX = -1f;
-                            // Return false so WMS treats the drop as unhandled outside targets,
-                            // triggering WMS createCancelAnimationLocked to smoothly fly the
-                            // drag shadow back to its original text position!
-                            updateSystemShadow(false);
+                            cancelShadowMorphAnimator();
                             return false;
                         }
                         if (action == DragEvent.ACTION_DRAG_ENDED) {
@@ -9738,7 +9739,7 @@ public final class Bridge {
                     return true;
                 }
                 case DragEvent.ACTION_DROP: {
-                    updateSystemShadow(false);
+                    cancelShadowMorphAnimator();
                     String text = null;
                     ClipData clip = event.getClipData();
                     if (clip != null && clip.getItemCount() > 0) {

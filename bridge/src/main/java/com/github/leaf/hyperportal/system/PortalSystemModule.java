@@ -1223,11 +1223,11 @@ public final class PortalSystemModule {
             ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
             animator.setDuration(totalDuration);
             Interpolator scaleInterpolator = success
-                    ? new PathInterpolator(0.3f, 0f, 0.1f, 1.0f)
-                    : new PathInterpolator(0.4f, 0f, 0.1f, 1.0f);
+                    ? new COUISpringInterpolator(0.30, 0.0)
+                    : new COUISpringInterpolator(0.40, 0.0);
             Interpolator alphaInterpolator = success
-                    ? new PathInterpolator(0.35f, 0f, 0.1f, 1.0f)
-                    : new PathInterpolator(0.4f, 0f, 0.1f, 1.0f);
+                    ? new COUISpringInterpolator(0.35, 0.0)
+                    : new COUISpringInterpolator(0.40, 0.0);
 
             animator.addUpdateListener(animation -> {
                 try {
@@ -2166,6 +2166,58 @@ public final class PortalSystemModule {
             type = type.getSuperclass();
         }
         throw new NoSuchMethodException(method + " in " + target.getClass());
+    }
+
+    /**
+     * Exact port of ColorOS 17's android.widget.COUISpringInterpolator.
+     * Damped harmonic oscillator with physical spring dynamics.
+     */
+    private static final class COUISpringInterpolator implements Interpolator {
+        private final double mUnDampedAngularFreq;
+        private final double mDampingRatio;
+        private final double mAngularFreq;
+        private final double mImpulse;
+        private float mFinalValue = -1.0f;
+
+        public COUISpringInterpolator(double response, double damping) {
+            double r = response == 0.0 ? 1.0 : response;
+            double k = Math.pow((2.0 * Math.PI) / r, 2.0);
+            double dampingRatio = 1.0 - damping;
+            double initialVel = 0.0;
+            double maxVel = 15000.0;
+
+            this.mUnDampedAngularFreq = Math.sqrt(k <= 0 ? 40.0 : k);
+            this.mDampingRatio = dampingRatio <= 0 ? 1.15 : dampingRatio;
+            double initVelNorm = Math.abs(initialVel) / maxVel;
+
+            if (this.mDampingRatio < 1.0) {
+                this.mAngularFreq = this.mUnDampedAngularFreq * Math.sqrt(1.0 - this.mDampingRatio * this.mDampingRatio);
+                this.mImpulse = (this.mDampingRatio * this.mUnDampedAngularFreq - initVelNorm) / this.mAngularFreq;
+            } else {
+                this.mAngularFreq = 0.0;
+                this.mImpulse = initVelNorm + this.mUnDampedAngularFreq;
+            }
+        }
+
+        private float getOriginInterpolation(float input) {
+            double t = Math.max(0.0f, input);
+            double decay = Math.exp(-this.mDampingRatio * this.mUnDampedAngularFreq * t);
+            if (this.mDampingRatio < 1.0) {
+                double val = Math.cos(this.mAngularFreq * t) + this.mImpulse * Math.sin(this.mAngularFreq * t);
+                return (float) (1.0 - decay * val);
+            } else {
+                return (float) (1.0 - decay * (1.0 + this.mImpulse * t));
+            }
+        }
+
+        @Override
+        public float getInterpolation(float input) {
+            if (mFinalValue == -1.0f) {
+                float f = getOriginInterpolation(1.0f);
+                mFinalValue = f == 0.0f ? 1.0f : f;
+            }
+            return getOriginInterpolation(input) / mFinalValue;
+        }
     }
 
     private static Object getField(Object target, String name) throws Exception {
