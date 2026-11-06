@@ -120,6 +120,10 @@ public final class Bridge {
     private static volatile String sTriggerPosition = "bottom";
     private static volatile int sLongPressDurationMs = 800;
     private static volatile int sTouchSlopDp = 24;
+    // Movement (dp) required after the preview exists before the real system
+    // drag starts. Deliberately separate from sTouchSlopDp: that circle guards
+    // the phase *before* the long press fires, this one guards the preview.
+    private static volatile int sDragStartSlopDp = 10;
     private static volatile float sTriggerThreshold = 0.76f;
     private static volatile java.util.Set<String> sBlacklist = new java.util.HashSet<>();
     private static volatile long sLastConfigCheckTime = 0;
@@ -182,6 +186,7 @@ public final class Bridge {
                 sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
                 sLongPressDurationMs = res.getInt("long_press_duration", 800);
                 sTouchSlopDp = res.getInt("touch_slop", 24);
+                sDragStartSlopDp = res.getInt("drag_start_slop", 10);
                 int thresholdPct = res.getInt("trigger_threshold", 76);
                 if (thresholdPct >= 50 && thresholdPct <= 95) {
                     sTriggerThreshold = thresholdPct / 100.0f;
@@ -197,6 +202,7 @@ public final class Bridge {
                 sRuleEngineEnabled = res.getBoolean("drag_rules", true);
                 Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " landscape=" + sLandscapeTrigger
                         + " duration=" + sLongPressDurationMs + " slop=" + sTouchSlopDp
+                        + " startSlop=" + sDragStartSlopDp
                         + " threshold=" + sTriggerThreshold
                         + " blacklist=" + sBlacklist.size());
             }
@@ -433,13 +439,18 @@ public final class Bridge {
                     float dy = rawY - sDownRawY;
                     float dist = (float) Math.hypot(dx, dy);
 
-                    // Allow small movement (> 24px) to trigger pending drag once long-press extracted content,
-                    // while only cancelling pre-long-press timer if user scrolled beyond touch slop threshold.
-                    if (dist > 24f && sPendingPayload != null) {
+                    float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
+                    // Preview -> real drag gate. Used to be a hard-coded 24px
+                    // (≈8dp on a 3x panel), which made a hand tremor start a
+                    // system drag and let the source app swallow the drop.
+                    float startSlopPx = Math.max(4f, sDragStartSlopDp * density);
+                    if (dist > startSlopPx && sPendingPayload != null) {
                         sMovedSinceDown = true;
                     }
-                    float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
-                    float slopPx = Math.max(80f, sTouchSlopDp * density);
+                    // Anti-mistouch circle for the pre-long-press phase. The old
+                    // Math.max(80f, …) floor silently disabled the lower half of
+                    // the 8–48dp slider on high-density screens.
+                    float slopPx = Math.max(8f, sTouchSlopDp * density);
                     if (dist > slopPx) {
                         sMovedSinceDown = true;
                         sMainHandler.removeCallbacks(sWebPrefetchRunnable);
@@ -603,6 +614,13 @@ public final class Bridge {
             }
             if (sGestureState.get() != STATE_IDLE) {
                 Log.d(TAG, "recordTouch ignored (custom engine active)");
+                return;
+            }
+            // The pre-long-press anti-mistouch circle already cancelled our own
+            // fallback timer; without this guard a short long-press-duration
+            // lets AES' native 450ms trigger walk straight past the circle.
+            if (sMovedSinceDown) {
+                Log.i(TAG, "recordTouch ignored: finger moved beyond slop before long press");
                 return;
             }
             sLastTouchPoint = first;

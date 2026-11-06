@@ -31,6 +31,11 @@ object HyperPortalPreferences {
     const val MIN_TOUCH_SLOP = 8
     const val MAX_TOUCH_SLOP = 48
 
+    const val KEY_DRAG_START_SLOP = "drag_start_slop"
+    const val DEFAULT_DRAG_START_SLOP = 10
+    const val MIN_DRAG_START_SLOP = 4
+    const val MAX_DRAG_START_SLOP = 32
+
     const val KEY_TRIGGER_THRESHOLD = "trigger_threshold"
     const val DEFAULT_TRIGGER_THRESHOLD = 76
     const val MIN_TRIGGER_THRESHOLD = 50
@@ -111,6 +116,7 @@ object HyperPortalPreferences {
         val edgeScrollMargin: Int,
         val longPressDuration: Int,
         val touchSlop: Int,
+        val dragStartSlop: Int,
         val triggerThreshold: Int,
         val triggerPosition: String,
         val blacklist: Set<String>,
@@ -155,6 +161,8 @@ object HyperPortalPreferences {
             edgeScrollMargin = prefs.getInt(KEY_EDGE_SCROLL_MARGIN, DEFAULT_EDGE_SCROLL_MARGIN),
             longPressDuration = prefs.getInt(KEY_LONG_PRESS_DURATION, DEFAULT_LONG_PRESS_DURATION),
             touchSlop = prefs.getInt(KEY_TOUCH_SLOP, DEFAULT_TOUCH_SLOP),
+            dragStartSlop = prefs.getInt(KEY_DRAG_START_SLOP, DEFAULT_DRAG_START_SLOP)
+                .coerceIn(MIN_DRAG_START_SLOP, MAX_DRAG_START_SLOP),
             triggerThreshold = prefs.getInt(KEY_TRIGGER_THRESHOLD, DEFAULT_TRIGGER_THRESHOLD),
             triggerPosition = prefs.getString(KEY_TRIGGER_POSITION, DEFAULT_TRIGGER_POSITION) ?: DEFAULT_TRIGGER_POSITION,
             blacklist = prefs.getStringSet(KEY_BLACKLIST, emptySet())?.toSet() ?: emptySet(),
@@ -206,6 +214,12 @@ object HyperPortalPreferences {
     fun setTouchSlop(context: Context, slop: Int) {
         val clamped = slop.coerceIn(MIN_TOUCH_SLOP, MAX_TOUCH_SLOP)
         getPrefs(context).edit { putInt(KEY_TOUCH_SLOP, clamped) }
+        notifyChanged(context)
+    }
+
+    fun setDragStartSlop(context: Context, slop: Int) {
+        val clamped = slop.coerceIn(MIN_DRAG_START_SLOP, MAX_DRAG_START_SLOP)
+        getPrefs(context).edit { putInt(KEY_DRAG_START_SLOP, clamped) }
         notifyChanged(context)
     }
 
@@ -348,6 +362,7 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_EDGE_SCROLL_MARGIN, cfg.edgeScrollMargin)
             intent.putExtra(KEY_LONG_PRESS_DURATION, cfg.longPressDuration)
             intent.putExtra(KEY_TOUCH_SLOP, cfg.touchSlop)
+            intent.putExtra(KEY_DRAG_START_SLOP, cfg.dragStartSlop)
             intent.putExtra(KEY_TRIGGER_THRESHOLD, cfg.triggerThreshold)
             intent.putExtra(KEY_TRIGGER_POSITION, cfg.triggerPosition)
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)

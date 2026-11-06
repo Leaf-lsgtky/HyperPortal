@@ -107,6 +107,7 @@ public class PortalFileProvider extends ContentProvider {
             bundle.putInt("edge_scroll_margin", cfg.getEdgeScrollMargin());
             bundle.putInt("long_press_duration", cfg.getLongPressDuration());
             bundle.putInt("touch_slop", cfg.getTouchSlop());
+            bundle.putInt("drag_start_slop", cfg.getDragStartSlop());
             bundle.putInt("trigger_threshold", cfg.getTriggerThreshold());
             bundle.putString("trigger_position", cfg.getTriggerPosition());
             bundle.putStringArrayList("gesture_blacklist", new ArrayList<>(cfg.getBlacklist()));

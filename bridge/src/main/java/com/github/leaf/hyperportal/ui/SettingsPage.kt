@@ -53,6 +53,9 @@ fun SettingsPage(bottomPadding: Dp) {
     var touchSlop by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).touchSlop)
     }
+    var dragStartSlop by remember {
+        mutableIntStateOf(HyperPortalPreferences.getConfig(context).dragStartSlop)
+    }
     var triggerThreshold by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).triggerThreshold)
     }
@@ -77,6 +80,7 @@ fun SettingsPage(bottomPadding: Dp) {
                 edgeScrollMargin = config.edgeScrollMargin
                 longPressDuration = config.longPressDuration
                 touchSlop = config.touchSlop
+                dragStartSlop = config.dragStartSlop
                 triggerThreshold = config.triggerThreshold
                 triggerPosition = config.triggerPosition
                 blacklist = config.blacklist
@@ -162,7 +166,7 @@ fun SettingsPage(bottomPadding: Dp) {
                 )
                 SliderPreference(
                     title = "防误触滑动容差",
-                    summary = "$touchSlop dp (长按时允许的手指微移阈值，超出则判定为滑动)",
+                    summary = "$touchSlop dp (长按成立前允许的手指微移，超出即判定为滑动并放弃长按)",
                     value = touchSlop.toFloat(),
                     valueRange = 8f..48f,
                     steps = 19, // 8..48 step 2
@@ -171,6 +175,19 @@ fun SettingsPage(bottomPadding: Dp) {
                         val rounded = (Math.round(raw / 2f) * 2).coerceIn(8, 48)
                         touchSlop = rounded
                         HyperPortalPreferences.setTouchSlop(context, rounded)
+                    },
+                )
+                SliderPreference(
+                    title = "起拖位移阈值",
+                    summary = "$dragStartSlop dp (长按出预览后，手指移动超过该距离才开始真正的拖拽)",
+                    value = dragStartSlop.toFloat(),
+                    valueRange = 4f..32f,
+                    steps = 13, // 4..32 step 2
+                    enabled = masterSwitch,
+                    onValueChange = { raw ->
+                        val rounded = (Math.round(raw / 2f) * 2).coerceIn(4, 32)
+                        dragStartSlop = rounded
+                        HyperPortalPreferences.setDragStartSlop(context, rounded)
                     },
                 )
                 SliderPreference(
