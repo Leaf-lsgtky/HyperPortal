@@ -308,6 +308,37 @@ public final class Bridge {
         }
     };
     private static final WeakHashMap<View, WebCache> sWebCache = new WeakHashMap<>();
+    private static final WeakHashMap<Class<?>, Method> sWebEvalMethodCache = new WeakHashMap<>();
+    private static final WeakHashMap<Class<?>, Boolean> sWebEvalMethodMiss = new WeakHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicLong sWebRequestId =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    private static final java.util.concurrent.ExecutorService sWebExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "HyperPortal-WebImg");
+                t.setDaemon(true);
+                return t;
+            });
+    private static final Pattern WEB_CSS_URL_PATTERN = Pattern.compile("url\\((.*?)\\)");
+    private static volatile int sWebAwaitingGeneration = -1;
+    private static volatile WeakReference<View> sWebAwaitingViewRef;
+    private static final Runnable sWebPrefetchRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                if (!sGestureActive || sMovedSinceDown || sGestureState.get() != STATE_IDLE) {
+                    return;
+                }
+                View root = sLastTouchView != null ? sLastTouchView.getRootView() : null;
+                if (root == null && sLastActivity != null && sLastActivity.getWindow() != null) {
+                    root = sLastActivity.getWindow().getDecorView();
+                }
+                if (root != null) {
+                    prefetchWebViewAt(root, sDownRawX, sDownRawY);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    };
 
     static {
         try {
@@ -359,6 +390,7 @@ public final class Bridge {
                 if (action == MotionEvent.ACTION_DOWN) {
                     sGestureState.set(STATE_IDLE);
                     sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+                    sMainHandler.removeCallbacks(sWebPrefetchRunnable);
                     cleanupActiveMediaStoreUris(appContext, true);
                     if (view != null) {
                         sLastTouchView = view;
@@ -383,6 +415,12 @@ public final class Bridge {
                     int generation = sGestureGeneration + 1;
                     sGestureGeneration = generation;
                     sPendingGeneration = generation;
+                    sWebAwaitingGeneration = -1;
+                    sWebAwaitingViewRef = null;
+                    // Proactively prefetch WebView DOM/image under the finger 50ms into the press:
+                    // short taps/flings cancel it without running JS, while long-presses get a
+                    // ~750ms head-start for async evaluateJavascript + image download.
+                    sMainHandler.postDelayed(sWebPrefetchRunnable, 50);
                     // Schedule fallback at sLongPressDurationMs + 150ms (after AES u/a's timer).
                     // If u/a fires, recordTouch() cancels this runnable so it never duplicates work;
                     // if u/a was cancelled by micro-tremor or a non-DecorView window, this fallback catches it cleanly.
@@ -404,6 +442,7 @@ public final class Bridge {
                     float slopPx = Math.max(80f, sTouchSlopDp * density);
                     if (dist > slopPx) {
                         sMovedSinceDown = true;
+                        sMainHandler.removeCallbacks(sWebPrefetchRunnable);
                         if (sGestureState.get() == STATE_IDLE) {
                             sMainHandler.removeCallbacks(sCustomLongPressRunnable);
                         }
@@ -424,7 +463,10 @@ public final class Bridge {
                     }
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+                    sMainHandler.removeCallbacks(sWebPrefetchRunnable);
                     sGestureActive = false;
+                    sWebAwaitingGeneration = -1;
+                    sWebAwaitingViewRef = null;
                     if ((action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_UP)
                             && (sGestureState.get() == STATE_DRAGGING || sActiveDragView != null)) {
                         // During active system drag, touch UP/CANCEL must NOT destroy drag context!
@@ -504,6 +546,12 @@ public final class Bridge {
 
             // USER EXPLICIT CONSTRAINT: "不要全量兜底截屏"
             if (content == null || !isBundleMeaningful(content)) {
+                if (sWebAwaitingGeneration == sGestureGeneration) {
+                    Log.i(TAG, "customLongPress: awaiting async webview extraction"
+                            + " took=" + (SystemClock.uptimeMillis() - startedAt) + "ms");
+                    sGestureState.set(STATE_IDLE);
+                    return;
+                }
                 Log.i(TAG, "customLongPress: no real content found, aborting drag (no fallback screenshot)"
                         + " took=" + (SystemClock.uptimeMillis() - startedAt) + "ms");
                 sGestureState.set(STATE_PROCESSED);
@@ -663,24 +711,110 @@ public final class Bridge {
         return viewKind(view) == VIEW_KIND_WEBVIEW;
     }
 
-    private static boolean isWebViewLikeRaw(View view) {
-        if (view instanceof WebView) {
-            return true;
+    /**
+     * ColorOS OplusWebViewDragProcessor.getWebViewMethod(View, ViewDragInfo) parity:
+     * any View exposing a 2-parameter evaluateJavascript(String, CallbackInterface)
+     * method is a WebView host (standard WebView, Tencent X5, WeChat MMWebView/XWeb,
+     * UC WebView, CrossWalk, or obfuscated custom WebViews like "c" / "AnalysisBrowser").
+     */
+    private static Method findWebEvaluateMethod(Class<?> clazz) {
+        if (clazz == null) {
+            return null;
         }
-        String name = view.getClass().getName();
-        if (!name.contains("WebView") || name.contains("WebViewClient")) {
-            return false;
+        Method cached = sWebEvalMethodCache.get(clazz);
+        if (cached != null) {
+            return cached;
+        }
+        if (Boolean.TRUE.equals(sWebEvalMethodMiss.get(clazz))) {
+            return null;
         }
         try {
-            for (Method method : view.getClass().getMethods()) {
-                if ("evaluateJavascript".equals(method.getName())
-                        && method.getParameterTypes().length == 2) {
-                    return true;
+            for (Method method : clazz.getMethods()) {
+                if ("evaluateJavascript".equals(method.getName())) {
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params.length == 2 && params[0] == String.class && params[1].isInterface()) {
+                        method.setAccessible(true);
+                        sWebEvalMethodCache.put(clazz, method);
+                        return method;
+                    }
                 }
             }
         } catch (Throwable ignored) {
         }
-        return false;
+        sWebEvalMethodMiss.put(clazz, Boolean.TRUE);
+        return null;
+    }
+
+    private static boolean isWebViewLikeRaw(View view) {
+        if (view instanceof WebView) {
+            return true;
+        }
+        if (view == null) {
+            return false;
+        }
+        String name = view.getClass().getName();
+        if (name.contains("WebViewClient") || name.contains("WebChromeClient")) {
+            return false;
+        }
+        return findWebEvaluateMethod(view.getClass()) != null;
+    }
+
+    /**
+     * Resolves the actual View instance that implements evaluateJavascript when a
+     * wrapper ViewGroup (or an inner surface child of a third-party WebView) is hit.
+     */
+    private static View resolveWebViewTarget(View view) {
+        if (view == null) {
+            return null;
+        }
+        if (isWebViewLike(view)) {
+            return view;
+        }
+        View current = view;
+        for (int depth = 0; depth < 3; depth++) {
+            ViewParent parent = current.getParent();
+            if (!(parent instanceof View)) {
+                break;
+            }
+            current = (View) parent;
+            if (isWebViewLike(current)) {
+                return current;
+            }
+        }
+        if (view instanceof ViewGroup) {
+            float rawX = getTouchRawX();
+            float rawY = getTouchRawY();
+            View childWeb = findWebViewInDescendants((ViewGroup) view, rawX, rawY, 0);
+            if (childWeb != null) {
+                return childWeb;
+            }
+        }
+        return null;
+    }
+
+    private static View findWebViewInDescendants(ViewGroup group, float rawX, float rawY, int depth) {
+        if (group == null || depth > 3 || group.getVisibility() != View.VISIBLE) {
+            return null;
+        }
+        for (int i = group.getChildCount() - 1; i >= 0; i--) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            if (rawX > 0 && rawY > 0 && !rectContainsPoint(child, rawX, rawY, 8)) {
+                continue;
+            }
+            if (isWebViewLike(child)) {
+                return child;
+            }
+            if (child instanceof ViewGroup) {
+                View found = findWebViewInDescendants((ViewGroup) child, rawX, rawY, depth + 1);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     private static View findComposeViewAt(View root, float rawX, float rawY) {
@@ -727,18 +861,35 @@ public final class Bridge {
         if (root == null || root.getVisibility() != View.VISIBLE) {
             return null;
         }
-        if (isWebViewLike(root)) {
-            int[] location = new int[2];
-            root.getLocationOnScreen(location);
-            if (rawX >= location[0] && rawX < location[0] + root.getWidth()
-                    && rawY >= location[1] && rawY < location[1] + root.getHeight()) {
-                return root;
+        // Prefer the actual hit-tested view so native toolbars/overlays sitting
+        // above a WebView are respected first.
+        View deep = findDeepTouchView(root, rawX, rawY);
+        if (deep != null) {
+            View resolved = resolveWebViewTarget(deep);
+            if (resolved != null) {
+                return resolved;
             }
+        }
+        return findWebViewInTree(root, rawX, rawY);
+    }
+
+    private static View findWebViewInTree(View root, float rawX, float rawY) {
+        if (root == null || root.getVisibility() != View.VISIBLE) {
+            return null;
+        }
+        int[] location = new int[2];
+        root.getLocationOnScreen(location);
+        if (rawX < location[0] || rawX > location[0] + root.getWidth()
+                || rawY < location[1] || rawY > location[1] + root.getHeight()) {
+            return null;
+        }
+        if (isWebViewLike(root)) {
+            return root;
         }
         if (root instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) root;
             for (int i = group.getChildCount() - 1; i >= 0; i--) {
-                View found = findWebViewAt(group.getChildAt(i), rawX, rawY);
+                View found = findWebViewInTree(group.getChildAt(i), rawX, rawY);
                 if (found != null) {
                     return found;
                 }
@@ -747,57 +898,125 @@ public final class Bridge {
         return null;
     }
 
-    private static void prefetchWebView(View webView, float rawX, float rawY) {
+    /**
+     * ColorOS OplusWebViewDragProcessor.getTouchTargetJsFunction(float, float) +
+     * processView(View, MotionEvent, int, float, BiConsumer) port.
+     */
+    private static void prefetchWebView(View rawView, float rawX, float rawY) {
         try {
+            final View webView = resolveWebViewTarget(rawView);
+            if (webView == null) {
+                return;
+            }
             long now = SystemClock.uptimeMillis();
+            int generation = sGestureGeneration;
             WebCache previous = sWebCache.get(webView);
-            if (previous != null && now - previous.timestamp < 300) {
+            if (previous != null && previous.generation == generation
+                    && (previous.inFlight || previous.ready)
+                    && Math.hypot(rawX - previous.rawX, rawY - previous.rawY) < 24f) {
                 return;
             }
             float density = webView.getResources().getDisplayMetrics().density;
+            if (density <= 0f) {
+                density = 3.0f;
+            }
             int[] location = new int[2];
             webView.getLocationOnScreen(location);
-            float cssX = (rawX - location[0]) / density;
-            float cssY = (rawY - location[1]) / density;
+            final float cssX = (rawX - location[0]) / density;
+            final float cssY = (rawY - location[1]) / density;
+
+            final WebCache cache = new WebCache();
+            cache.generation = generation;
+            cache.rawX = rawX;
+            cache.rawY = rawY;
+            cache.cssX = cssX;
+            cache.cssY = cssY;
+            cache.density = density;
+            cache.timestamp = now;
+            cache.inFlight = true;
+            cache.ready = false;
+            sWebCache.put(webView, cache);
+
+            // ColorOS OplusWebViewDragProcessor.getTouchTargetJsFunction(cssX, cssY)
+            // Returns a 10-element JSON array:
+            //   [0] text, [1] outerHTML, [2] imgSrc,
+            //   [3] rect.x, [4] rect.y, [5] rect.width, [6] rect.height,
+            //   [7] fontSize, [8] lineHeight, [9] isInArticle
             String js = String.format(Locale.US,
-                    "(function(){try{var e=document.elementFromPoint(%.2f,%.2f);"
-                            + "if(!e)return JSON.stringify({t:null,s:null});"
-                            + "var t=(e.innerText||e.textContent||'').trim();"
-                            + "var s=e.src||'';"
-                            + "if(!s){var bg=getComputedStyle(e).backgroundImage||'';"
-                            + "var m=/url\\([\"']?(.*?)[\"']?\\)/.exec(bg);if(m)s=m[1];}"
-                            + "return JSON.stringify({t:t.substring(0,20000),s:s});"
-                            + "}catch(x){return JSON.stringify({t:null,s:null,e:String(x)});}})()",
+                    "javascript:(function(){"
+                            + "try{"
+                            + "var x=%.2f,y=%.2f,doc=document;"
+                            + "var touchElement=doc.elementFromPoint(x,y);"
+                            + "while(touchElement&&touchElement.tagName==='IFRAME'){"
+                            + "try{var ir=touchElement.getBoundingClientRect();"
+                            + "var idoc=touchElement.contentDocument||(touchElement.contentWindow&&touchElement.contentWindow.document);"
+                            + "if(!idoc)break;x-=ir.left;y-=ir.top;doc=idoc;"
+                            + "var inner=doc.elementFromPoint(x,y);if(!inner||inner===touchElement)break;"
+                            + "touchElement=inner;}catch(ie){break;}}"
+                            + "if(!touchElement)return null;"
+                            + "var sel='';try{sel=(doc.getSelection?doc.getSelection().toString():(window.getSelection?window.getSelection().toString():'')).trim();}catch(se){}"
+                            + "var imgSrc=touchElement.currentSrc||touchElement.src||(touchElement.getAttribute&&(touchElement.getAttribute('data-src')||touchElement.getAttribute('data-original')||touchElement.getAttribute('src')))||'';"
+                            + "if(!imgSrc&&touchElement.querySelectorAll){"
+                            + "var imgs=touchElement.querySelectorAll('img');"
+                            + "for(var k=0;k<imgs.length;k++){"
+                            + "var r=imgs[k].getBoundingClientRect();"
+                            + "if(x>=r.left-4&&x<=r.right+4&&y>=r.top-4&&y<=r.bottom+4&&r.width>=24&&r.height>=24){"
+                            + "var cand=imgs[k].currentSrc||imgs[k].src||(imgs[k].getAttribute&&(imgs[k].getAttribute('data-src')||imgs[k].getAttribute('data-original')))||'';"
+                            + "if(cand){imgSrc=cand;touchElement=imgs[k];break;}}}}"
+                            + "var tag=(touchElement.tagName||'').toUpperCase();"
+                            + "var rawText='';"
+                            + "if(sel){rawText=sel;}else if(tag!=='BODY'&&tag!=='HTML'){rawText=touchElement.innerText||touchElement.textContent||'';}"
+                            + "var outer=(touchElement.outerHTML||'').substring(0,4096);"
+                            + "var compStyles=window.getComputedStyle?window.getComputedStyle(touchElement,null):null;"
+                            + "var bg=compStyles?(compStyles.getPropertyValue('background-image')||''):'';"
+                            + "if(bg&&bg!=='none'&&outer.indexOf('url(')<0){outer=outer+' '+bg;}"
+                            + "var rect=touchElement.getBoundingClientRect();"
+                            + "var i=0,array=new Array();"
+                            + "array[i++]=(rawText||'').substring(0,20000);"
+                            + "array[i++]=outer;"
+                            + "array[i++]=imgSrc;"
+                            + "array[i++]=rect?rect.x:0;"
+                            + "array[i++]=rect?rect.y:0;"
+                            + "array[i++]=rect?rect.width:0;"
+                            + "array[i++]=rect?rect.height:0;"
+                            + "array[i++]=compStyles?(parseFloat(compStyles.getPropertyValue('font-size'))||0):0;"
+                            + "array[i++]=compStyles?(parseFloat(compStyles.getPropertyValue('line-height'))||0):0;"
+                            + "var isInArticle=false,parentEle=touchElement.parentElement;"
+                            + "while(parentEle){"
+                            + "if(parentEle.className==='article'||parentEle.id==='js_content'||parentEle.id==='mc-article'||parentEle.id==='article'){isInArticle=true;break;}"
+                            + "parentEle=parentEle.parentElement;}"
+                            + "array[i++]=isInArticle;"
+                            + "return array;"
+                            + "}catch(x){return null;}"
+                            + "})()",
                     cssX, cssY);
-            ValueCallback<String> callback = new ValueCallback<String>() {
-                @Override
-                public void onReceiveValue(String value) {
-                    handleWebResult(webView, value, cssX, cssY);
-                }
-            };
+
             if (webView instanceof WebView) {
-                ((WebView) webView).evaluateJavascript(js, callback);
-            } else {
-                for (Method method : webView.getClass().getMethods()) {
-                    if ("evaluateJavascript".equals(method.getName())
-                            && method.getParameterTypes().length == 2) {
-                        method.setAccessible(true);
-                        Class<?> callbackType = method.getParameterTypes()[1];
-                        Object proxy = Proxy.newProxyInstance(
-                                callbackType.getClassLoader(),
-                                new Class<?>[]{callbackType},
-                                (proxyObject, proxyMethod, args) -> {
-                                    if ("onReceiveValue".equals(proxyMethod.getName())
-                                            && args != null && args.length > 0) {
-                                        handleWebResult(webView,
-                                                args[0] == null ? null : String.valueOf(args[0]),
-                                                cssX, cssY);
-                                    }
-                                    return null;
-                                });
-                        method.invoke(webView, js, proxy);
-                        return;
+                ((WebView) webView).evaluateJavascript(js, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        handleWebResult(webView, cache, value, cssX, cssY);
                     }
+                });
+            } else {
+                Method evalMethod = findWebEvaluateMethod(webView.getClass());
+                if (evalMethod != null) {
+                    Class<?> callbackType = evalMethod.getParameterTypes()[1];
+                    Object proxy = Proxy.newProxyInstance(
+                            callbackType.getClassLoader(),
+                            new Class<?>[]{callbackType},
+                            (proxyObject, proxyMethod, args) -> {
+                                if ("onReceiveValue".equals(proxyMethod.getName())
+                                        && args != null && args.length > 0) {
+                                    handleWebResult(webView, cache,
+                                            args[0] == null ? null : String.valueOf(args[0]),
+                                            cssX, cssY);
+                                }
+                                return null;
+                            });
+                    evalMethod.invoke(webView, js, proxy);
+                } else {
+                    cache.inFlight = false;
                 }
             }
         } catch (Throwable throwable) {
@@ -805,59 +1024,466 @@ public final class Bridge {
         }
     }
 
-    private static void handleWebResult(View webView, String value, float cssX, float cssY) {
+    private static String optCleanJsonString(JSONArray array, int index) {
+        if (array == null || index < 0 || index >= array.length() || array.isNull(index)) {
+            return null;
+        }
+        String val = array.optString(index, null);
+        if (val == null || "null".equals(val) || "undefined".equals(val)) {
+            return null;
+        }
+        return val;
+    }
+
+    private static String normalizeWebUrl(String rawUrl) {
+        if (TextUtils.isEmpty(rawUrl)) {
+            return null;
+        }
+        String url = rawUrl.trim();
+        int quotStart = url.indexOf("&quot;");
+        if (quotStart >= 0) {
+            int quotEnd = url.lastIndexOf("&quot;");
+            if (quotEnd > quotStart + 6) {
+                url = url.substring(quotStart + 6, quotEnd).trim();
+            } else {
+                url = url.replace("&quot;", "").trim();
+            }
+        }
+        if ((url.startsWith("\"") && url.endsWith("\""))
+                || (url.startsWith("'") && url.endsWith("'"))) {
+            if (url.length() >= 2) {
+                url = url.substring(1, url.length() - 1).trim();
+            }
+        }
+        if (url.startsWith("//")) {
+            url = "https:" + url;
+        }
+        if (url.isEmpty() || "null".equals(url) || "undefined".equals(url) || "about:blank".equals(url)) {
+            return null;
+        }
+        return url;
+    }
+
+    /**
+     * ColorOS OplusWebViewDragProcessor.handleCallback(View, BiConsumer, String, float, float) port.
+     */
+    private static void handleWebResult(final View webView, final WebCache cache,
+                                        String value, float cssX, float cssY) {
         try {
-            String raw = value;
-            if (raw != null && raw.startsWith("\"") && raw.endsWith("\"")) {
+            if (value == null || value.isEmpty() || "null".equals(value)) {
+                cache.inFlight = false;
+                cache.ready = true;
+                return;
+            }
+            String raw = value.trim();
+            if (raw.startsWith("\"") && raw.endsWith("\"")) {
                 raw = new JSONArray("[" + raw + "]").getString(0);
             }
-            JSONObject json = new JSONObject(raw);
-            WebCache cache = new WebCache();
-            cache.text = json.optString("t", null);
-            String srcUrl = json.optString("s", null);
-            if (srcUrl != null && srcUrl.startsWith("//")) {
-                srcUrl = "https:" + srcUrl;
+            String text = null;
+            String outerHTML = null;
+            String imgSrc = null;
+            if (raw.startsWith("[")) {
+                JSONArray array = new JSONArray(raw);
+                text = optCleanJsonString(array, 0);
+                outerHTML = optCleanJsonString(array, 1);
+                imgSrc = normalizeWebUrl(optCleanJsonString(array, 2));
+                cache.rectX = (float) array.optDouble(3, 0);
+                cache.rectY = (float) array.optDouble(4, 0);
+                cache.rectW = (float) array.optDouble(5, 0);
+                cache.rectH = (float) array.optDouble(6, 0);
+                cache.fontSize = (float) array.optDouble(7, 0);
+                cache.lineHeight = (float) array.optDouble(8, 0);
+                cache.isInArticle = array.optBoolean(9, false);
+            } else if (raw.startsWith("{")) {
+                JSONObject json = new JSONObject(raw);
+                text = json.optString("t", null);
+                imgSrc = normalizeWebUrl(json.optString("s", null));
             }
-            if (srcUrl != null && srcUrl.contains("&quot;")) {
-                srcUrl = srcUrl.replace("&quot;", "");
+
+            // ColorOS rule: when touchElement.src is empty, inspect outerHTML / background-image
+            // for url(...). If the element ALSO has text, it is a styled text/button container
+            // rather than a standalone image.
+            if (TextUtils.isEmpty(imgSrc) && !TextUtils.isEmpty(outerHTML)) {
+                Matcher matcher = WEB_CSS_URL_PATTERN.matcher(outerHTML);
+                if (matcher.find()) {
+                    String bgUrl = normalizeWebUrl(matcher.group(1));
+                    if (!TextUtils.isEmpty(bgUrl)) {
+                        if (!TextUtils.isEmpty(text) && !text.trim().isEmpty()) {
+                            text = "";
+                            imgSrc = "";
+                        } else {
+                            imgSrc = bgUrl;
+                        }
+                    }
+                }
             }
-            cache.src = srcUrl;
-            cache.cssX = cssX;
-            cache.cssY = cssY;
-            cache.timestamp = SystemClock.uptimeMillis();
-            sWebCache.put(webView, cache);
-            Log.i(TAG, "webview prefetch text=" + (cache.text == null ? 0 : cache.text.length())
-                    + " src=" + cache.src);
+
+            String trimmedText = text == null ? null : text.trim();
+            // When the finger is directly on an image element (imgSrc present and no text on that img node),
+            // treat as image; otherwise if meaningful text is present, treat as text.
+            if (!TextUtils.isEmpty(trimmedText) && TextUtils.isEmpty(imgSrc)
+                    && isMeaningfulUserText(trimmedText)) {
+                cache.text = trimmedText;
+                cache.src = null;
+                cache.inFlight = false;
+                cache.ready = true;
+                cache.timestamp = SystemClock.uptimeMillis();
+                Log.i(TAG, "webview hit text len=" + cache.text.length()
+                        + " inArticle=" + cache.isInArticle + " font=" + cache.fontSize);
+                onWebCacheReady(webView, cache);
+                return;
+            }
+
+            if (!TextUtils.isEmpty(imgSrc)) {
+                cache.src = imgSrc;
+                cache.text = null;
+                cache.timestamp = SystemClock.uptimeMillis();
+                Log.i(TAG, "webview hit imgSrc=" + imgSrc
+                        + " rect=" + cache.rectW + "x" + cache.rectH);
+                startFetchWebImage(webView, cache, imgSrc);
+                return;
+            }
+
+            if (!TextUtils.isEmpty(trimmedText) && isMeaningfulUserText(trimmedText)) {
+                cache.text = trimmedText;
+                cache.inFlight = false;
+                cache.ready = true;
+                cache.timestamp = SystemClock.uptimeMillis();
+                Log.i(TAG, "webview fallback text len=" + cache.text.length());
+                onWebCacheReady(webView, cache);
+                return;
+            }
+
+            cache.inFlight = false;
+            cache.ready = true;
         } catch (Throwable throwable) {
+            cache.inFlight = false;
+            cache.ready = true;
             Log.d(TAG, "webview callback failed: " + throwable);
         }
     }
 
-    private static Bundle webViewBundle(View view) {
-        WebCache cache = sWebCache.get(view);
-        if (cache == null || SystemClock.uptimeMillis() - cache.timestamp > 5000) {
+    /**
+     * ColorOS OplusWebViewDragProcessor.startDragImg / lambda$startDragImg$2 port,
+     * extended to preserve animated GIF/WebP payloads and support data:/blob: URLs.
+     */
+    private static void startFetchWebImage(final View webView, final WebCache cache, final String imgSrc) {
+        final long requestId = sWebRequestId.incrementAndGet();
+        final Context appContext = webView.getContext() != null
+                ? webView.getContext().getApplicationContext() : currentContext();
+        String cookie = null;
+        try {
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            if (cm != null && (imgSrc.startsWith("http://") || imgSrc.startsWith("https://"))) {
+                cookie = cm.getCookie(imgSrc);
+            }
+        } catch (Throwable ignored) {
+        }
+        final String cookieHeader = cookie;
+
+        sWebExecutor.execute(() -> {
+            byte[] data = null;
+            Bitmap decoded = null;
+            String animatedPath = null;
+            String mimeType = null;
+            try {
+                if (sWebRequestId.get() != requestId) {
+                    return;
+                }
+                data = downloadWebImageBytes(appContext, imgSrc, cookieHeader);
+                if (data != null && data.length > 0) {
+                    decoded = BitmapFactory.decodeByteArray(data, 0, data.length);
+                    if (isAnimatedHead(data)) {
+                        File animFile = bytesToTempFile(appContext, data);
+                        if (animFile != null && animFile.isFile()) {
+                            animatedPath = animFile.getAbsolutePath();
+                            mimeType = (data[0] == 0x52 && data[1] == 0x49) ? "image/webp" : "image/gif";
+                        }
+                    }
+                }
+            } catch (Throwable throwable) {
+                Log.d(TAG, "downloadWebImageBytes failed: " + throwable);
+            }
+
+            final Bitmap finalBitmap = decoded != null ? toSoftwareBitmap(decoded) : null;
+            final String finalAnimatedPath = animatedPath;
+            final String finalMime = mimeType;
+            sMainHandler.post(() -> {
+                if (sWebRequestId.get() != requestId) {
+                    return;
+                }
+                Bitmap bmp = finalBitmap;
+                if (bmp == null) {
+                    bmp = cropWebViewElement(webView, cache);
+                }
+                cache.bitmap = bmp;
+                cache.animatedPath = finalAnimatedPath;
+                cache.mimeType = finalMime;
+                cache.inFlight = false;
+                cache.ready = true;
+                cache.timestamp = SystemClock.uptimeMillis();
+                Log.i(TAG, "webview img ready bitmap="
+                        + (bmp == null ? "null" : (bmp.getWidth() + "x" + bmp.getHeight()))
+                        + " animated=" + (finalAnimatedPath != null)
+                        + " src=" + imgSrc);
+                onWebCacheReady(webView, cache);
+            });
+        });
+    }
+
+    private static byte[] downloadWebImageBytes(Context context, String imgSrc, String cookie) {
+        if (TextUtils.isEmpty(imgSrc)) {
             return null;
         }
-        if (!TextUtils.isEmpty(cache.text)) {
+        try {
+            if (imgSrc.startsWith("data:")) {
+                int comma = imgSrc.indexOf(',');
+                if (comma > 0) {
+                    String meta = imgSrc.substring(0, comma);
+                    String payload = imgSrc.substring(comma + 1);
+                    if (meta.contains(";base64")) {
+                        return android.util.Base64.decode(payload, android.util.Base64.DEFAULT);
+                    }
+                }
+                return null;
+            }
+            if (imgSrc.startsWith("file://") || imgSrc.startsWith("/")) {
+                File f = fileFromString(imgSrc);
+                if (f != null && f.isFile() && f.length() > 0 && f.length() <= 32 * 1024 * 1024) {
+                    try (FileInputStream in = new FileInputStream(f)) {
+                        return readStreamBytes(in, 32 * 1024 * 1024);
+                    }
+                }
+                return null;
+            }
+            if (imgSrc.startsWith("content://") && context != null) {
+                try (InputStream in = context.getContentResolver().openInputStream(Uri.parse(imgSrc))) {
+                    return readStreamBytes(in, 32 * 1024 * 1024);
+                }
+            }
+            if (imgSrc.startsWith("http://") || imgSrc.startsWith("https://")) {
+                java.net.URL url = new java.net.URL(imgSrc);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(4500);
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty("User-Agent",
+                        "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+                conn.setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8");
+                if (!TextUtils.isEmpty(url.getHost())) {
+                    conn.setRequestProperty("Referer", url.getProtocol() + "://" + url.getHost() + "/");
+                }
+                if (!TextUtils.isEmpty(cookie)) {
+                    conn.setRequestProperty("Cookie", cookie);
+                }
+                try (InputStream in = conn.getInputStream()) {
+                    return readStreamBytes(in, 32 * 1024 * 1024);
+                } finally {
+                    try {
+                        conn.disconnect();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            Log.d(TAG, "downloadWebImageBytes error for " + imgSrc + ": " + throwable);
+        }
+        return null;
+    }
+
+    private static byte[] readStreamBytes(InputStream in, int maxBytes) throws Exception {
+        if (in == null) {
+            return null;
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int n;
+        while ((n = in.read(buffer)) != -1) {
+            total += n;
+            if (total > maxBytes) {
+                break;
+            }
+            out.write(buffer, 0, n);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * Element-level crop fallback (for blob: URLs or CORS/canvas-restricted web images)
+     * using the exact DOM getBoundingClientRect() of the <img> element.
+     */
+    private static Bitmap cropWebViewElement(View webView, WebCache cache) {
+        if (webView == null || cache == null || cache.rectW < 24 || cache.rectH < 24) {
+            return null;
+        }
+        try {
+            int vw = webView.getWidth();
+            int vh = webView.getHeight();
+            if (vw <= 0 || vh <= 0) {
+                return null;
+            }
+            float d = cache.density > 0 ? cache.density : webView.getResources().getDisplayMetrics().density;
+            int left = Math.max(0, Math.round(cache.rectX * d));
+            int top = Math.max(0, Math.round(cache.rectY * d));
+            int right = Math.min(vw, Math.round((cache.rectX + cache.rectW) * d));
+            int bottom = Math.min(vh, Math.round((cache.rectY + cache.rectH) * d));
+            int cw = right - left;
+            int ch = bottom - top;
+            if (cw < 32 || ch < 32) {
+                return null;
+            }
+            Bitmap bmp = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bmp);
+            canvas.translate(-left - webView.getScrollX(), -top - webView.getScrollY());
+            webView.draw(canvas);
+            if (!bitmapHasContent(bmp)) {
+                bmp.recycle();
+                return null;
+            }
+            return bmp;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * ColorOS OplusWebViewDragProcessor$1.onClipDataReady(ClipData) parity:
+     * if the long-press already fired while JS evaluation or image download was in-flight,
+     * deliver the extracted Bundle as soon as it finishes on the main thread.
+     */
+    private static void onWebCacheReady(View webView, WebCache cache) {
+        try {
+            if (!sGestureActive || cache == null || cache.generation != sGestureGeneration) {
+                return;
+            }
+            if (sWebAwaitingGeneration != cache.generation) {
+                return;
+            }
+            if (sPendingPayload != null || sGestureState.get() == STATE_DRAGGING || sActiveDragView != null) {
+                return;
+            }
+            sWebAwaitingGeneration = -1;
+            sWebAwaitingViewRef = null;
+            Bundle bundle = buildBundleFromWebCache(cache);
+            if (bundle == null || !isBundleMeaningful(bundle)) {
+                return;
+            }
+            sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+            bundle.putString("coordinate", ((int) sDownRawX) + "-" + ((int) sDownRawY));
+            sLastTouchAt = SystemClock.uptimeMillis();
+            if (webView != null && webView.isAttachedToWindow()) {
+                sLastTouchView = webView;
+            }
+            dismissTextSelectionUi(webView);
+            Log.i(TAG, "async webview ready -> delivering catchType=" + bundle.getInt("catchType", 0)
+                    + " moved=" + sMovedSinceDown);
+            if (sMovedSinceDown) {
+                sGestureState.set(STATE_DRAGGING);
+                forwardToPortal(bundle, null, true);
+            } else {
+                sPendingPayload = bundle;
+                sPendingContent = null;
+                sPendingGeneration = sGestureGeneration;
+                sGestureState.set(STATE_IDLE);
+                forwardToPortal(bundle, null, false);
+            }
+        } catch (Throwable throwable) {
+            Log.w(TAG, "onWebCacheReady failed", throwable);
+        }
+    }
+
+    private static Bundle buildBundleFromWebCache(WebCache cache) {
+        if (cache == null || !cache.ready) {
+            return null;
+        }
+        if (!TextUtils.isEmpty(cache.text) && isMeaningfulUserText(cache.text)) {
             Bundle bundle = new Bundle();
             bundle.putString("viewContent", cache.text);
             bundle.putInt("catchType", 1);
             return bundle;
         }
-        if (!TextUtils.isEmpty(cache.src)) {
+        if (cache.bitmap != null && !cache.bitmap.isRecycled()) {
             Bundle bundle = new Bundle();
-            bundle.putString("imgUrl", cache.src);
+            bundle.putParcelable("viewBitmap", cache.bitmap);
+            if (!TextUtils.isEmpty(cache.src)) {
+                bundle.putString("imageUrl", cache.src);
+                bundle.putString("imgUrl", cache.src);
+            }
+            if (!TextUtils.isEmpty(cache.animatedPath)) {
+                bundle.putString("animatedSourcePath", cache.animatedPath);
+                bundle.putString("mimeType", TextUtils.isEmpty(cache.mimeType) ? "image/gif" : cache.mimeType);
+            }
             bundle.putInt("catchType", 2);
             return bundle;
         }
         return null;
     }
 
+    private static Bundle webViewBundle(View view) {
+        View target = resolveWebViewTarget(view);
+        if (target == null) {
+            return null;
+        }
+        float rawX = getTouchRawX();
+        float rawY = getTouchRawY();
+        WebCache cache = sWebCache.get(target);
+        long now = SystemClock.uptimeMillis();
+        if (cache == null || (cache.generation != sGestureGeneration && now - cache.timestamp > 1500)) {
+            sWebAwaitingGeneration = sGestureGeneration;
+            sWebAwaitingViewRef = new WeakReference<>(target);
+            prefetchWebView(target, rawX, rawY);
+            return null;
+        }
+        if (cache.inFlight && !cache.ready) {
+            sWebAwaitingGeneration = sGestureGeneration;
+            sWebAwaitingViewRef = new WeakReference<>(target);
+            Log.i(TAG, "webViewBundle: async extraction in-flight for " + target.getClass().getName());
+            return null;
+        }
+        return buildBundleFromWebCache(cache);
+    }
+
+    private static void clearWebViewSelection(View view) {
+        View target = resolveWebViewTarget(view);
+        if (target == null) {
+            return;
+        }
+        try {
+            String js = "javascript:(function(){try{if(window.getSelection)window.getSelection().removeAllRanges();}catch(e){}})()";
+            if (target instanceof WebView) {
+                ((WebView) target).evaluateJavascript(js, null);
+            } else {
+                Method m = findWebEvaluateMethod(target.getClass());
+                if (m != null) {
+                    m.invoke(target, js, null);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static final class WebCache {
+        int generation;
+        boolean inFlight;
+        boolean ready;
         String text;
         String src;
+        Bitmap bitmap;
+        String animatedPath;
+        String mimeType;
+        float rawX;
+        float rawY;
         float cssX;
         float cssY;
+        float density;
+        float rectX;
+        float rectY;
+        float rectW;
+        float rectH;
+        float fontSize;
+        float lineHeight;
+        boolean isInArticle;
         long timestamp;
     }
 
@@ -1447,6 +2073,9 @@ public final class Bridge {
         try {
             if (sGestureState.get() == STATE_DRAGGING) {
                 return null;
+            }
+            if (isWebViewLike(view)) {
+                return webViewBundle(view);
             }
             // The stock fetcher already found content. Keep its result instead
             // of running a second, potentially expensive extraction pass.
@@ -2745,6 +3374,7 @@ public final class Bridge {
                 && !TextUtils.isEmpty(((TextView) innermostView).getText());
         boolean fingerOnImage = innermostView instanceof ImageView
                 && ((ImageView) innermostView).getDrawable() != null;
+        boolean fingerOnWeb = isWebViewLike(innermostView) || resolveWebViewTarget(innermostView) != null;
         for (int i = chain.size() - 1; i >= 0; i--) {
             View view = chain.get(i);
             boolean innermost = i == chain.size() - 1;
@@ -2753,6 +3383,11 @@ public final class Bridge {
                     continue;
                 }
                 if (!innermost && view != innermostView) {
+                    if (fingerOnWeb && !"web".equals(rule.type)) {
+                        Log.d(TAG, "rule skip " + rule.type + "@" + view.getClass().getSimpleName()
+                                + " (finger is on webview)");
+                        continue;
+                    }
                     if (fingerOnText && "image".equals(rule.type)) {
                         Log.d(TAG, "rule skip image@" + view.getClass().getSimpleName()
                                 + " (finger is on text)");
@@ -3173,6 +3808,7 @@ public final class Bridge {
             if (web != null && isBundleMeaningful(web)) {
                 return web;
             }
+            return null;
         }
 
         // 3. Find target leaf view
@@ -3209,6 +3845,7 @@ public final class Bridge {
             if (web != null && isBundleMeaningful(web)) {
                 return web;
             }
+            return null;
         }
 
         // 4. Hierarchy search starting from target: custom text views,
@@ -3480,7 +4117,7 @@ public final class Bridge {
                     if (sb.length() > 0) sb.append("\n");
                     sb.append(cs);
                 }
-            } else if (child instanceof ViewGroup && !isComposeView(child)) {
+            } else if (child instanceof ViewGroup && !isComposeView(child) && !isWebViewLike(child)) {
                 collectTextViewsRecursively((ViewGroup) child, sb, depth + 1);
             }
         }
@@ -3505,7 +4142,7 @@ public final class Bridge {
                     b.putInt("catchType", 2);
                     return b;
                 }
-            } else if (child instanceof ViewGroup && !isComposeView(child)) {
+            } else if (child instanceof ViewGroup && !isComposeView(child) && !isWebViewLike(child)) {
                 Bundle b = findFirstImageRecursively((ViewGroup) child, depth + 1);
                 if (b != null) return b;
             }
@@ -4651,6 +5288,13 @@ public final class Bridge {
         collectNativeViewsUnderPoint(root, rawX, rawY, nativeViews);
 
         for (View v : nativeViews) {
+            if (isWebViewLike(v)) {
+                Bundle web = webViewBundle(v);
+                if (web != null && isBundleMeaningful(web)) {
+                    Log.i(TAG, "hybrid compose hit WebView " + v.getClass().getName());
+                    return web;
+                }
+            }
             if (wantBitmap) {
                 Bundle file = extractFile(v);
                 if (file != null && isBundleMeaningful(file)) {
@@ -6358,6 +7002,7 @@ public final class Bridge {
     private static Bundle pickPayload(Map<?, ?> map) {
         Bundle textPayload = null;
         Bundle bitmapPayload = null;
+        Bundle urlPayload = null;
         for (Object value : map.values()) {
             if (!(value instanceof Bundle)) {
                 continue;
@@ -6373,9 +7018,14 @@ public final class Bridge {
             if (bitmapPayload == null && bundle.getParcelable("viewBitmap") instanceof Bitmap) {
                 bitmapPayload = bundle;
             }
+            if (urlPayload == null && (!TextUtils.isEmpty(bundle.getString("imageUrl"))
+                    || !TextUtils.isEmpty(bundle.getString("imgUrl")))) {
+                urlPayload = bundle;
+            }
         }
         if (textPayload != null) return textPayload;
-        return bitmapPayload;
+        if (bitmapPayload != null) return bitmapPayload;
+        return urlPayload;
     }
 
     /**
@@ -8245,9 +8895,16 @@ public final class Bridge {
             // interrupted WeChat, and its selection handles would otherwise stay
             // in a separate overlay window until the process is killed.
             dismissTextSelectionUi(target);
+            clearWebViewSelection(target);
             final View cleanupRoot = target;
-            sMainHandler.postDelayed(() -> dismissTextSelectionUi(cleanupRoot), 120);
-            sMainHandler.postDelayed(() -> dismissTextSelectionUi(cleanupRoot), 350);
+            sMainHandler.postDelayed(() -> {
+                dismissTextSelectionUi(cleanupRoot);
+                clearWebViewSelection(cleanupRoot);
+            }, 120);
+            sMainHandler.postDelayed(() -> {
+                dismissTextSelectionUi(cleanupRoot);
+                clearWebViewSelection(cleanupRoot);
+            }, 350);
             if (!started) {
                 sActiveDragView = null;
                 sActiveDragText = null;
@@ -8280,7 +8937,7 @@ public final class Bridge {
             if (root instanceof ImageView && ((ImageView) root).getDrawable() != null) {
                 return true;
             }
-            if (root instanceof WebView) {
+            if (isWebViewLike(root) || isComposeView(root)) {
                 return true;
             }
             String name = root.getClass().getName();
@@ -8314,7 +8971,7 @@ public final class Bridge {
             if (view instanceof ImageView && ((ImageView) view).getDrawable() != null) {
                 return true;
             }
-            if (view instanceof WebView) {
+            if (isWebViewLike(view) || isComposeView(view)) {
                 return true;
             }
             String name = view.getClass().getName();
