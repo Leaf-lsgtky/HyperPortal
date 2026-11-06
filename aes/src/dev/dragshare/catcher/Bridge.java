@@ -8770,6 +8770,7 @@ public final class Bridge {
                         if (action == DragEvent.ACTION_DRAG_STARTED) {
                             sDragStartY = -1f;
                             sDragStartX = -1f;
+                            suppressChildDragTargets(v, event);
                             dismissTextSelectionUi(v);
                             notifyPortalDragState(v.getContext(), 1, 0f, 0f);
                             return true;
@@ -8917,6 +8918,160 @@ public final class Bridge {
         } catch (Throwable throwable) {
             Log.w(TAG, "startSystemDrag failed", throwable);
             return false;
+        }
+    }
+
+    private static Field sViewPrivateFlags2Field;
+    private static Field sVgChildrenInterestedField;
+    private static Field sDragEventActionField;
+    private static Method sDragEventObtainMethod;
+    private static boolean sDragFieldsResolved;
+
+    /**
+     * WebView.onDragEvent() (and EditText.onDragEvent()) returns true for
+     * ACTION_DRAG_STARTED, which sets PFLAG2_DRAG_CAN_ACCEPT (0x1) in
+     * View.mPrivateFlags2 and adds the view chain to ViewGroup.mChildrenInterestedInDrag.
+     * ViewGroup.dispatchDragEvent() then routes ACTION_DRAG_LOCATION and ACTION_DROP
+     * to the WebView instead of the root DecorView's OnDragListener, and
+     * WebView.onDragEvent(ACTION_DROP) returns true — telling WMS the drop was
+     * consumed and skipping the native createCancelAnimationLocked fly-back
+     * animation (Rule 3).
+     *
+     * Clearing PFLAG2_DRAG_CAN_ACCEPT and mChildrenInterestedInDrag on the
+     * source window's descendants right after ACTION_DRAG_STARTED (when
+     * ViewGroup.dispatchDragEvent has just finished notifyChildOfDragStart and
+     * invokes super.dispatchDragEvent on the root DecorView) ensures all drag
+     * location and drop events in the source window are handled exclusively by
+     * the root DecorView listener, which returns false on ACTION_DROP so the
+     * shadow always flies back smoothly.
+     */
+    private static void suppressChildDragTargets(View root, DragEvent startEvent) {
+        if (!(root instanceof ViewGroup)) {
+            return;
+        }
+        try {
+            if (!sDragFieldsResolved) {
+                sDragFieldsResolved = true;
+                try {
+                    Field pf2 = View.class.getDeclaredField("mPrivateFlags2");
+                    pf2.setAccessible(true);
+                    sViewPrivateFlags2Field = pf2;
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Field cid = ViewGroup.class.getDeclaredField("mChildrenInterestedInDrag");
+                    cid.setAccessible(true);
+                    sVgChildrenInterestedField = cid;
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Field act = DragEvent.class.getDeclaredField("mAction");
+                    act.setAccessible(true);
+                    sDragEventActionField = act;
+                    Method obt = DragEvent.class.getDeclaredMethod("obtain", DragEvent.class);
+                    obt.setAccessible(true);
+                    sDragEventObtainMethod = obt;
+                } catch (Throwable ignored) {
+                }
+            }
+            ViewGroup rootGroup = (ViewGroup) root;
+            // 1. Construct a synthetic ACTION_DRAG_ENDED event via public Parcelable API
+            //    (with reflective fallback) and dispatch it to rootGroup's direct children.
+            //    ViewGroup.dispatchDragEvent(ACTION_DRAG_ENDED) and View.callDragEventHandler()
+            //    natively clear mChildrenInterestedInDrag and mPrivateFlags2 (&= ~0x3, i.e.
+            //    canAcceptDrag() -> false) on every child and descendant (including WebView),
+            //    without needing hidden-API access.
+            DragEvent ended = obtainDragEndedEvent(startEvent);
+            if (ended != null) {
+                for (int i = 0; i < rootGroup.getChildCount(); i++) {
+                    View child = rootGroup.getChildAt(i);
+                    if (child != null) {
+                        try {
+                            child.dispatchDragEvent(ended);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+            // 2. Also clear mChildrenInterestedInDrag and mPrivateFlags2 directly across
+            //    the view hierarchy (including rootGroup itself) when reflection is permitted.
+            clearDragAcceptRecursive(rootGroup, 0);
+        } catch (Throwable throwable) {
+            Log.w(TAG, "suppressChildDragTargets failed", throwable);
+        }
+    }
+
+    private static DragEvent obtainDragEndedEvent(DragEvent startEvent) {
+        if (startEvent != null) {
+            android.os.Parcel parcel = null;
+            try {
+                parcel = android.os.Parcel.obtain();
+                startEvent.writeToParcel(parcel, 0);
+                parcel.setDataPosition(0);
+                int firstInt = parcel.readInt();
+                if (firstInt == startEvent.getAction()) {
+                    parcel.setDataPosition(0);
+                    parcel.writeInt(DragEvent.ACTION_DRAG_ENDED);
+                    parcel.setDataPosition(0);
+                    DragEvent ev = DragEvent.CREATOR.createFromParcel(parcel);
+                    if (ev != null && ev.getAction() == DragEvent.ACTION_DRAG_ENDED) {
+                        return ev;
+                    }
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (parcel != null) {
+                    try {
+                        parcel.recycle();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        if (startEvent != null && sDragEventObtainMethod != null && sDragEventActionField != null) {
+            try {
+                DragEvent ev = (DragEvent) sDragEventObtainMethod.invoke(null, startEvent);
+                if (ev != null) {
+                    sDragEventActionField.setInt(ev, DragEvent.ACTION_DRAG_ENDED);
+                    return ev;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static void clearDragAcceptRecursive(ViewGroup group, int depth) {
+        if (group == null || depth > 32) {
+            return;
+        }
+        if (sVgChildrenInterestedField != null) {
+            try {
+                Object set = sVgChildrenInterestedField.get(group);
+                if (set instanceof java.util.Collection) {
+                    ((java.util.Collection<?>) set).clear();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        int count = group.getChildCount();
+        for (int i = 0; i < count; i++) {
+            View child = group.getChildAt(i);
+            if (child == null) {
+                continue;
+            }
+            if (sViewPrivateFlags2Field != null) {
+                try {
+                    int flags2 = sViewPrivateFlags2Field.getInt(child);
+                    if ((flags2 & 0x3) != 0) {
+                        sViewPrivateFlags2Field.setInt(child, flags2 & ~0x3);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            if (child instanceof ViewGroup) {
+                clearDragAcceptRecursive((ViewGroup) child, depth + 1);
+            }
         }
     }
 
