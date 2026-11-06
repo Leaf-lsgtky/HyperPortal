@@ -8289,35 +8289,6 @@ public final class Bridge {
             } catch (Throwable ignored) {
             }
         }
-        int previewHeight;
-        int previewWidth;
-        float density = context.getResources().getDisplayMetrics().density;
-        int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getPhysicalScreenHeight(context);
-        if (bitmap instanceof Bitmap) {
-            Bitmap bm = (Bitmap) bitmap;
-            float area = (float) bm.getWidth() * (float) bm.getHeight();
-            float scale = PreviewShadow.getImageScale(area, density);
-            previewWidth = Math.max(1, Math.round(bm.getWidth() * scale));
-            previewHeight = Math.max(1, Math.round(bm.getHeight() * scale));
-        } else if (!TextUtils.isEmpty(text)) {
-            TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            tp.setTextSize(12.27f * density);
-            float textMeasuredWidth = tp.measureText(text);
-            int maxAllowedWidth = (int) (screenWidth * 0.8f);
-            int baseWidth = (int) textMeasuredWidth;
-            if (sLastTouchView != null && sLastTouchView.getWidth() > 0) {
-                baseWidth = Math.min(baseWidth, sLastTouchView.getWidth());
-            }
-            int contentW = Math.min((int) (baseWidth * 1.05f), maxAllowedWidth);
-            previewWidth = Math.min(contentW + Math.round(24f * density), screenWidth);
-            previewHeight = Math.min(Math.round(120f * density), (int) (screenHeight * 0.8f));
-        } else {
-            previewWidth = Math.round(120f * density);
-            previewHeight = Math.round(68f * density);
-        }
-        intent.putExtra("previewWidth", previewWidth);
-        intent.putExtra("previewHeight", previewHeight);
         Uri imageContentUri = null;
         String imageCacheName = payload.getString("stagedCacheName");
         String stagedUriStr = payload.getString("stagedImageUri");

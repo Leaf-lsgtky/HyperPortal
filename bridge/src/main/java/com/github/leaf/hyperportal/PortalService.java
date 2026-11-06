@@ -124,16 +124,6 @@ public class PortalService extends Service {
     private float mTouchY;
     private boolean mDragActive;
 
-    // ColorOS-style drag preview: white rounded card, 76dp high, text reflows
-    // from its original width into a 76x76 square at the bottom hot zone.
-    private FrameLayout mDragPreview;
-    private TextView mDragPreviewText;
-    private ImageView mDragPreviewImage;
-    private WindowManager.LayoutParams mDragPreviewParams;
-    private int mDragPreviewWidth;
-    private int mDragPreviewHeight;
-    private boolean mDragPreviewBottom;
-    private boolean mDragPreviewRaised;
     private int mCurrentDragState = 0;
     private int mLastNotifiedShadowState = -1;
     private float mStartDragY = -1f;
@@ -259,8 +249,6 @@ public class PortalService extends Service {
         mTouchX = intent.getFloatExtra("touchX", -1f);
         mTouchY = intent.getFloatExtra("touchY", -1f);
         mDragActive = intent.getBooleanExtra("dragActive", false);
-        mDragPreviewWidth = intent.getIntExtra("previewWidth", 0);
-        mDragPreviewHeight = intent.getIntExtra("previewHeight", 0);
         mFileName = intent.getStringExtra("imageFileName");
         if (mFileName == null) {
             mFileName = intent.getStringExtra("fileName");
@@ -381,7 +369,6 @@ public class PortalService extends Service {
         } catch (Throwable ignored) {
         }
         removeBottomPortal();
-        hideDragPreview();
         super.onDestroy();
     }
 
@@ -615,171 +602,6 @@ public class PortalService extends Service {
                             .start();
                 }
             }
-        }
-    }
-
-    private void showDragPreview() {
-        if (mDragPreview != null) {
-            if (mBottomContainer != null) {
-                raiseDragPreview();
-            }
-            updateDragPreviewPosition();
-            return;
-        }
-        if (TextUtils.isEmpty(mText) && mBitmap == null) {
-            return;
-        }
-        try {
-            int screenWidth = getResources().getDisplayMetrics().widthPixels;
-            int square = dp(76);
-            if (mDragPreviewWidth <= 0) {
-                mDragPreviewWidth = mBitmap != null
-                        ? square
-                        : Math.min(dp(220), screenWidth - dp(32));
-            }
-            if (mDragPreviewHeight <= 0) {
-                mDragPreviewHeight = square;
-            }
-            FrameLayout card = new FrameLayout(this);
-            card.setClipToOutline(true);
-
-            if (mBitmap != null) {
-                // ColorOS image preview is the bitmap itself with an 8dp
-                // rounded clip, not a white padded card.
-                card.setBackground(rounded(Color.TRANSPARENT, 8));
-                card.setPadding(0, 0, 0, 0);
-                ImageView image = new ImageView(this);
-                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                image.setImageBitmap(mBitmap);
-                card.addView(image, new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT));
-                mDragPreviewImage = image;
-            } else {
-                card.setBackground(rounded(Color.WHITE, 10));
-                card.setPadding(dp(6), dp(6), dp(6), dp(6));
-                TextView text = new TextView(this);
-                text.setTextColor(Color.BLACK);
-                text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-                text.setGravity(Gravity.CENTER);
-                text.setMaxLines(4);
-                text.setEllipsize(TextUtils.TruncateAt.END);
-                text.setBreakStrategy(0);
-                text.setHyphenationFrequency(2);
-                String content = mText == null ? "" : mText.replace('\n', ' ');
-                if (content.length() > 40) {
-                    content = content.substring(0, 40);
-                }
-                text.setText(content);
-                card.addView(text, new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT));
-                mDragPreviewText = text;
-            }
-
-            WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                    mDragPreviewWidth,
-                    mDragPreviewHeight,
-                    Build.VERSION.SDK_INT >= 26
-                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                            : WindowManager.LayoutParams.TYPE_PHONE,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            params.gravity = Gravity.TOP | Gravity.START;
-            mWindowManager.addView(card, params);
-            mDragPreview = card;
-            mDragPreviewParams = params;
-            mDragPreviewBottom = false;
-            mDragPreviewRaised = mBottomContainer != null;
-            updateDragPreviewPosition();
-            Log.i(TAG, "drag preview added " + mDragPreviewWidth + "x" + mDragPreviewHeight);
-        } catch (Throwable throwable) {
-            Log.w(TAG, "showDragPreview failed", throwable);
-            mDragPreview = null;
-            mDragPreviewParams = null;
-        }
-    }
-
-    private void updateDragPreviewPosition() {
-        if (mDragPreview == null || mDragPreviewParams == null) {
-            return;
-        }
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-        float x = mTouchX >= 0 ? mTouchX : screenWidth / 2f;
-        float y = mTouchY >= 0 ? mTouchY : screenHeight / 2f;
-        mDragPreviewParams.x = clamp((int) x - mDragPreviewParams.width / 2,
-                0, Math.max(0, screenWidth - mDragPreviewParams.width));
-        mDragPreviewParams.y = clamp((int) y - mDragPreviewParams.height / 2,
-                0, Math.max(0, screenHeight - mDragPreviewParams.height));
-        try {
-            mWindowManager.updateViewLayout(mDragPreview, mDragPreviewParams);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void morphDragPreview(boolean square) {
-        if (mDragPreview == null || mDragPreviewParams == null
-                || square == mDragPreviewBottom) {
-            return;
-        }
-        mDragPreviewBottom = square;
-        int targetWidth = square ? dp(76) : mDragPreviewWidth;
-        int targetHeight = dp(76);
-        mDragPreviewParams.width = targetWidth;
-        mDragPreviewParams.height = targetHeight;
-        ViewGroup.LayoutParams layoutParams = mDragPreview.getLayoutParams();
-        layoutParams.width = targetWidth;
-        layoutParams.height = targetHeight;
-        mDragPreview.setLayoutParams(layoutParams);
-        if (mDragPreviewText != null) {
-            mDragPreviewText.requestLayout();
-        }
-        try {
-            mWindowManager.updateViewLayout(mDragPreview, mDragPreviewParams);
-        } catch (Throwable ignored) {
-        }
-        updateDragPreviewPosition();
-        Log.i(TAG, "drag preview morph square=" + square + " " + targetWidth + "x" + targetHeight);
-    }
-
-    private void setDragPreviewScale(float scale) {
-        if (mDragPreview != null) {
-            mDragPreview.setScaleX(scale);
-            mDragPreview.setScaleY(scale);
-        }
-    }
-
-    private void raiseDragPreview() {
-        if (mDragPreview == null || mDragPreviewParams == null || mDragPreviewRaised) {
-            return;
-        }
-        mDragPreviewRaised = true;
-        try {
-            // Same window type as the bottom portal; re-add once so the
-            // preview stays above the glow/app row.
-            mWindowManager.removeView(mDragPreview);
-            mWindowManager.addView(mDragPreview, mDragPreviewParams);
-            updateDragPreviewPosition();
-        } catch (Throwable throwable) {
-            Log.w(TAG, "raiseDragPreview failed", throwable);
-        }
-    }
-
-    private void hideDragPreview() {
-        if (mDragPreview != null) {
-            try {
-                mWindowManager.removeView(mDragPreview);
-            } catch (Throwable ignored) {
-            }
-            mDragPreview = null;
-            mDragPreviewParams = null;
-            mDragPreviewText = null;
-            mDragPreviewImage = null;
-            mDragPreviewRaised = false;
         }
     }
 
@@ -1057,7 +879,6 @@ public class PortalService extends Service {
             return;
         }
         Log.i(TAG, "performTarget " + target.label + " pkg=" + target.packageName + " kind=" + target.kind);
-        hideDragPreview();
         if (target.kind == AppTarget.KIND_SAVE) {
             saveToPortal();
             return;
