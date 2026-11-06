@@ -8654,6 +8654,32 @@ public final class Bridge {
         notifyPortalDragState(context, state, -1f, y);
     }
 
+    /**
+     * Ships the drag circle to system_server with the ClipData: a drop inside
+     * this circle, over the window the drag started from, is cancelled
+     * (see PortalSystemModule.onReportDropWindowLock). Coordinates are screen
+     * pixels, same space as Bridge's raw touch coordinates.
+     */
+    private static void attachDragCircle(ClipDescription description, float density) {
+        if (description == null) {
+            return;
+        }
+        try {
+            float cx = sDragOriginX >= 0f ? sDragOriginX : sDownRawX;
+            float cy = sDragOriginY >= 0f ? sDragOriginY : sDownRawY;
+            if (cx <= 0f && cy <= 0f) {
+                return;
+            }
+            float radiusPx = Math.max(8f, sTouchSlopDp * density);
+            android.os.PersistableBundle extras = new android.os.PersistableBundle();
+            extras.putDouble("hp_circle_x", cx);
+            extras.putDouble("hp_circle_y", cy);
+            extras.putDouble("hp_circle_r", radiusPx);
+            description.setExtras(extras);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static boolean startSystemDrag(String text, Bitmap bitmap) {
         return startSystemDrag(null, text, bitmap, null, null);
     }
@@ -8737,6 +8763,7 @@ public final class Bridge {
                 mimeList.add("application/x-dragshare");
                 String clipLabel = !TextUtils.isEmpty(text) ? text : "图片";
                 ClipDescription description = new ClipDescription(clipLabel, mimeList.toArray(new String[0]));
+                attachDragCircle(description, view.getResources().getDisplayMetrics().density);
                 // Never expose the internal fallback label as clipboard text.
                 // The URI is the payload; a null text item prevents "drag_file"
                 // from being pasted into target apps.
@@ -8747,6 +8774,7 @@ public final class Bridge {
             } else {
                 ClipDescription description = new ClipDescription("content",
                         new String[]{"text/plain", "application/x-dragshare"});
+                attachDragCircle(description, view.getResources().getDisplayMetrics().density);
                 ClipData.Item item = new ClipData.Item(TextUtils.isEmpty(text) ? "" : text);
                 clip = new ClipData(description, item);
                 Log.i(TAG, "startSystemDrag: dragging text length=" + (text == null ? 0 : text.length()));

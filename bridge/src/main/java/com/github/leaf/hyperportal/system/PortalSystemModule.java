@@ -1012,9 +1012,6 @@ public final class PortalSystemModule {
      */
     private static Object onReportDropWindowLock(XposedInterface.Chain chain) throws Throwable {
         try {
-            if (!sSameWindowGuard) {
-                return chain.proceed();
-            }
             Object dragState = chain.getThisObject();
             if (dragState == null) {
                 return chain.proceed();
@@ -1050,9 +1047,17 @@ public final class PortalSystemModule {
             if (!isSameWindowOrPage(targetWin, sourceWin)) {
                 return chain.proceed();
             }
+            // Two independent reasons to kill a same-window drop:
+            //  - the finger is back inside the drag circle (deliberate cancel), or
+            //  - the same-window guard setting says this app must never eat our drop.
+            boolean insideCircle = isInsideDragCircle(description, args);
+            if (!insideCircle && !sSameWindowGuard) {
+                return chain.proceed();
+            }
 
-            log(Log.INFO, TAG, "same-window drop suppressed: pkg=" + packageOf(targetWin)
-                    + " window=" + targetWin);
+            log(Log.INFO, TAG, "same-window drop suppressed: "
+                    + (insideCircle ? "inside-circle" : "guard")
+                    + " pkg=" + packageOf(targetWin) + " window=" + targetWin);
             // Same call sequence AOSP uses for "drop outside a valid window":
             // ends the drag with mDragResult=false, which is what triggers the
             // native cancel/return animation (AGENTS.md Rule 3).
@@ -1087,6 +1092,37 @@ public final class PortalSystemModule {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /**
+     * True when the drop point lies inside the drag circle Bridge shipped with
+     * the ClipData (hp_circle_x/y/r). Missing extras → false (older drags fall
+     * back to the same-window guard alone).
+     */
+    private static boolean isInsideDragCircle(ClipDescription description, List<Object> args) {
+        try {
+            android.os.PersistableBundle extras = description.getExtras();
+            if (extras == null || args.size() < 3) {
+                return false;
+            }
+            float cx = (float) extras.getDouble("hp_circle_x", Double.NaN);
+            float cy = (float) extras.getDouble("hp_circle_y", Double.NaN);
+            float radius = (float) extras.getDouble("hp_circle_r", 0.0);
+            if (Float.isNaN(cx) || Float.isNaN(cy) || radius <= 0f) {
+                return false;
+            }
+            float x = ((Number) args.get(1)).floatValue();
+            float y = ((Number) args.get(2)).floatValue();
+            double distance = Math.hypot(x - cx, y - cy);
+            if (distance < radius) {
+                log(Log.INFO, TAG, "drop inside drag circle: dist=" + Math.round(distance)
+                        + "px r=" + Math.round(radius) + "px");
+                return true;
+            }
+            return false;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static boolean isSameWindowOrPage(Object targetWin, Object sourceWin) {
