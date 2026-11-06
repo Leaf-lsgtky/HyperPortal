@@ -36,6 +36,15 @@ object HyperPortalPreferences {
     const val MIN_DRAG_START_SLOP = 4
     const val MAX_DRAG_START_SLOP = 32
 
+    /**
+     * Drop guard: when a HyperPortal drag is released over the very window it
+     * started from, end the drag as "not consumed" instead of letting the app
+     * swallow ACTION_DROP (WeChat would otherwise send the message the shadow
+     * was made from). Different windows of the same app stay valid targets.
+     */
+    const val KEY_SAME_WINDOW_GUARD = "same_window_guard"
+    const val DEFAULT_SAME_WINDOW_GUARD = true
+
     const val KEY_TRIGGER_THRESHOLD = "trigger_threshold"
     const val DEFAULT_TRIGGER_THRESHOLD = 76
     const val MIN_TRIGGER_THRESHOLD = 50
@@ -117,6 +126,7 @@ object HyperPortalPreferences {
         val longPressDuration: Int,
         val touchSlop: Int,
         val dragStartSlop: Int,
+        val sameWindowGuard: Boolean,
         val triggerThreshold: Int,
         val triggerPosition: String,
         val blacklist: Set<String>,
@@ -163,6 +173,7 @@ object HyperPortalPreferences {
             touchSlop = prefs.getInt(KEY_TOUCH_SLOP, DEFAULT_TOUCH_SLOP),
             dragStartSlop = prefs.getInt(KEY_DRAG_START_SLOP, DEFAULT_DRAG_START_SLOP)
                 .coerceIn(MIN_DRAG_START_SLOP, MAX_DRAG_START_SLOP),
+            sameWindowGuard = prefs.getBoolean(KEY_SAME_WINDOW_GUARD, DEFAULT_SAME_WINDOW_GUARD),
             triggerThreshold = prefs.getInt(KEY_TRIGGER_THRESHOLD, DEFAULT_TRIGGER_THRESHOLD),
             triggerPosition = prefs.getString(KEY_TRIGGER_POSITION, DEFAULT_TRIGGER_POSITION) ?: DEFAULT_TRIGGER_POSITION,
             blacklist = prefs.getStringSet(KEY_BLACKLIST, emptySet())?.toSet() ?: emptySet(),
@@ -220,6 +231,11 @@ object HyperPortalPreferences {
     fun setDragStartSlop(context: Context, slop: Int) {
         val clamped = slop.coerceIn(MIN_DRAG_START_SLOP, MAX_DRAG_START_SLOP)
         getPrefs(context).edit { putInt(KEY_DRAG_START_SLOP, clamped) }
+        notifyChanged(context)
+    }
+
+    fun setSameWindowGuard(context: Context, enabled: Boolean) {
+        getPrefs(context).edit { putBoolean(KEY_SAME_WINDOW_GUARD, enabled) }
         notifyChanged(context)
     }
 
@@ -363,6 +379,7 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_LONG_PRESS_DURATION, cfg.longPressDuration)
             intent.putExtra(KEY_TOUCH_SLOP, cfg.touchSlop)
             intent.putExtra(KEY_DRAG_START_SLOP, cfg.dragStartSlop)
+            intent.putExtra(KEY_SAME_WINDOW_GUARD, cfg.sameWindowGuard)
             intent.putExtra(KEY_TRIGGER_THRESHOLD, cfg.triggerThreshold)
             intent.putExtra(KEY_TRIGGER_POSITION, cfg.triggerPosition)
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)

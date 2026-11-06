@@ -125,6 +125,14 @@ public final class PortalSystemModule {
     private static volatile Context sSystemContext;
     private static volatile float sTriggerThreshold = 0.76f;
     private static volatile boolean sReceiverRegistered = false;
+    /**
+     * ColorOS-inspired drop guard: a HyperPortal drag released over the very
+     * window it started from is ended as "not consumed" instead of being
+     * delivered to that window, so an app like WeChat cannot treat the
+     * accidental shadow as a message to send. Other windows of the same app
+     * (split screen, floating window, another Activity) stay valid targets.
+     */
+    private static volatile boolean sSameWindowGuard = true;
     private static volatile boolean sLoggedGateOverride = false;
     private static volatile Object sWms;
     private static volatile String sDragSourcePackage;
@@ -221,6 +229,13 @@ public final class PortalSystemModule {
                 if ("updateDragSurfaceLocked".equals(method.getName())) {
                     sXposed.hook(method).setId("drag-updateSurface").intercept(PortalSystemModule::onHandleMotion);
                     log(Log.INFO, TAG, "hooked updateDragSurfaceLocked " + method);
+                } else if ("reportDropWindowLock".equals(method.getName())
+                        && method.getParameterCount() == 5) {
+                    // Release-time gate: runs before ACTION_DROP is dispatched,
+                    // so returning false here means the target window never sees
+                    // the drop (and cannot consume it as "send").
+                    sXposed.hook(method).setId("drag-reportDropWindow").intercept(PortalSystemModule::onReportDropWindowLock);
+                    log(Log.INFO, TAG, "hooked reportDropWindowLock " + method);
                 }
             }
 
@@ -981,6 +996,123 @@ public final class PortalSystemModule {
     }
 
     /**
+     * Same-window drop guard (ColorOS-inspired, but stricter than ColorOS).
+     *
+     * AOSP's DragState.isValidDropTarget() explicitly exempts the drag source
+     * window ("sameWindow"), so an app is free to consume a drop that lands
+     * back on the very window the drag started from — WeChat's chat page turns
+     * that into "send the message the shadow was made from".
+     *
+     * We end such a drag right before ACTION_DROP is dispatched:
+     * endDragLocked(false, false) makes WMS play the native cancel/return
+     * animation, and the target window never sees the drop. Only HyperPortal
+     * drags (ClipData MIME application/x-dragshare) are affected, so app-owned
+     * in-app drags (text selection, dual-window file moves) are untouched and
+     * another window of the same app remains a valid drop target.
+     */
+    private static Object onReportDropWindowLock(XposedInterface.Chain chain) throws Throwable {
+        try {
+            if (!sSameWindowGuard) {
+                return chain.proceed();
+            }
+            Object dragState = chain.getThisObject();
+            if (dragState == null) {
+                return chain.proceed();
+            }
+            // Mirror reportDropWindowLock()'s own early-out: never touch a drag
+            // that is already animating out or closing.
+            try {
+                Object animator = getField(dragState, "mAnimator");
+                Object closing = getField(dragState, "mIsClosing");
+                if (animator != null || Boolean.TRUE.equals(closing)) {
+                    return chain.proceed();
+                }
+            } catch (Throwable ignored) {
+            }
+            Object clipObject = getField(dragState, "mData");
+            if (!(clipObject instanceof ClipData)) {
+                return chain.proceed();
+            }
+            ClipDescription description = ((ClipData) clipObject).getDescription();
+            if (description == null || description.filterMimeTypes(DRAG_MIME) == null) {
+                return chain.proceed(); // not a HyperPortal drag
+            }
+            List<Object> args = chain.getArgs();
+            if (args == null || args.isEmpty()) {
+                return chain.proceed();
+            }
+            Object wms = getField(dragState, "mService");
+            Object targetWin = findWindowByInputToken(wms, args.get(0));
+            Object sourceWin = getField(dragState, "mDragWindow");
+            if (targetWin == null || sourceWin == null) {
+                return chain.proceed();
+            }
+            if (!isSameWindowOrPage(targetWin, sourceWin)) {
+                return chain.proceed();
+            }
+
+            log(Log.INFO, TAG, "same-window drop suppressed: pkg=" + packageOf(targetWin)
+                    + " window=" + targetWin);
+            // Same call sequence AOSP uses for "drop outside a valid window":
+            // ends the drag with mDragResult=false, which is what triggers the
+            // native cancel/return animation (AGENTS.md Rule 3).
+            invoke(dragState, "endDragLocked", false, false);
+            return false; // skip reportDropWindowLockInner(): no ACTION_DROP
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "same-window guard failed: " + throwable);
+            return chain.proceed();
+        }
+    }
+
+    /** DragState.reportDropWindowLock() resolves its token through this map. */
+    private static Object findWindowByInputToken(Object wms, Object token) {
+        if (wms == null || token == null) {
+            return null;
+        }
+        try {
+            Object inputMap = getField(wms, "mInputToWindowMap");
+            if (inputMap instanceof Map) {
+                Object win = ((Map<?, ?>) inputMap).get(token);
+                if (win != null) {
+                    return win;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object windowMap = getField(wms, "mWindowMap");
+            if (windowMap instanceof Map) {
+                return ((Map<?, ?>) windowMap).get(token);
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean isSameWindowOrPage(Object targetWin, Object sourceWin) {
+        if (targetWin == sourceWin) {
+            return true;
+        }
+        try {
+            Object targetRecord = getField(targetWin, "mActivityRecord");
+            Object sourceRecord = getField(sourceWin, "mActivityRecord");
+            return targetRecord != null && targetRecord == sourceRecord;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String packageOf(Object window) {
+        try {
+            Object attrs = getField(window, "mAttrs");
+            Object pkg = getField(attrs, "packageName");
+            return pkg == null ? null : String.valueOf(pkg);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
      * OPPO Content Portal "window-level share fallback" port.
      *
      * Reference: docs/OPPO_拖拽未适配窗口_应用分享回退机制.md
@@ -1509,6 +1641,10 @@ public final class PortalSystemModule {
                         } else {
                             queryConfigAsync(context);
                         }
+                        if (intent.hasExtra("same_window_guard")) {
+                            sSameWindowGuard = intent.getBooleanExtra("same_window_guard", true);
+                            log(Log.INFO, TAG, "same-window guard updated: " + sSameWindowGuard);
+                        }
                     }
                 }
             };
@@ -1540,6 +1676,8 @@ public final class PortalSystemModule {
                         sTriggerThreshold = pct / 100.0f;
                         log(Log.INFO, TAG, "trigger threshold queried: " + sTriggerThreshold);
                     }
+                    sSameWindowGuard = res.getBoolean("same_window_guard", sSameWindowGuard);
+                    log(Log.INFO, TAG, "same-window guard queried: " + sSameWindowGuard);
                 }
             } catch (Throwable ignored) {
             }

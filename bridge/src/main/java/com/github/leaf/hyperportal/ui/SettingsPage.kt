@@ -56,6 +56,9 @@ fun SettingsPage(bottomPadding: Dp) {
     var dragStartSlop by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).dragStartSlop)
     }
+    var sameWindowGuard by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).sameWindowGuard)
+    }
     var triggerThreshold by remember {
         mutableIntStateOf(HyperPortalPreferences.getConfig(context).triggerThreshold)
     }
@@ -81,6 +84,7 @@ fun SettingsPage(bottomPadding: Dp) {
                 longPressDuration = config.longPressDuration
                 touchSlop = config.touchSlop
                 dragStartSlop = config.dragStartSlop
+                sameWindowGuard = config.sameWindowGuard
                 triggerThreshold = config.triggerThreshold
                 triggerPosition = config.triggerPosition
                 blacklist = config.blacklist
@@ -123,6 +127,20 @@ fun SettingsPage(bottomPadding: Dp) {
                     onCheckedChange = { checked ->
                         landscapeTrigger = checked
                         HyperPortalPreferences.setLandscapeTrigger(context, checked)
+                    },
+                )
+                SwitchPreference(
+                    title = "同窗口拖拽不投递",
+                    summary = if (sameWindowGuard) {
+                        "拖回起拖窗口时不把 drop 交给应用（避免误拖的消息被直接发出），阴影回弹"
+                    } else {
+                        "交给应用自行处理拖回起拖窗口的 drop"
+                    },
+                    checked = sameWindowGuard,
+                    enabled = masterSwitch,
+                    onCheckedChange = { checked ->
+                        sameWindowGuard = checked
+                        HyperPortalPreferences.setSameWindowGuard(context, checked)
                     },
                 )
                 SwitchPreference(
