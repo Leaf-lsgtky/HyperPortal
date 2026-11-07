@@ -365,6 +365,10 @@ object HyperPortalPreferences {
         return isAdded
     }
 
+    fun syncToSystemUi(context: Context) {
+        notifyChanged(context)
+    }
+
     private fun notifyChanged(context: Context) {
         try {
             val cfg = getConfig(context)
@@ -381,7 +385,18 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)
             intent.putExtra(KEY_DEDUPLICATE_APP_TARGETS, cfg.deduplicateAppTargets)
             intent.putExtra(KEY_ENABLE_QR_SCAN, cfg.enableQrScan)
+            intent.putStringArrayListExtra("gesture_blacklist", ArrayList(cfg.blacklist))
+            intent.putStringArrayListExtra("target_pinned", ArrayList(cfg.pinnedTargetKeys))
+            intent.putStringArrayListExtra("target_order", ArrayList(cfg.pinnedTargetOrder))
+            intent.putStringArrayListExtra("target_hidden", ArrayList(cfg.hiddenTargetKeys))
+            intent.putExtra("target_usage", cfg.targetUsage.entries.joinToString("\n") { "${it.key}:${it.value}" })
             context.sendBroadcast(intent)
+            try {
+                val sysUiIntent = Intent(intent)
+                sysUiIntent.setPackage("com.android.systemui")
+                context.sendBroadcast(sysUiIntent)
+            } catch (_: Throwable) {
+            }
         } catch (_: Throwable) {
         }
     }

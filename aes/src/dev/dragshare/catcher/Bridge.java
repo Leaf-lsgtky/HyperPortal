@@ -113,6 +113,9 @@ public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
     private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
+    private static final String SYSUI_PROVIDER_AUTHORITY = "com.android.systemui.fileprovider";
+    private static final String SYSUI_INCOMING_PREFIX =
+            "content://com.android.systemui.fileprovider/hyperportal_incoming/";
     private static final String ACTION_CONFIG_CHANGED =
             "com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED";
     /**
@@ -217,8 +220,24 @@ public final class Bridge {
 
     private static void refreshConfig(Context context) {
         try {
-            Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-            Bundle res = context.getContentResolver().call(uri, "getConfig", null, null);
+            Bundle res = null;
+            try (android.database.Cursor cursor = context.getContentResolver().query(
+                    Uri.parse(SYSUI_INCOMING_PREFIX + "__config__"),
+                    null, null, null, null)) {
+                if (cursor != null) {
+                    res = cursor.getExtras();
+                }
+            } catch (SecurityException sec) {
+                requestSystemUiGrant(context);
+            } catch (Throwable ignored) {
+            }
+            if (res == null || res.isEmpty()) {
+                try {
+                    Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                    res = context.getContentResolver().call(uri, "getConfig", null, null);
+                } catch (Throwable ignored) {
+                }
+            }
             if (res != null) {
                 sMasterSwitch = res.getBoolean("master_switch", true);
                 sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
@@ -243,31 +262,22 @@ public final class Bridge {
                         + " blacklist=" + sBlacklist.size());
             } else {
                 sLastConfigFailTime = SystemClock.uptimeMillis();
-                requestSystemWakePortal(context);
+                requestSystemUiGrant(context);
             }
         } catch (Throwable t) {
             sLastConfigFailTime = SystemClock.uptimeMillis();
-            requestSystemWakePortal(context);
+            requestSystemUiGrant(context);
         }
     }
 
-    /**
-     * Asks system_server (UID 1000) and PortalReceiver to thaw or cold-start
-     * the HyperPortal process so PortalFileProvider is ready before the finger
-     * finishes a long-press and starts dragging.
-     */
-    private static void requestSystemWakePortal(Context context) {
+    private static void requestSystemUiGrant(Context context) {
         if (context == null) return;
         try {
-            Intent wake = new Intent("com.github.leaf.hyperportal.ACTION_WAKE_PORTAL");
-            wake.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            context.sendBroadcast(wake);
-
-            Intent appWake = new Intent("com.github.leaf.hyperportal.SHOW");
-            appWake.setPackage(PORTAL_PACKAGE);
-            appWake.putExtra("keepAlive", true);
-            appWake.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            context.sendBroadcast(appWake);
+            Intent req = new Intent("com.github.leaf.hyperportal.ACTION_REQUEST_GRANT");
+            req.setPackage("com.android.systemui");
+            req.putExtra("package", context.getPackageName());
+            req.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            context.sendBroadcast(req);
         } catch (Throwable ignored) {
         }
     }
@@ -7954,7 +7964,7 @@ public final class Bridge {
             name = name + suffix;
         }
         name = name.replaceAll("[/\\\\\\x00-\\x1f]", "_");
-        Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+        Uri target = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(name));
         try {
             if (pfd.getFileDescriptor() != null && pfd.getFileDescriptor().valid()) {
                 try {
@@ -7964,11 +7974,28 @@ public final class Bridge {
             }
         } catch (Throwable ignored) {
         }
-        try (OutputStream output = context.getContentResolver().openOutputStream(target, "w");
-             InputStream input = new FileInputStream(pfd.getFileDescriptor())) {
-            if (output == null) {
-                return null;
+        OutputStream output = null;
+        try {
+            output = context.getContentResolver().openOutputStream(target, "w");
+        } catch (SecurityException sec) {
+            requestSystemUiGrant(context);
+            try {
+                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                output = context.getContentResolver().openOutputStream(target, "w");
+            } catch (Throwable ignored) {
             }
+        } catch (Throwable ignored) {
+            try {
+                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                output = context.getContentResolver().openOutputStream(target, "w");
+            } catch (Throwable ignored2) {
+            }
+        }
+        if (output == null) {
+            return null;
+        }
+        try (OutputStream out = output;
+             InputStream input = new FileInputStream(pfd.getFileDescriptor())) {
             byte[] buffer = new byte[65536];
             int count;
             long total = 0;
@@ -7983,7 +8010,7 @@ public final class Bridge {
                         Log.i(TAG, "copyPfdToPortal repaired mangled GIF header for " + name);
                     }
                 }
-                output.write(buffer, 0, count);
+                out.write(buffer, 0, count);
                 total += count;
                 if (total > 128L * 1024 * 1024) {
                     Log.w(TAG, "copyPfdToPortal too large, aborting");
@@ -7991,13 +8018,16 @@ public final class Bridge {
                     return null;
                 }
             }
-            output.flush();
+            out.flush();
             if (total <= 0) {
                 Log.w(TAG, "copyPfdToPortal read 0 bytes, deleting empty target and falling back");
                 context.getContentResolver().delete(target, null, null);
                 return null;
             }
-            Log.i(TAG, "copyPfdToPortal " + name + " " + total + " bytes");
+            if (payload != null) {
+                payload.putString("stagedImageUri", target.toString());
+            }
+            Log.i(TAG, "copyPfdToPortal " + name + " " + total + " bytes -> " + target);
             return name;
         } catch (Throwable throwable) {
             Log.w(TAG, "copyPfdToPortal failed", throwable);
@@ -8011,9 +8041,10 @@ public final class Bridge {
 
     /** True when the URI is already served by this app's staging provider. */
     private static boolean isPortalUri(Uri uri) {
-        return uri != null
-                && "content".equals(uri.getScheme())
-                && "com.github.leaf.hyperportal.files".equals(uri.getAuthority());
+        if (uri == null || !"content".equals(uri.getScheme())) return false;
+        String auth = uri.getAuthority();
+        return SYSUI_PROVIDER_AUTHORITY.equals(auth)
+                || "com.github.leaf.hyperportal.files".equals(auth);
     }
 
     private static String queryDisplayName(Context context, Uri uri) {
@@ -8082,16 +8113,33 @@ public final class Bridge {
         boolean hasAlpha = bitmap.hasAlpha();
         String ext = hasAlpha ? ".png" : ".jpg";
         String name = "drag_" + SystemClock.uptimeMillis() + ext;
-        Uri target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
-        try (OutputStream output = context.getContentResolver().openOutputStream(target, "w")) {
-            if (output == null) return null;
-            if (hasAlpha) {
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
-            } else {
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output);
+        Uri target = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(name));
+        OutputStream output = null;
+        try {
+            output = context.getContentResolver().openOutputStream(target, "w");
+        } catch (SecurityException sec) {
+            requestSystemUiGrant(context);
+            try {
+                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                output = context.getContentResolver().openOutputStream(target, "w");
+            } catch (Throwable ignored) {
             }
-            output.flush();
-            Log.i(TAG, "copyBitmapToPortal " + name + " " + bitmap.getWidth() + "x" + bitmap.getHeight());
+        } catch (Throwable ignored) {
+            try {
+                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                output = context.getContentResolver().openOutputStream(target, "w");
+            } catch (Throwable ignored2) {
+            }
+        }
+        if (output == null) return null;
+        try (OutputStream os = output) {
+            if (hasAlpha) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, os);
+            } else {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, os);
+            }
+            os.flush();
+            Log.i(TAG, "copyBitmapToPortal " + name + " " + bitmap.getWidth() + "x" + bitmap.getHeight() + " -> " + target);
             return name;
         } catch (Throwable t) {
             Log.w(TAG, "copyBitmapToPortal failed", t);
@@ -8099,42 +8147,17 @@ public final class Bridge {
         }
     }
 
-    /**
-     * Wakes or thaws the HyperPortal provider process via system_server (UID 1000)
-     * and PortalReceiver when a direct ContentProvider write fails on the first try.
-     * Never writes temporary drag bitmaps into MediaStore/Pictures, so triggering a
-     * drag can never pollute the user's gallery.
-     */
-    private static boolean wakePortalForStaging(Context context) {
+    private static boolean requestGrantAndRetry(Context context) {
         if (context == null) {
             return false;
         }
-        requestSystemWakePortal(context);
+        requestSystemUiGrant(context);
         try {
-            Intent keepAlive = new Intent();
-            keepAlive.setClassName(PORTAL_PACKAGE, PORTAL_SERVICE);
-            keepAlive.putExtra("keepAlive", true);
-            context.startService(keepAlive);
-        } catch (Throwable ignored) {
+            Thread.sleep(30);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
-        Uri providerUri = Uri.parse("content://com.github.leaf.hyperportal.files");
-        for (int attempt = 0; attempt < 3; attempt++) {
-            try {
-                Thread.sleep(35);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-            try {
-                Bundle res = context.getContentResolver().call(providerUri, "getConfig", null, null);
-                if (res != null) {
-                    Log.i(TAG, "wakePortalForStaging succeeded on attempt " + (attempt + 1));
-                    return true;
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        return false;
+        return true;
     }
 
     /**
@@ -8315,8 +8338,7 @@ public final class Bridge {
         Object bitmap = payload.getParcelable("viewBitmap");
         Object filePfd = payload.getParcelable("filePfd");
         String source = tokenString(content);
-        Intent intent = new Intent();
-        intent.setClassName(PORTAL_PACKAGE, PORTAL_SERVICE);
+        Intent intent = new Intent("com.github.leaf.hyperportal.SHOW");
         if (text != null) {
             intent.putExtra("viewContent", text);
         }
@@ -8429,10 +8451,7 @@ public final class Bridge {
             }
             if (imageCacheName == null && imageContentUri == null
                     && (dragBitmap != null || filePfd instanceof ParcelFileDescriptor)) {
-                // If PortalFileProvider was frozen or cold-stopped, ask system_server
-                // (UID 1000) to wake it and retry staging once—never write temporary
-                // transport files into MediaStore / Pictures!
-                if (wakePortalForStaging(context)) {
+                if (requestGrantAndRetry(context)) {
                     if (dragBitmap != null && (! (filePfd instanceof ParcelFileDescriptor) || preferPngForGif)) {
                         imageCacheName = copyBitmapToPortal(context, dragBitmap);
                         if (imageCacheName != null) {
@@ -8451,14 +8470,22 @@ public final class Bridge {
                 }
             }
             if (imageCacheName != null) {
-                imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
-                        + Uri.encode(imageCacheName));
+                String stagedStr = payload.getString("stagedImageUri");
+                if (!TextUtils.isEmpty(stagedStr)) {
+                    imageContentUri = Uri.parse(stagedStr);
+                } else {
+                    imageContentUri = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(imageCacheName));
+                }
             }
         }
         if (imageCacheName != null) {
             if (imageContentUri == null) {
-                imageContentUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
-                        + Uri.encode(imageCacheName));
+                String stagedStr = payload.getString("stagedImageUri");
+                if (!TextUtils.isEmpty(stagedStr)) {
+                    imageContentUri = Uri.parse(stagedStr);
+                } else {
+                    imageContentUri = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(imageCacheName));
+                }
             }
             payload.putString("stagedCacheName", imageCacheName);
             payload.putString("stagedImageUri", imageContentUri.toString());
@@ -8512,61 +8539,17 @@ public final class Bridge {
         boolean dragStarted = prepareDrag
                 && startSystemDrag(context, text, dragBitmap, imageContentUri, imageMimeType);
         intent.putExtra("dragActive", dragStarted);
+        intent.putExtra("source_package", context.getPackageName());
         try {
-            // The target app is foreground during long-press, so a plain
-            // startService is allowed. Never use startForegroundService here:
-            // PortalService cannot call startForeground() from this background
-            // app context and crashes with ForegroundServiceStartNotAllowed.
-            context.startService(intent);
+            Intent sysUiBroadcast = new Intent("com.github.leaf.hyperportal.SHOW");
+            sysUiBroadcast.putExtras(intent);
+            sysUiBroadcast.removeExtra("filePfd");
+            sysUiBroadcast.setPackage("com.android.systemui");
+            sysUiBroadcast.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            context.sendBroadcast(sysUiBroadcast);
+            Log.i(TAG, "forward SHOW broadcast sent to SystemUI");
         } catch (Throwable throwable) {
-            Log.w(TAG, "forward startService failed: "
-                    + throwable.getClass().getName() + ": " + throwable.getMessage(), throwable);
-            boolean started = false;
-            try {
-                context.startService(intent);
-                started = true;
-                Log.i(TAG, "forward fallback startService ok");
-            } catch (Throwable second) {
-                Log.w(TAG, "forward fallback startService failed: "
-                        + second.getClass().getName() + ": " + second.getMessage(), second);
-            }
-            if (!started) {
-                try {
-                    Intent broadcast = new Intent("com.github.leaf.hyperportal.SHOW");
-                    broadcast.putExtras(intent);
-                    Intent appBrd = new Intent(broadcast);
-                    appBrd.setPackage(PORTAL_PACKAGE);
-                    context.sendBroadcast(appBrd);
-                    Intent sysUiBrd = new Intent(broadcast);
-                    sysUiBrd.setPackage("com.android.systemui");
-                    sysUiBrd.removeExtra("viewBitmap");
-                    context.sendBroadcast(sysUiBrd);
-                    started = true;
-                    Log.i(TAG, "forward fallback broadcast sent");
-                } catch (Throwable third) {
-                    Log.w(TAG, "forward fallback broadcast failed", third);
-                }
-            }
-        }
-        // HyperOS may silently drop a cross-app startForegroundService() even
-        // when it does not throw. Mirror the content through the exported
-        // receiver with a small payload (preview bitmap / text only) so the
-        // portal always gets a visible card.
-        try {
-            Intent mirror = new Intent("com.github.leaf.hyperportal.SHOW");
-            mirror.putExtras(intent);
-            mirror.removeExtra("filePfd");
-            mirror.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            Intent appMirror = new Intent(mirror);
-            appMirror.setPackage(PORTAL_PACKAGE);
-            context.sendBroadcast(appMirror);
-            Intent sysUiMirror = new Intent(mirror);
-            sysUiMirror.setPackage("com.android.systemui");
-            sysUiMirror.removeExtra("viewBitmap");
-            context.sendBroadcast(sysUiMirror);
-            Log.i(TAG, "forward receiver mirror sent");
-        } catch (Throwable throwable) {
-            Log.w(TAG, "forward receiver mirror failed", throwable);
+            Log.w(TAG, "forward SHOW broadcast to SystemUI failed", throwable);
         }
     }
 
@@ -8705,18 +8688,12 @@ public final class Bridge {
         sLastNotifiedY = y;
         sLastNotifyTime = now;
         try {
-            Intent intent = new Intent("com.github.leaf.hyperportal.ACTION_DRAG_STATE");
-            intent.putExtra("state", state);
-            intent.putExtra("x", x);
-            intent.putExtra("y", y);
-            intent.putExtra("position", sTriggerPosition);
-            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-
-            Intent appIntent = new Intent(intent);
-            appIntent.setPackage(PORTAL_PACKAGE);
-            context.sendBroadcast(appIntent);
-
-            Intent sysUiIntent = new Intent(intent);
+            Intent sysUiIntent = new Intent("com.github.leaf.hyperportal.ACTION_DRAG_STATE");
+            sysUiIntent.putExtra("state", state);
+            sysUiIntent.putExtra("x", x);
+            sysUiIntent.putExtra("y", y);
+            sysUiIntent.putExtra("position", sTriggerPosition);
+            sysUiIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
             sysUiIntent.setPackage("com.android.systemui");
             context.sendBroadcast(sysUiIntent);
 
@@ -8798,11 +8775,11 @@ public final class Bridge {
 
             if (imageUri == null && bitmap != null && context != null) {
                 String name = copyBitmapToPortal(context, bitmap);
-                if (name == null && wakePortalForStaging(context)) {
+                if (name == null && requestGrantAndRetry(context)) {
                     name = copyBitmapToPortal(context, bitmap);
                 }
                 if (name != null) {
-                    imageUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
+                    imageUri = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(name));
                     imageMime = "image/png";
                 }
             }
@@ -8811,12 +8788,7 @@ public final class Bridge {
             if (imageUri != null) {
                 if (context != null) {
                     try {
-                        context.getContentResolver().call(
-                                Uri.parse("content://com.github.leaf.hyperportal.files"),
-                                "grantDragPermissions",
-                                imageUri.toString(),
-                                null
-                        );
+                        context.grantUriPermission("com.android.systemui", imageUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     } catch (Throwable ignored) {
                     }
                 }

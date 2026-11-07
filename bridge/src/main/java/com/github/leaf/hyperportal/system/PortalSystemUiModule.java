@@ -101,8 +101,55 @@ public final class PortalSystemUiModule {
     private static final String TAG = "HyperPortalSysUI";
     private static final String ACTION_DRAG_STATE = "com.github.leaf.hyperportal.ACTION_DRAG_STATE";
     private static final String ACTION_SHOW = "com.github.leaf.hyperportal.SHOW";
+    public static final String ACTION_REQUEST_GRANT = "com.github.leaf.hyperportal.ACTION_REQUEST_GRANT";
+    public static final String SYSUI_PROVIDER_AUTHORITY = "com.android.systemui.fileprovider";
+    public static final String INCOMING_PATH_PREFIX = "/hyperportal_incoming/";
+    public static final String INCOMING_URI_PREFIX =
+            "content://com.android.systemui.fileprovider/hyperportal_incoming/";
+    private static final String CONFIG_CACHE_PREFS = "hyperportal_systemui";
+    private static final String KEY_AES_ENTRIES = "aes_entries";
+    private static final int MAX_AES_ENTRIES = 16;
+    private static final int MAX_CACHED_FILES = 5;
+    private static final long MAX_CACHE_AGE_MS = 12L * 60L * 60L * 1000L;
     private static final int TYPE_NAVIGATION_BAR_PANEL = 2024;
 
+    private static final String[] COMMON_SHARE_PACKAGES = new String[]{
+            "com.tencent.mm",
+            "com.tencent.mobileqq",
+            "com.tencent.tim",
+            "com.sina.weibo",
+            "com.xingin.xhs",
+            "com.coolapk.market",
+            "com.ss.android.ugc.aweme",
+            "com.smile.gifmaker",
+            "tv.danmaku.bili",
+            "com.alibaba.android.rimet",
+            "com.tencent.wework",
+            "com.ss.android.lark",
+            "org.telegram.messenger",
+            "org.telegram.messenger.web",
+            "tw.nekomimi.nekogram",
+            "com.twitter.android",
+            "com.instagram.android",
+            "com.whatsapp",
+            "com.discord",
+            "com.baidu.tieba",
+            "com.zhihu.android",
+            "com.taobao.taobao",
+            "com.jingdong.app.mall",
+            "com.xunmeng.pinduoduo",
+            "com.miui.gallery",
+            "com.miui.notes",
+            "com.android.mms",
+            "com.android.bluetooth",
+            "com.miui.mishare.connectivity",
+            "com.android.systemui",
+            "com.github.leaf.hyperportal"
+    };
+
+    private static final Set<String> sHookedProviderClasses =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private static volatile boolean sPrefixGrantsIssued = false;
     private static volatile XposedInterface sXposed;
     private static volatile Context sSysUiContext;
     private static volatile SystemUiOverlay sOverlay;
@@ -135,18 +182,6 @@ public final class PortalSystemUiModule {
         } catch (Throwable ignored) {
         }
         try {
-            try {
-                Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-                Object currentApp = activityThreadClass.getMethod("currentApplication").invoke(null);
-                if (currentApp instanceof Application) {
-                    sSysUiContext = ((Application) currentApp).getApplicationContext();
-                    sHandler.post(() -> initOverlay(sSysUiContext));
-                    xposed.log(Log.INFO, TAG, "SystemUI already running, overlay initialized immediately!");
-                }
-            } catch (Throwable t) {
-                xposed.log(Log.WARN, TAG, "currentApplication check skipped: " + t.getMessage());
-            }
-
             ClassLoader cl = param != null ? param.getDefaultClassLoader() : null;
             if (cl == null && sSysUiContext != null) {
                 cl = sSysUiContext.getClassLoader();
@@ -154,6 +189,21 @@ public final class PortalSystemUiModule {
             if (cl == null) {
                 cl = ClassLoader.getSystemClassLoader();
             }
+            installSystemUiProviderHooks(xposed, cl);
+
+            try {
+                Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+                Object currentApp = activityThreadClass.getMethod("currentApplication").invoke(null);
+                if (currentApp instanceof Application) {
+                    sSysUiContext = ((Application) currentApp).getApplicationContext();
+                    ensureProviderHooksForContext(sSysUiContext);
+                    sHandler.post(() -> initOverlay(sSysUiContext));
+                    xposed.log(Log.INFO, TAG, "SystemUI already running, overlay initialized immediately!");
+                }
+            } catch (Throwable t) {
+                xposed.log(Log.WARN, TAG, "currentApplication check skipped: " + t.getMessage());
+            }
+
             Class<?> appClass = null;
             try {
                 appClass = Class.forName("com.android.systemui.SystemUIApplication", false, cl);
@@ -169,6 +219,7 @@ public final class PortalSystemUiModule {
                     if (thisObj instanceof Application) {
                         Application app = (Application) thisObj;
                         sSysUiContext = app.getApplicationContext();
+                        ensureProviderHooksForContext(sSysUiContext);
                         sHandler.post(() -> initOverlay(sSysUiContext));
                         xposed.log(Log.INFO, TAG, "SystemUIApplication.onCreate intercepted, overlay initialized!");
                     }
@@ -181,6 +232,457 @@ public final class PortalSystemUiModule {
         } catch (Throwable throwable) {
             xposed.log(Log.ERROR, TAG, "Failed to hook SystemUI", throwable);
         }
+    }
+
+    private static void installSystemUiProviderHooks(XposedInterface xposed, ClassLoader cl) {
+        if (xposed == null || cl == null) return;
+        String[] candidates = new String[]{
+                "androidx.core.content.FileProvider",
+                "android.support.v4.content.FileProvider"
+        };
+        for (String name : candidates) {
+            try {
+                Class<?> cls = Class.forName(name, false, cl);
+                hookProviderClass(xposed, cls);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void ensureProviderHooksForContext(Context context) {
+        if (context == null || sXposed == null) return;
+        try {
+            ClassLoader cl = context.getClassLoader();
+            installSystemUiProviderHooks(sXposed, cl);
+            android.content.pm.ProviderInfo info = context.getPackageManager()
+                    .resolveContentProvider(SYSUI_PROVIDER_AUTHORITY, 0);
+            if (info != null && info.name != null) {
+                Class<?> cls = Class.forName(info.name, false, cl);
+                hookProviderClass(sXposed, cls);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureProviderHooksForContext failed", t);
+        }
+    }
+
+    private static void hookProviderClass(XposedInterface xposed, Class<?> providerClass) {
+        if (xposed == null || providerClass == null) return;
+        Class<?> cur = providerClass;
+        while (cur != null && cur != android.content.ContentProvider.class && cur != Object.class) {
+            if (sHookedProviderClasses.add(cur.getName())) {
+                try {
+                    Method openFile = cur.getDeclaredMethod("openFile", Uri.class, String.class);
+                    xposed.hook(openFile)
+                            .setId("sysui-fp-openFile-" + cur.getName())
+                            .intercept(PortalSystemUiModule::onProviderOpenFile);
+                    xposed.log(Log.INFO, TAG, "Hooked provider openFile on " + cur.getName());
+                } catch (NoSuchMethodException ignored) {
+                } catch (Throwable t) {
+                    xposed.log(Log.WARN, TAG, "Failed hooking openFile on " + cur.getName(), t);
+                }
+                try {
+                    Method query = cur.getDeclaredMethod("query",
+                            Uri.class, String[].class, String.class, String[].class, String.class);
+                    xposed.hook(query)
+                            .setId("sysui-fp-query-" + cur.getName())
+                            .intercept(PortalSystemUiModule::onProviderQuery);
+                    xposed.log(Log.INFO, TAG, "Hooked provider query on " + cur.getName());
+                } catch (NoSuchMethodException ignored) {
+                } catch (Throwable t) {
+                    xposed.log(Log.WARN, TAG, "Failed hooking query on " + cur.getName(), t);
+                }
+                try {
+                    Method getType = cur.getDeclaredMethod("getType", Uri.class);
+                    xposed.hook(getType)
+                            .setId("sysui-fp-getType-" + cur.getName())
+                            .intercept(PortalSystemUiModule::onProviderGetType);
+                    xposed.log(Log.INFO, TAG, "Hooked provider getType on " + cur.getName());
+                } catch (NoSuchMethodException ignored) {
+                } catch (Throwable t) {
+                    xposed.log(Log.WARN, TAG, "Failed hooking getType on " + cur.getName(), t);
+                }
+            }
+            cur = cur.getSuperclass();
+        }
+    }
+
+    private static Context resolveProviderContext(Object providerObj) {
+        if (sSysUiContext != null) {
+            return sSysUiContext;
+        }
+        if (providerObj instanceof android.content.ContentProvider) {
+            Context c = ((android.content.ContentProvider) providerObj).getContext();
+            if (c != null) {
+                sSysUiContext = c.getApplicationContext() != null ? c.getApplicationContext() : c;
+                return sSysUiContext;
+            }
+        }
+        return null;
+    }
+
+    public static File getIncomingDir(Context context) {
+        File dir = new File(context.getCacheDir(), "hyperportal_incoming");
+        if (!dir.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+        }
+        return dir;
+    }
+
+    public static String sanitizeIncomingFileName(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "drag_" + System.currentTimeMillis();
+        }
+        String decoded = Uri.decode(raw);
+        int slash = Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf('\\'));
+        if (slash >= 0) {
+            decoded = decoded.substring(slash + 1);
+        }
+        decoded = decoded.replace("..", "_").trim();
+        if (decoded.isEmpty()) {
+            return "drag_" + System.currentTimeMillis();
+        }
+        return decoded;
+    }
+
+    private static Object onProviderOpenFile(XposedInterface.Chain chain) throws Throwable {
+        List<Object> args = chain.getArgs();
+        Uri uri = args != null && args.size() > 0 && args.get(0) instanceof Uri
+                ? (Uri) args.get(0) : null;
+        String mode = args != null && args.size() > 1 && args.get(1) instanceof String
+                ? (String) args.get(1) : "r";
+        String path = uri != null ? uri.getPath() : null;
+        if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
+            Context ctx = resolveProviderContext(chain.getThisObject());
+            if (ctx == null) {
+                throw new java.io.FileNotFoundException("No SystemUI context for " + uri);
+            }
+            String rawName = path.substring(INCOMING_PATH_PREFIX.length());
+            String name = sanitizeIncomingFileName(rawName);
+            File dir = getIncomingDir(ctx);
+            File target = new File(dir, name);
+            boolean wantsWrite = mode != null && mode.indexOf('w') >= 0;
+            if (wantsWrite) {
+                int flags = android.os.ParcelFileDescriptor.MODE_WRITE_ONLY
+                        | android.os.ParcelFileDescriptor.MODE_CREATE
+                        | android.os.ParcelFileDescriptor.MODE_TRUNCATE;
+                android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.open(target, flags);
+                grantReadToCommonTargets(ctx, uri);
+                pruneIncomingCache(dir, target);
+                return pfd;
+            }
+            if (!target.isFile()) {
+                throw new java.io.FileNotFoundException("Not found: " + uri);
+            }
+            return android.os.ParcelFileDescriptor.open(
+                    target, android.os.ParcelFileDescriptor.MODE_READ_ONLY);
+        }
+        return chain.proceed();
+    }
+
+    private static Object onProviderQuery(XposedInterface.Chain chain) throws Throwable {
+        List<Object> args = chain.getArgs();
+        Uri uri = args != null && args.size() > 0 && args.get(0) instanceof Uri
+                ? (Uri) args.get(0) : null;
+        String[] projection = args != null && args.size() > 1 && args.get(1) instanceof String[]
+                ? (String[]) args.get(1) : null;
+        String path = uri != null ? uri.getPath() : null;
+        if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
+            Context ctx = resolveProviderContext(chain.getThisObject());
+            if (ctx == null) {
+                return null;
+            }
+            String rawName = path.substring(INCOMING_PATH_PREFIX.length());
+            if ("__config__".equals(rawName)) {
+                recordAesHandshakeInSysUi(ctx, android.os.Binder.getCallingUid());
+                android.database.MatrixCursor mc = new android.database.MatrixCursor(new String[]{"key"});
+                mc.setExtras(getCachedConfigBundle(ctx));
+                return mc;
+            }
+            if ("__status__".equals(rawName)) {
+                android.database.MatrixCursor mc = new android.database.MatrixCursor(new String[]{"key"});
+                mc.setExtras(buildStatusBundle(ctx));
+                return mc;
+            }
+            String name = sanitizeIncomingFileName(rawName);
+            File file = new File(getIncomingDir(ctx), name);
+            String[] cols = projection != null ? projection : new String[]{
+                    android.provider.OpenableColumns.DISPLAY_NAME,
+                    android.provider.OpenableColumns.SIZE
+            };
+            String[] names = new String[cols.length];
+            Object[] values = new Object[cols.length];
+            int count = 0;
+            for (String col : cols) {
+                if (android.provider.OpenableColumns.DISPLAY_NAME.equals(col)) {
+                    names[count] = android.provider.OpenableColumns.DISPLAY_NAME;
+                    values[count++] = file.getName();
+                } else if (android.provider.OpenableColumns.SIZE.equals(col)) {
+                    names[count] = android.provider.OpenableColumns.SIZE;
+                    values[count++] = file.isFile() ? file.length() : 0L;
+                } else if ("_data".equals(col)) {
+                    names[count] = "_data";
+                    values[count++] = file.getAbsolutePath();
+                }
+            }
+            String[] finalNames = new String[count];
+            Object[] finalValues = new Object[count];
+            System.arraycopy(names, 0, finalNames, 0, count);
+            System.arraycopy(values, 0, finalValues, 0, count);
+            android.database.MatrixCursor cursor = new android.database.MatrixCursor(finalNames, 1);
+            cursor.addRow(finalValues);
+            return cursor;
+        }
+        return chain.proceed();
+    }
+
+    private static Object onProviderGetType(XposedInterface.Chain chain) throws Throwable {
+        List<Object> args = chain.getArgs();
+        Uri uri = args != null && args.size() > 0 && args.get(0) instanceof Uri
+                ? (Uri) args.get(0) : null;
+        String path = uri != null ? uri.getPath() : null;
+        if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
+            Context ctx = resolveProviderContext(chain.getThisObject());
+            if (ctx == null) {
+                return "application/octet-stream";
+            }
+            String rawName = path.substring(INCOMING_PATH_PREFIX.length());
+            File file = new File(getIncomingDir(ctx), sanitizeIncomingFileName(rawName));
+            return sniffIncomingMime(file);
+        }
+        return chain.proceed();
+    }
+
+    private static String sniffIncomingMime(File file) {
+        if (file != null && file.isFile() && file.length() >= 12) {
+            byte[] h = new byte[12];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+                int n = in.read(h);
+                if (n >= 6
+                        && h[0] == 'G' && h[1] == 'I' && h[2] == 'F'
+                        && h[3] == '8' && (h[4] == '7' || h[4] == '9') && h[5] == 'a') {
+                    return "image/gif";
+                }
+                if (n >= 12
+                        && h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F'
+                        && h[8] == 'W' && h[9] == 'E' && h[10] == 'B' && h[11] == 'P') {
+                    return "image/webp";
+                }
+                if (n >= 8
+                        && (h[0] & 0xFF) == 0x89 && h[1] == 'P' && h[2] == 'N' && h[3] == 'G') {
+                    return "image/png";
+                }
+                if (n >= 3
+                        && (h[0] & 0xFF) == 0xFF && (h[1] & 0xFF) == 0xD8 && (h[2] & 0xFF) == 0xFF) {
+                    return "image/jpeg";
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        String name = file != null ? file.getName() : "";
+        int dot = name.lastIndexOf('.');
+        if (dot >= 0 && dot + 1 < name.length()) {
+            String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+            String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+            if (mime != null) {
+                return mime;
+            }
+        }
+        return "application/octet-stream";
+    }
+
+    private static void pruneIncomingCache(File dir, File keep) {
+        File[] files = dir.listFiles();
+        if (files == null || files.length == 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        List<File> survivors = new ArrayList<>(files.length);
+        for (File file : files) {
+            if (!file.isFile()) continue;
+            if (file.equals(keep)) {
+                survivors.add(file);
+                continue;
+            }
+            if (now - file.lastModified() > MAX_CACHE_AGE_MS) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+            } else {
+                survivors.add(file);
+            }
+        }
+        if (survivors.size() <= MAX_CACHED_FILES) {
+            return;
+        }
+        survivors.sort((a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (int i = MAX_CACHED_FILES; i < survivors.size(); i++) {
+            File victim = survivors.get(i);
+            if (!victim.equals(keep)) {
+                //noinspection ResultOfMethodCallIgnored
+                victim.delete();
+            }
+        }
+    }
+
+    public static void grantReadToCommonTargets(Context context, Uri uri) {
+        if (context == null || uri == null) return;
+        for (String pkg : COMMON_SHARE_PACKAGES) {
+            try {
+                context.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    public static void grantIncomingPrefixToPackage(Context context, String pkg) {
+        if (context == null || TextUtils.isEmpty(pkg)) return;
+        try {
+            Uri prefixUri = Uri.parse(INCOMING_URI_PREFIX);
+            int mode = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
+            context.grantUriPermission(pkg, prefixUri, mode);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void grantIncomingPrefixToInstalledApps(Context context) {
+        if (context == null) return;
+        try {
+            Uri prefixUri = Uri.parse(INCOMING_URI_PREFIX);
+            int mode = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
+            PackageManager pm = context.getPackageManager();
+            List<android.content.pm.PackageInfo> pkgs = pm.getInstalledPackages(0);
+            int granted = 0;
+            for (android.content.pm.PackageInfo pi : pkgs) {
+                if (pi == null || TextUtils.isEmpty(pi.packageName)) continue;
+                try {
+                    context.grantUriPermission(pi.packageName, prefixUri, mode);
+                    granted++;
+                } catch (Throwable ignored) {
+                }
+            }
+            sPrefixGrantsIssued = true;
+            Log.i(TAG, "granted incoming URI prefix to " + granted + " packages");
+        } catch (Throwable t) {
+            Log.w(TAG, "grantIncomingPrefixToInstalledApps failed", t);
+        }
+    }
+
+    private static void recordAesHandshakeInSysUi(Context context, int callingUid) {
+        if (context == null || callingUid <= 0
+                || callingUid == android.os.Process.SYSTEM_UID
+                || callingUid == android.os.Process.myUid()) {
+            return;
+        }
+        try {
+            PackageManager pm = context.getPackageManager();
+            String[] pkgs = pm.getPackagesForUid(callingUid);
+            String pkg = (pkgs != null && pkgs.length > 0 && !TextUtils.isEmpty(pkgs[0]))
+                    ? pkgs[0] : "uid:" + callingUid;
+            if ("com.android.systemui".equals(pkg)
+                    || "android".equals(pkg)
+                    || "com.github.leaf.hyperportal".equals(pkg)) {
+                return;
+            }
+            CharSequence labelCs = pkg;
+            try {
+                android.content.pm.ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                CharSequence loaded = pm.getApplicationLabel(ai);
+                if (!TextUtils.isEmpty(loaded)) {
+                    labelCs = loaded;
+                }
+            } catch (Throwable ignored) {
+            }
+            String safeLabel = labelCs.toString().replace('|', ' ').replace('\n', ' ').trim();
+            long now = System.currentTimeMillis();
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+            String raw = prefs.getString(KEY_AES_ENTRIES, "");
+            StringBuilder sb = new StringBuilder();
+            sb.append(pkg).append('|').append(safeLabel).append('|').append(now);
+            int count = 1;
+            if (raw != null && !raw.isEmpty()) {
+                for (String line : raw.split("\n")) {
+                    if (line.isEmpty()) continue;
+                    if (line.startsWith(pkg + "|")) continue;
+                    if (count >= MAX_AES_ENTRIES) break;
+                    sb.append('\n').append(line);
+                    count++;
+                }
+            }
+            prefs.edit().putString(KEY_AES_ENTRIES, sb.toString()).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static Bundle buildStatusBundle(Context context) {
+        Bundle b = new Bundle();
+        b.putLong("systemui_at", System.currentTimeMillis());
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+            b.putString(KEY_AES_ENTRIES, prefs.getString(KEY_AES_ENTRIES, ""));
+        } catch (Throwable ignored) {
+        }
+        return b;
+    }
+
+    public static Bundle getCachedConfigBundle(Context context) {
+        Bundle bundle = new Bundle();
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+            bundle.putBoolean("master_switch", prefs.getBoolean("master_switch", true));
+            bundle.putInt("trigger_threshold", prefs.getInt("trigger_threshold", 76));
+            bundle.putString("trigger_position", prefs.getString("trigger_position", "bottom"));
+            bundle.putBoolean("landscape_trigger", prefs.getBoolean("landscape_trigger", false));
+            bundle.putBoolean("prefer_png_for_gif", prefs.getBoolean("prefer_png_for_gif", true));
+            bundle.putBoolean("same_window_guard", prefs.getBoolean("same_window_guard", true));
+            bundle.putBoolean("coloros_consume_anim", prefs.getBoolean("coloros_consume_anim", true));
+            bundle.putInt("edge_scroll_margin", prefs.getInt("edge_scroll_margin", 86));
+            Set<String> blacklist = prefs.getStringSet("gesture_blacklist", null);
+            bundle.putStringArrayList("gesture_blacklist",
+                    blacklist != null ? new ArrayList<>(blacklist) : new ArrayList<>());
+            bundle.putInt("target_limit", prefs.getInt("target_limit", TargetConfig.DEFAULT_LIMIT));
+            bundle.putStringArrayList("target_pinned",
+                    splitCsvToList(prefs.getString("target_pinned", "")));
+            bundle.putStringArrayList("target_order",
+                    splitCsvToList(prefs.getString("target_order", "")));
+            bundle.putStringArrayList("target_hidden",
+                    splitCsvToList(prefs.getString("target_hidden", "")));
+            bundle.putBoolean("deduplicate_app_targets",
+                    prefs.getBoolean("deduplicate_app_targets", false));
+            bundle.putBoolean("enable_qr_scan", prefs.getBoolean("enable_qr_scan", true));
+            bundle.putString("target_usage", prefs.getString("target_usage", ""));
+        } catch (Throwable ignored) {
+        }
+        return bundle;
+    }
+
+    private static ArrayList<String> splitCsvToList(String csv) {
+        ArrayList<String> out = new ArrayList<>();
+        if (csv == null || csv.isEmpty()) return out;
+        for (String part : csv.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                out.add(trimmed);
+            }
+        }
+        return out;
+    }
+
+    private static String joinListToCsv(List<String> list) {
+        if (list == null || list.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String item : list) {
+            if (item == null || item.trim().isEmpty()) continue;
+            if (sb.length() > 0) sb.append(',');
+            sb.append(item.trim());
+        }
+        return sb.toString();
     }
 
     private static boolean isSecondarySystemUiProcess() {
@@ -224,28 +726,10 @@ public final class PortalSystemUiModule {
                 return;
             }
         }
-        // Both of these are binder calls into the HyperPortal app process and
-        // can cold-start it (jieba dictionary copy included). Never do that on
-        // SystemUI's main thread: it blocked input dispatch for seconds right
-        // after a cold boot and got SystemUI ANR-killed.
         sBgExecutor.execute(() -> {
-            try {
-                Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                context.getContentResolver().call(uri, "reportSystemUiActive", null, null);
-            } catch (Throwable ignored) {
-            }
-            // Keep the HyperPortal process alive so QQ can stage images into
-            // PortalFileProvider without relying on HyperOS AutoStart permission.
-            try {
-                Intent keepAlive = new Intent();
-                keepAlive.setClassName(
-                        PortalShareContract.PORTAL_PACKAGE,
-                        PortalShareContract.PORTAL_SERVICE);
-                keepAlive.putExtra("keepAlive", true);
-                context.startForegroundService(keepAlive);
-                Log.i(TAG, "started portal keepAlive service");
-            } catch (Throwable throwable) {
-                Log.w(TAG, "start portal keepAlive service failed", throwable);
+            ensureProviderHooksForContext(context);
+            if (!sPrefixGrantsIssued) {
+                grantIncomingPrefixToInstalledApps(context);
             }
             Log.i(TAG, "SystemUiOverlay attached and listening for drag events!");
         });
@@ -363,22 +847,20 @@ public final class PortalSystemUiModule {
             }
             mConfigRefreshing = true;
             sBgExecutor.execute(() -> {
-                Bundle result = null;
                 long started = SystemClock.uptimeMillis();
-                try {
-                    Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                    result = mContext.getContentResolver().call(uri, "getConfig", null, null);
-                } catch (Throwable t) {
-                    Log.w(TAG, "getConfig failed", t);
-                }
-                if (result != null) {
-                    saveCachedConfig(result);
-                } else {
-                    // HyperOS' freezer can make the HyperPortal provider
-                    // unresolvable at any moment; keep the last good snapshot so
-                    // we never fall back to the "bottom" default for a
-                    // right-edge setup.
-                    result = loadCachedConfig();
+                Bundle result = loadCachedConfig();
+                if (result == null) {
+                    try {
+                        Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
+                        result = mContext.getContentResolver().call(uri, "getConfig", null, null);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "initial getConfig fallback failed", t);
+                    }
+                    if (result != null) {
+                        saveCachedConfig(result);
+                    } else {
+                        result = getCachedConfigBundle(mContext);
+                    }
                 }
                 final Bundle snapshot = result;
                 final long cost = SystemClock.uptimeMillis() - started;
@@ -393,20 +875,14 @@ public final class PortalSystemUiModule {
                 if (!prefs.contains("trigger_position")) {
                     return null;
                 }
-                Bundle bundle = new Bundle();
-                bundle.putString("trigger_position", prefs.getString("trigger_position", "bottom"));
-                bundle.putInt("trigger_threshold", prefs.getInt("trigger_threshold", 76));
-                bundle.putBoolean("master_switch", prefs.getBoolean("master_switch", true));
-                bundle.putBoolean("landscape_trigger", prefs.getBoolean("landscape_trigger", false));
-                bundle.putInt("edge_scroll_margin", prefs.getInt("edge_scroll_margin", 86));
-                Log.i(TAG, "config restored from cache pos=" + bundle.getString("trigger_position"));
-                return bundle;
+                return getCachedConfigBundle(mContext);
             } catch (Throwable t) {
                 return null;
             }
         }
 
         private void saveCachedConfig(Bundle bundle) {
+            if (bundle == null) return;
             try {
                 android.content.SharedPreferences.Editor editor =
                         mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE).edit();
@@ -422,8 +898,48 @@ public final class PortalSystemUiModule {
                 if (bundle.containsKey("landscape_trigger")) {
                     editor.putBoolean("landscape_trigger", bundle.getBoolean("landscape_trigger", false));
                 }
+                if (bundle.containsKey("prefer_png_for_gif")) {
+                    editor.putBoolean("prefer_png_for_gif", bundle.getBoolean("prefer_png_for_gif", true));
+                }
+                if (bundle.containsKey("same_window_guard")) {
+                    editor.putBoolean("same_window_guard", bundle.getBoolean("same_window_guard", true));
+                }
+                if (bundle.containsKey("coloros_consume_anim")) {
+                    editor.putBoolean("coloros_consume_anim", bundle.getBoolean("coloros_consume_anim", true));
+                }
                 if (bundle.containsKey("edge_scroll_margin")) {
                     editor.putInt("edge_scroll_margin", bundle.getInt("edge_scroll_margin", 86));
+                }
+                if (bundle.containsKey("gesture_blacklist")) {
+                    ArrayList<String> bl = bundle.getStringArrayList("gesture_blacklist");
+                    editor.putStringSet("gesture_blacklist",
+                            bl != null ? new java.util.HashSet<>(bl) : new java.util.HashSet<>());
+                }
+                if (bundle.containsKey("target_limit")) {
+                    editor.putInt("target_limit", bundle.getInt("target_limit", TargetConfig.DEFAULT_LIMIT));
+                }
+                if (bundle.containsKey("target_pinned")) {
+                    editor.putString("target_pinned",
+                            joinListToCsv(bundle.getStringArrayList("target_pinned")));
+                }
+                if (bundle.containsKey("target_order")) {
+                    editor.putString("target_order",
+                            joinListToCsv(bundle.getStringArrayList("target_order")));
+                }
+                if (bundle.containsKey("target_hidden")) {
+                    editor.putString("target_hidden",
+                            joinListToCsv(bundle.getStringArrayList("target_hidden")));
+                }
+                if (bundle.containsKey("deduplicate_app_targets")) {
+                    editor.putBoolean("deduplicate_app_targets",
+                            bundle.getBoolean("deduplicate_app_targets", false));
+                }
+                if (bundle.containsKey("enable_qr_scan")) {
+                    editor.putBoolean("enable_qr_scan",
+                            bundle.getBoolean("enable_qr_scan", true));
+                }
+                if (bundle.containsKey("target_usage")) {
+                    editor.putString("target_usage", bundle.getString("target_usage", ""));
                 }
                 editor.apply();
             } catch (Throwable ignored) {
@@ -994,29 +1510,26 @@ public final class PortalSystemUiModule {
         }
 
         /**
-         * Writes a bitmap into HyperPortal's exportable PortalFileProvider instead of
-         * returning a file:// URI. SystemUI's own cache directory is not readable by
-         * the target app, and targetSdk 24+ rejects file:// URIs in cross-app Intents.
+         * Writes a bitmap into SystemUI's exportable FileProvider incoming cache
+         * (content://com.android.systemui.fileprovider/hyperportal_incoming/<name>).
          */
         private Uri stageBitmapInPortal(Context ctx, Bitmap bmp, String prefix) {
             if (bmp == null || bmp.isRecycled()) {
                 Log.w(TAG, "stageBitmapInPortal skipped: bitmap unavailable");
                 return null;
             }
-            String name = prefix + SystemClock.uptimeMillis() + ".png";
-            Uri target = Uri.parse(
-                    "content://com.github.leaf.hyperportal.files/incoming/"
-                            + Uri.encode(name));
-            try (OutputStream output = ctx.getContentResolver().openOutputStream(target, "w")) {
-                if (output == null) {
-                    Log.w(TAG, "stageBitmapInPortal: provider returned null for " + target);
-                    return null;
-                }
+            String name = sanitizeIncomingFileName(prefix + SystemClock.uptimeMillis() + ".png");
+            File dir = getIncomingDir(ctx);
+            File file = new File(dir, name);
+            Uri target = Uri.parse(INCOMING_URI_PREFIX + Uri.encode(name));
+            try (OutputStream output = new FileOutputStream(file)) {
                 if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, output)) {
                     Log.w(TAG, "stageBitmapInPortal: PNG compression failed");
                     return null;
                 }
                 output.flush();
+                grantReadToCommonTargets(ctx, target);
+                pruneIncomingCache(dir, file);
                 Log.i(TAG, "stageBitmapInPortal " + name + " "
                         + bmp.getWidth() + "x" + bmp.getHeight());
                 return target;
@@ -1027,12 +1540,45 @@ public final class PortalSystemUiModule {
         }
 
         /**
-         * Image shares are performed by PortalService under the HyperPortal UID, which
-         * owns PortalFileProvider and can grant its content URI to the target app.
+         * Image shares are dispatched directly from SystemUI when the URI is hosted
+         * on com.android.systemui.fileprovider (which SystemUI owns and can grant),
+         * falling back to ShareProxyActivity only for external provider URIs.
          */
         private void dispatchImageShare(Context ctx, String targetPkg,
                                         String targetActivity, Uri uri, String text) {
             try {
+                if (uri != null && SYSUI_PROVIDER_AUTHORITY.equals(uri.getAuthority())) {
+                    String mime = !TextUtils.isEmpty(mImageMime) ? mImageMime : "image/*";
+                    ctx.grantUriPermission(targetPkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent share = new Intent(Intent.ACTION_SEND);
+                    share.setType(mime);
+                    share.putExtra(Intent.EXTRA_STREAM, uri);
+                    if (!TextUtils.isEmpty(text)) {
+                        share.putExtra(Intent.EXTRA_TEXT, text);
+                    }
+                    share.setClipData(new ClipData(
+                            "HyperPortal", new String[]{mime}, new ClipData.Item(uri)));
+                    share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    share.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    if (!TextUtils.isEmpty(targetActivity)) {
+                        share.setComponent(new ComponentName(targetPkg, targetActivity));
+                        try {
+                            ctx.startActivity(share);
+                            Log.i(TAG, "dispatchImageShare direct component=" + targetPkg + "/" + targetActivity
+                                    + " uri=" + uri + " mime=" + mime);
+                            return;
+                        } catch (Throwable componentError) {
+                            Log.w(TAG, "direct component share failed, falling back to package", componentError);
+                            share.setComponent(null);
+                        }
+                    }
+                    share.setPackage(targetPkg);
+                    ctx.startActivity(share);
+                    Log.i(TAG, "dispatchImageShare direct target=" + targetPkg
+                            + " uri=" + uri + " mime=" + mime);
+                    return;
+                }
                 Intent proxy = new Intent();
                 proxy.setClassName(
                         PortalShareContract.PORTAL_PACKAGE,
@@ -1064,6 +1610,30 @@ public final class PortalSystemUiModule {
 
         private void dispatchSystemShare(Context ctx, Uri uri, String text) {
             try {
+                if (uri == null || SYSUI_PROVIDER_AUTHORITY.equals(uri.getAuthority())) {
+                    String mime = !TextUtils.isEmpty(mImageMime) ? mImageMime : "image/*";
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    if (uri != null) {
+                        grantReadToCommonTargets(ctx, uri);
+                        send.setType(mime);
+                        send.putExtra(Intent.EXTRA_STREAM, uri);
+                        send.setClipData(new ClipData(
+                                "HyperPortal", new String[]{mime}, new ClipData.Item(uri)));
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        if (!TextUtils.isEmpty(text)) {
+                            send.putExtra(Intent.EXTRA_TEXT, text);
+                        }
+                    } else {
+                        send.setType("text/plain");
+                        send.putExtra(Intent.EXTRA_TEXT, text != null ? text : "");
+                    }
+                    Intent chooser = Intent.createChooser(send, "分享内容");
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    ctx.startActivity(chooser);
+                    Log.i(TAG, "dispatchSystemShare direct chooser started uri=" + uri);
+                    return;
+                }
                 Intent proxy = new Intent();
                 proxy.setClassName(
                         PortalShareContract.PORTAL_PACKAGE,
@@ -1313,6 +1883,7 @@ public final class PortalSystemUiModule {
             filter.addAction(ACTION_DRAG_STATE);
             filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
+            filter.addAction(ACTION_REQUEST_GRANT);
             filter.addAction("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
             filter.addAction("com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT");
             filter.addAction(TransferDockDragGuard.ACTION_STATE);
@@ -1384,6 +1955,10 @@ public final class PortalSystemUiModule {
                 // would be pure jank on the drag path.
                 rebuildTargets = false;
             }
+            Bundle extras = intent.getExtras();
+            if (extras != null) {
+                saveCachedConfig(extras);
+            }
             if (intent.hasExtra("master_switch")) {
                 mMasterEnabled = intent.getBooleanExtra("master_switch", mMasterEnabled);
             }
@@ -1414,6 +1989,16 @@ public final class PortalSystemUiModule {
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            if (ACTION_REQUEST_GRANT.equals(action)) {
+                String pkg = intent.getStringExtra("package");
+                if (TextUtils.isEmpty(pkg)) {
+                    pkg = intent.getStringExtra("target_package");
+                }
+                if (!TextUtils.isEmpty(pkg)) {
+                    grantIncomingPrefixToPackage(mContext, pkg);
+                }
+                return;
+            }
             if ("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED".equals(action)
                     || "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT".equals(action)) {
                 applyConfigBroadcast(intent);
@@ -1445,6 +2030,10 @@ public final class PortalSystemUiModule {
                 return;
             }
             if (ACTION_SHOW.equals(action)) {
+                String sourcePkg = intent.getStringExtra("source_package");
+                if (!TextUtils.isEmpty(sourcePkg)) {
+                    grantIncomingPrefixToPackage(mContext, sourcePkg);
+                }
                 mGallerySavedThisDrag = false;
                 mText = intent.getStringExtra("viewContent");
                 mBitmap = null;

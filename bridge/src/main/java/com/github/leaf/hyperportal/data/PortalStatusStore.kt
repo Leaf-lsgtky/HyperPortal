@@ -108,6 +108,44 @@ object PortalStatusStore {
         }
     }
 
+    fun mergeFromSystemUi(context: Context?, systemUiAt: Long, rawAesEntries: String?) {
+        if (context == null) return
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (systemUiAt > 0) {
+                val current = prefs.getLong(KEY_SYSTEMUI_AT, 0L)
+                if (systemUiAt > current) {
+                    prefs.edit { putLong(KEY_SYSTEMUI_AT, systemUiAt) }
+                }
+            }
+            if (!rawAesEntries.isNullOrBlank()) {
+                val entries = LinkedHashMap<String, Long>()
+                for (h in readHandshakes(context)) entries[h.packageName] = h.atMillis
+                for (line in rawAesEntries.split(SEP_LINE)) {
+                    val parts = line.split(SEP_FIELD)
+                    if (parts.size >= 3) {
+                        val pkg = parts[0]
+                        val at = parts[2].toLongOrNull() ?: continue
+                        if (pkg !in IGNORED_PACKAGES) {
+                            val existing = entries[pkg] ?: 0L
+                            if (at > existing) {
+                                entries[pkg] = at
+                            }
+                        }
+                    }
+                }
+                val trimmed = entries.entries
+                    .sortedByDescending { it.value }
+                    .take(MAX_AES_ENTRIES)
+                val encoded = trimmed.joinToString(SEP_LINE.toString()) {
+                    it.key + SEP_FIELD + it.value
+                }
+                prefs.edit { putString(KEY_AES_ENTRIES, encoded) }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
     /** 最近握过手的包，最新的在前。 */
     fun readHandshakes(context: Context?): List<Handshake> {
         if (context == null) return emptyList()

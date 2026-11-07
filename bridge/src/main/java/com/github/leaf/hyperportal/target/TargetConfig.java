@@ -17,6 +17,7 @@ import java.util.Set;
 public final class TargetConfig {
 
     public static final String AUTHORITY = "com.github.leaf.hyperportal.files";
+    public static final int DEFAULT_LIMIT = 15;
 
     public final int limit;
     public final Set<String> pinnedKeys;
@@ -66,6 +67,15 @@ public final class TargetConfig {
     }
 
     public static TargetConfig fromProvider(Context context) {
+        if ("com.android.systemui".equals(context.getPackageName())) {
+            try {
+                Bundle bundle = com.github.leaf.hyperportal.system.PortalSystemUiModule.getCachedConfigBundle(context);
+                if (bundle != null && !bundle.isEmpty()) {
+                    return fromBundle(bundle, context);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         try {
             Uri uri = Uri.parse("content://" + AUTHORITY);
             Bundle bundle = context.getContentResolver().call(uri, "getConfig", null, null);

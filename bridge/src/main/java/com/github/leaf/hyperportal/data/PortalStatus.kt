@@ -59,6 +59,21 @@ object PortalStatusRepository {
 
     suspend fun probe(context: Context): PortalStatus = withContext(Dispatchers.IO) {
         val app = context.applicationContext
+        HyperPortalPreferences.syncToSystemUi(app)
+        try {
+            app.contentResolver.query(
+                android.net.Uri.parse("content://com.android.systemui.fileprovider/hyperportal_incoming/__status__"),
+                null, null, null, null
+            )?.use { cursor ->
+                val extras = cursor.extras
+                if (extras != null) {
+                    val sysUiAt = extras.getLong("systemui_at", 0L)
+                    val rawAes = extras.getString("aes_entries", "")
+                    PortalStatusStore.mergeFromSystemUi(app, sysUiAt, rawAes)
+                }
+            }
+        } catch (_: Throwable) {
+        }
         val service = LsposedStatus.bound.value
         val targets = LsposedStatus.runningTargets()
         val config = HyperPortalPreferences.getConfig(app)
