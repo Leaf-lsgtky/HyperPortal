@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
  * 问询，而不是一个「应该没问题」的假设：
  *
  *  - [systemServerReady] / [systemUiReady]：LSPosed 的 runningTargets（见 [LsposedStatus]）
- *  - [aesHandshakes]：AES 的 Bridge 打到 PortalFileProvider 的 getConfig（见 [PortalStatusStore]）
+ *  - [aesHandshakes]：AES 的 Bridge 打到 SystemUI `__config__`（或回退到 PortalFileProvider）的握手（见 [PortalStatusStore]）
  *  - [masterSwitch]：本机配置，用户自己的总开关
  */
 @Immutable

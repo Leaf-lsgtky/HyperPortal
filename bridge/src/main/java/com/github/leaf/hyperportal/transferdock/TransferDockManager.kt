@@ -207,43 +207,14 @@ class TransferDockManager private constructor(private val context: Context) {
         }
         val extension = extensionForMime(mime)
         val name = "transfer_${item.id}.$extension"
-        if ("com.android.systemui" == context.packageName) {
-            return try {
-                val dir = com.github.leaf.hyperportal.system.PortalSystemUiModule.getIncomingDir(context)
-                val targetFile = File(dir, name)
-                FileOutputStream(targetFile).use { stream ->
-                    when {
-                        !TextUtils.isEmpty(item.filePath) -> {
-                            val srcFile = File(item.filePath!!)
-                            if (!srcFile.isFile) return null
-                            srcFile.inputStream().use { it.copyTo(stream) }
-                        }
-                        !TextUtils.isEmpty(item.uriString) -> {
-                            val src = Uri.parse(item.uriString!!)
-                            if ("file" == src.scheme) {
-                                val srcFile = File(src.path ?: return null)
-                                if (!srcFile.isFile) return null
-                                srcFile.inputStream().use { it.copyTo(stream) }
-                            } else {
-                                val input = context.contentResolver.openInputStream(src) ?: return null
-                                input.use { it.copyTo(stream) }
-                            }
-                        }
-                        else -> return null
-                    }
-                }
-                val uri = Uri.parse(com.github.leaf.hyperportal.system.PortalSystemUiModule.INCOMING_URI_PREFIX + Uri.encode(name))
-                com.github.leaf.hyperportal.system.PortalSystemUiModule.grantReadToCommonTargets(context, uri)
-                uri
-            } catch (e: Throwable) {
-                Log.e(TAG, "Failed to export item URI in SystemUI", e)
-                null
-            }
+        if (context.packageName != "com.android.systemui") {
+            Log.w(TAG, "exportItemUri called outside SystemUI")
+            return null
         }
         return try {
-            val uri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/$name")
-            val out = context.contentResolver.openOutputStream(uri, "w") ?: return null
-            out.use { stream ->
+            val dir = com.github.leaf.hyperportal.system.PortalSystemUiModule.getIncomingDir(context)
+            val targetFile = File(dir, name)
+            FileOutputStream(targetFile).use { stream ->
                 when {
                     !TextUtils.isEmpty(item.filePath) -> {
                         val srcFile = File(item.filePath!!)
@@ -264,14 +235,11 @@ class TransferDockManager private constructor(private val context: Context) {
                     else -> return null
                 }
             }
-            try {
-                val authorityUri = Uri.parse("content://com.github.leaf.hyperportal.files")
-                context.contentResolver.call(authorityUri, "grantDragPermissions", uri.toString(), null)
-            } catch (ignored: Throwable) {
-            }
+            val uri = Uri.parse(com.github.leaf.hyperportal.system.PortalSystemUiModule.INCOMING_URI_PREFIX + Uri.encode(name))
+            com.github.leaf.hyperportal.system.PortalSystemUiModule.grantReadToCommonTargets(context, uri)
             uri
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to export item URI", e)
+            Log.e(TAG, "Failed to export item URI in SystemUI", e)
             null
         }
     }

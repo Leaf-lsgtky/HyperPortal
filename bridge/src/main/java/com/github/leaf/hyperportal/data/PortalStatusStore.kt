@@ -12,13 +12,11 @@ import androidx.core.content.edit
  * ——AES 不是 LSPosed 的作用域，它只是被改了 smali 的 ContentCatcher，只有它主动开口时
  * 我们才知道它还活着。
  *
- * 而它确实会开口：Bridge.ensureConfig() 每 5 秒最多调一次
- * `contentResolver.call("content://com.github.leaf.hyperportal.files", "getConfig", ...)`，
- * 那就是一次真实的握手 —— 请求落在 PortalFileProvider.call() 里，调用方 uid 就是目标 App。
- * 这里把每次握手的 uid 与时间记下来，首页据此说「AES 已握手 · 微信 · 刚刚」。
- *
- * 同样的思路也用在 SystemUI 上：PortalSystemUiModule.initOverlay() 会调
- * reportSystemUiActive，记一次时间戳，这样即使 LSPosed 服务没绑上，那一行也有话可说。
+ * 而它确实会开口：Bridge.ensureConfig() 每 5 秒最多调一次 SystemUI 的
+ * `__config__` provider；SystemUI 自己记录调用方 uid，首页再通过 `__status__`
+ * 合并回来。若 SystemUI 尚未就绪，Bridge 会回退到 PortalFileProvider.getConfig()，
+ * 那条回退同样是一次真实握手。
+ * 这里把每次握手的包名与时间记下来，首页据此说「AES 已握手 · 微信 · 刚刚」。
  *
  * 写入被节流：Bridge 在滑动时每 5 秒就可能来一次，每次都落盘毫无意义。
  */
@@ -90,19 +88,6 @@ object PortalStatusStore {
             }
             prefs.edit { putString(KEY_AES_ENTRIES, encoded) }
             lastPackage = pkg
-            lastWriteAt = now
-        } catch (_: Throwable) {
-        }
-    }
-
-    /** 记一次 SystemUI 悬浮层的自报。由 reportSystemUiActive 调用。 */
-    fun recordSystemUiActive(context: Context?) {
-        if (context == null) return
-        val now = System.currentTimeMillis()
-        if (now - lastWriteAt < WRITE_THROTTLE_MS) return
-        try {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit { putLong(KEY_SYSTEMUI_AT, now) }
             lastWriteAt = now
         } catch (_: Throwable) {
         }

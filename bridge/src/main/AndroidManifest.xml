@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
@@ -17,31 +13,10 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
-        <service
-            android:name=".PortalService"
-            android:exported="true"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="content portal overlay" />
-        </service>
-
         <provider
             android:name=".PortalFileProvider"
             android:authorities="com.github.leaf.hyperportal.files"
-            android:exported="true"
-            android:grantUriPermissions="true" />
-
-        <receiver
-            android:name=".PortalReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.github.leaf.hyperportal.SHOW" />
-                <action android:name="com.github.leaf.hyperportal.ACTION_DRAG_STATE" />
-                <action android:name="com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK" />
-                <action android:name="com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK" />
-            </intent-filter>
-        </receiver>
+            android:exported="true" />
 
         <activity
             android:name=".ui.MainActivity"

@@ -29,12 +29,12 @@ It uses a dual-engine architecture:
        | Intent (Payload) & Broadcast (Drag State 1/2/0)
        v
 +-------------------------------------------------------------------------------+
-| DragShareBridge Process (com.dragshare.portal)                                |
+| SystemUI Process (com.android.systemui, LSPosed)                              |
 |                                                                               |
-|  [PortalService]                                                              |
+|  [PortalSystemUiModule.SystemUiOverlay]                                       |
 |    - ColorOS Aurora GlowView (AGSL RuntimeShader with modulo 60s time)        |
 |    - Bottom Shelf Target Bar (Horizontally scrollable AppTargets)             |
-|    - FileProvider caching & intent dispatch                                  |
+|    - FileProvider staging & intent dispatch                                  |
 +-------------------------------------------------------------------------------+
        |
 +-------------------------------------------------------------------------------+
@@ -66,14 +66,14 @@ Any AI agent modifying this codebase **MUST STRICTLY OBEY** the following rules:
 - **Mechanism:** In Android's `WindowManagerService` (`DragState.java`), `createCancelAnimationLocked` only fires if `mDragResult == false`.
 - **Invariant:**
   - `Bridge.java`: In `root.setOnDragListener`, `DragEvent.ACTION_DROP` **MUST ALWAYS `return false;`**.
-  - `PortalService.java`: In `container.setOnDragListener`, `DragEvent.ACTION_DROP` **MUST `return false;`** unless the item was dropped squarely onto a valid, clickable `AppTarget`.
+  - `PortalSystemUiModule.SystemUiOverlay`: In `container.setOnDragListener`, `DragEvent.ACTION_DROP` **MUST `return false;`** unless the item was dropped squarely onto a valid, clickable `AppTarget`.
 - **Failure Mode:** If either listener returns `true`, WMS marks the drag as "successfully consumed", skipping the cancel animation. The shadow abruptly vanishes instead of smoothly flying back to the source text/image position.
 
 ### ⚠️ Rule 4: Thresholds & Hysteresis Synchronization
 To prevent flickering or oscillation when the user drags near the bottom of the screen:
 - **Enter Hot Zone (Morph into card, expand shelf):** `screenHeight * 0.76f`
 - **Exit Hot Zone (Expand back to original shadow, collapse shelf):** `screenHeight * 0.70f`
-- Both `Bridge.java` and `PortalService.java` must respect this hysteresis gap (6% screen height).
+- Both `Bridge.java` and `PortalSystemUiModule.SystemUiOverlay` must respect this hysteresis gap (6% screen height).
 
 ### ⚠️ Rule 5: AGSL Shader Precision & Time Wrapping
 - In `GlowView`:
@@ -130,8 +130,8 @@ All build and deployment tasks are unified under `tools/`:
 
 ### Source Locations:
 - Edit AES Hook: `aes/src/dev/dragshare/catcher/Bridge.java`
-- Edit Companion & Glow: `bridge/src/com/dragshare/portal/PortalService.java`
-- Edit 3D Tilt Hook: `bridge/src/com/dragshare/portal/system/PortalSystemModule.java`
+- Edit Companion & Glow: `bridge/src/main/java/com/github/leaf/hyperportal/system/PortalSystemUiModule.java`
+- Edit 3D Tilt Hook: `bridge/src/main/java/com/github/leaf/hyperportal/system/PortalSystemModule.java`
 
 ---
 
@@ -163,10 +163,11 @@ All build and deployment tasks are unified under `tools/`:
   where the home page's answers come from. `LsposedStatus` binds the libxposed service and reads
   `runningTargets` (the only authority on which processes the module is injected into; a target
   counts as system_server by name `system`/`android` or uid 1000). `PortalStatusStore` records
-  the AES handshake — `Bridge.ensureConfig()` calls `getConfig` on `PortalFileProvider`, whose
-  `call()` records the caller's uid. **SystemUI and system_server also call `getConfig`**, so
-  they are filtered out of the AES record; they have their own signals (runningTargets, and
-  SystemUI's `reportSystemUiActive`).
+  the AES handshake — `Bridge.ensureConfig()` queries SystemUI's `__config__` endpoint, where
+  `PortalSystemUiModule` records the caller's uid and exposes it through `__status__`; the
+  `PortalFileProvider.getConfig` fallback records the same handshake in the app process.
+  SystemUI and system_server callers are filtered out of the AES record; they have their own
+  signals (`runningTargets` and SystemUI's reported `systemuiAt`).
 - **`ui/SettingsPage.kt`**: The screen the app used to open on, unchanged in content.
 - **`Bridge.java`**:
   - `findDeepTouchView(View root, float rawX, float rawY)`: Target view hit testing.
@@ -200,11 +201,14 @@ All build and deployment tasks are unified under `tools/`:
     Apps without a rule fall through to the old cascade, whose container branch now descends
     `childContainingPoint()` first — whole-card text aggregation (`extractViewGroupText`) is only reached
     when no child covers the touch point, which is what used to turn "long press the image" into its caption.
-- **`PortalService.java`**:
+- **`PortalSystemUiModule.SystemUiOverlay`** (the only portal renderer now):
   - `GlowView`: Custom AGSL RuntimeShader view rendering ColorOS Aurora glow.
   - `setPhase1Progress(float progress)`: Glow intensity ramp (Phase 1).
   - `setPhase2()`: Bottom shelf expansion (Phase 2).
   - `container.setOnDragListener(...)`: Drop interception & target delivery.
+  - `getCachedConfigBundle()` / `saveCachedConfig()`: the runtime config cache. Keep
+    `long_press_duration`, `touch_slop`, and `config_ready` in sync with
+    `PortalFileProvider.getConfig()`; the AES bridge reads this bundle.
 - **`PortalSystemModule.java`**:
   - `hookDragState(XC_LoadPackage.LoadPackageParam lpparam)`: Attaches to `com.android.server.wm.DragState`.
   - `SurfaceControl.Transaction.setMatrix(...)`: Applies 3D rotation matrix to `mSurfaceControl`.
@@ -217,7 +221,9 @@ All build and deployment tasks are unified under `tools/`:
 - **`PortalSystemUiModule.java`**:
   - `buildTargets(...)`: Text branch adds the built-in “文本分词” target before “搜索”.
   - `ACTION_DROP`: stores the drop coordinates so the BigBang chips animate from the drop point.
-  - Image targets never build `file://` URIs; they stage a bitmap through `PortalFileProvider` and ask `PortalService` to dispatch the share as the HyperPortal UID.
+  - Image targets never build `file://` URIs; they stage bytes in SystemUI's
+    `com.android.systemui.fileprovider/hyperportal_incoming/` namespace and dispatch the
+    share directly as SystemUI. `ShareProxyActivity` is only the external-URI fallback.
   - **Never block SystemUI's main thread**: no `ContentResolver.call`, `PackageManager` query,
     icon decode or `SharedPreferences` read on it. The drag path (`handleIntent` →
     `handleDragStateChanged`) once called `getConfig` there, waited on
@@ -227,8 +233,11 @@ All build and deployment tasks are unified under `tools/`:
     before any expensive work. See `docs/ARCHITECTURE.md` §5.
   - Views must exist before a drag starts (a window added mid-drag gets no
     `ACTION_DRAG_STARTED`), which is why `warmUp()` posts `ensureViews()` on the first frame.
-- **`PortalShareContract.java` / `PortalService.dispatchImageShare(...)`**:
-  - Cross-process contract for image shares from the SystemUI module.
-  - `PortalService` owns `PortalFileProvider`, so it is the only place that grants the target URI and starts the target's `ACTION_SEND` activity.
+- **`PortalSystemUiModule.dispatchImageShare(...)` / `PortalShareContract.java`**:
+  - SystemUI owns the staging provider, so it grants the target URI and starts
+    `ACTION_SEND` directly. `ShareProxyActivity` is only the external-provider-URI
+    trampoline.
 - **`PortalFileProvider.java`**:
-  - `grantToCommonTargets(...)` grants staged image URIs to common share targets and `com.android.systemui`; keep the provider writable only through the incoming namespace.
+  - Config bootstrap only. `call("getConfig")` returns the app's preferences and records
+    the AES handshake; it no longer hosts drag files. `PortalSystemUiModule`'s
+    `__config__` cache is the primary runtime source.

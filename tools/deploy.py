@@ -81,12 +81,11 @@ def monitor_logs():
     print("[LOGS] Starting live logcat monitor (Ctrl+C to exit)...")
     tags = [
         "DragSharePoC:V",
-        "PortalSystemUi:V",
+        "HyperPortalSysUI:V",
         "HyperPortal:V",
         "DragShareBridge:V",
         "DragBridge:V",
         "ContentCatcher:V",
-        "PortalService:V",
         "LSPosedFramework:I",
         "*:S"
     ]

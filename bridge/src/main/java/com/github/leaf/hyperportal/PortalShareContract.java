@@ -2,21 +2,15 @@
 package com.github.leaf.hyperportal;
 
 /**
- * Cross-process contract for asking the HyperPortal app to perform an image share.
+ * Cross-process contract for image shares that SystemUI cannot start itself.
  *
- * The SystemUI LSPosed module runs under com.android.systemui's UID. It cannot reliably
- * grant a URI owned by PortalFileProvider, so image shares are dispatched by PortalService
- * (which owns the provider) instead of calling startActivity() directly from SystemUI.
+ * SystemUI owns the staging FileProvider, so normal shares are dispatched
+ * directly. This contract is only the fallback for an external provider URI
+ * (for example a legacy app-provider URI or a third-party content URI): a
+ * transparent trampoline in HyperPortal receives a visible window and then
+ * starts the target's ACTION_SEND activity.
  */
 public final class PortalShareContract {
-
-    public static final String ACTION_DISPATCH_IMAGE_SHARE =
-            "com.github.leaf.hyperportal.DISPATCH_IMAGE_SHARE";
-    public static final String ACTION_OCR_SEGMENT =
-            "com.github.leaf.hyperportal.OCR_SEGMENT";
-    public static final String EXTRA_OCR_IMAGE_URI = "ocrImageUri";
-    public static final String EXTRA_OCR_TOUCH_X = "ocrTouchX";
-    public static final String EXTRA_OCR_TOUCH_Y = "ocrTouchY";
 
     public static final String EXTRA_TARGET_PACKAGE = "targetPackage";
     public static final String EXTRA_TARGET_ACTIVITY = "targetActivity";
@@ -25,8 +19,6 @@ public final class PortalShareContract {
     public static final String EXTRA_SHARE_TEXT = "shareText";
 
     public static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
-    public static final String PORTAL_SERVICE =
-            "com.github.leaf.hyperportal.PortalService";
     public static final String SHARE_PROXY_ACTIVITY =
             "com.github.leaf.hyperportal.ShareProxyActivity";
 

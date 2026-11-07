@@ -338,14 +338,6 @@ object HyperPortalPreferences {
         notifyChanged(context)
     }
 
-    fun recordTargetUse(context: Context, key: String) {
-        if (key.isBlank()) return
-        val prefs = getPrefs(context)
-        val storageKey = KEY_TARGET_USAGE_PREFIX + key
-        val next = (prefs.getInt(storageKey, 0) + 1).coerceAtMost(1000)
-        prefs.edit { putInt(storageKey, next) }
-    }
-
     fun setDeduplicateAppTargets(context: Context, enabled: Boolean) {
         getPrefs(context).edit { putBoolean(KEY_DEDUPLICATE_APP_TARGETS, enabled) }
         notifyChanged(context)

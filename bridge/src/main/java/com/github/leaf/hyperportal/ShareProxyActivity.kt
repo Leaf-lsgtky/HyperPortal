@@ -19,11 +19,10 @@ import android.widget.Toast
  * A transparent, exported trampoline used for image shares started from the
  * SystemUI LSPosed module.
  *
- * HyperOS blocks background activity launches from PortalService
- * ("Background activity launch blocked", BAL_BLOCK), even when the service is
- * a foreground service. SystemUI can start this exported Activity directly; once
- * it is resumed it has a visible window and is allowed to start the target app's
- * ACTION_SEND Activity.
+ * HyperOS blocks background activity launches from SystemUI
+ * ("Background activity launch blocked", BAL_BLOCK). SystemUI can start this
+ * exported Activity directly; once it is resumed it has a visible window and
+ * is allowed to start the target app's ACTION_SEND Activity.
  */
 class ShareProxyActivity : Activity() {
 
