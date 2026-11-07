@@ -389,7 +389,7 @@ object HyperPortalPreferences {
             intent.putStringArrayListExtra("target_pinned", ArrayList(cfg.pinnedTargetKeys))
             intent.putStringArrayListExtra("target_order", ArrayList(cfg.pinnedTargetOrder))
             intent.putStringArrayListExtra("target_hidden", ArrayList(cfg.hiddenTargetKeys))
-            intent.putExtra("target_usage", cfg.targetUsage.entries.joinToString("\n") { "${it.key}:${it.value}" })
+            intent.putExtra("target_usage", cfg.targetUsage.entries.joinToString("\n") { "${it.key}=${it.value}" })
             context.sendBroadcast(intent)
             try {
                 val sysUiIntent = Intent(intent)

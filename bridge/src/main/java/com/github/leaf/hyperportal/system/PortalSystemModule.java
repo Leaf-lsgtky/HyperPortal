@@ -2013,11 +2013,16 @@ public final class PortalSystemModule {
                     }
                 } catch (Throwable ignored) {
                 }
-                if (res == null || res.isEmpty()) {
+                boolean configReady = res != null && res.getBoolean("config_ready", false);
+                if (!configReady) {
                     Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                    res = ctx.getContentResolver().call(uri, "getConfig", null, null);
+                    Bundle appConfig = ctx.getContentResolver().call(uri, "getConfig", null, null);
+                    if (appConfig != null && !appConfig.isEmpty()) {
+                        res = appConfig;
+                        configReady = true;
+                    }
                 }
-                if (res != null) {
+                if (res != null && configReady) {
                     String pos = res.getString("trigger_position");
                     if (pos != null) {
                         sTriggerPosition = pos;

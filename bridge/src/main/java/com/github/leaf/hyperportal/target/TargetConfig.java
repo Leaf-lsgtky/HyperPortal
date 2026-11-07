@@ -70,7 +70,7 @@ public final class TargetConfig {
         if ("com.android.systemui".equals(context.getPackageName())) {
             try {
                 Bundle bundle = com.github.leaf.hyperportal.system.PortalSystemUiModule.getCachedConfigBundle(context);
-                if (bundle != null && !bundle.isEmpty()) {
+                if (bundle != null && bundle.getBoolean("config_ready", false)) {
                     return fromBundle(bundle, context);
                 }
             } catch (Throwable ignored) {

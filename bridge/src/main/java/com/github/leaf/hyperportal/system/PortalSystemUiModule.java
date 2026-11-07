@@ -149,7 +149,6 @@ public final class PortalSystemUiModule {
 
     private static final Set<String> sHookedProviderClasses =
             java.util.Collections.synchronizedSet(new java.util.HashSet<>());
-    private static volatile boolean sPrefixGrantsIssued = false;
     private static volatile XposedInterface sXposed;
     private static volatile Context sSysUiContext;
     private static volatile SystemUiOverlay sOverlay;
@@ -169,9 +168,9 @@ public final class PortalSystemUiModule {
     public static void initSystemUi(XposedInterface xposed, XposedModuleInterface.PackageLoadedParam param) {
         sXposed = xposed;
         if (isSecondarySystemUiProcess()) {
-            // Only the main SystemUI process owns the portal window and may
-            // claim reportSystemUiActive; a ":xxx" helper process doing so
-            // would make PortalService skip its own overlay for nothing.
+            // Only the main SystemUI process owns the portal window and the
+            // FileProvider hooks; a ":xxx" helper process must not install a
+            // second overlay or answer drag broadcasts.
             Log.i(TAG, "skipping portal overlay in secondary SystemUI process");
             return;
         }
@@ -546,31 +545,6 @@ public final class PortalSystemUiModule {
         }
     }
 
-    private static void grantIncomingPrefixToInstalledApps(Context context) {
-        if (context == null) return;
-        try {
-            Uri prefixUri = Uri.parse(INCOMING_URI_PREFIX);
-            int mode = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
-            PackageManager pm = context.getPackageManager();
-            List<android.content.pm.PackageInfo> pkgs = pm.getInstalledPackages(0);
-            int granted = 0;
-            for (android.content.pm.PackageInfo pi : pkgs) {
-                if (pi == null || TextUtils.isEmpty(pi.packageName)) continue;
-                try {
-                    context.grantUriPermission(pi.packageName, prefixUri, mode);
-                    granted++;
-                } catch (Throwable ignored) {
-                }
-            }
-            sPrefixGrantsIssued = true;
-            Log.i(TAG, "granted incoming URI prefix to " + granted + " packages");
-        } catch (Throwable t) {
-            Log.w(TAG, "grantIncomingPrefixToInstalledApps failed", t);
-        }
-    }
-
     private static void recordAesHandshakeInSysUi(Context context, int callingUid) {
         if (context == null || callingUid <= 0
                 || callingUid == android.os.Process.SYSTEM_UID
@@ -630,15 +604,28 @@ public final class PortalSystemUiModule {
         return b;
     }
 
+    public static boolean hasCachedConfig(Context context) {
+        if (context == null) return false;
+        try {
+            return context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE)
+                    .getBoolean("config_ready", false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     public static Bundle getCachedConfigBundle(Context context) {
         Bundle bundle = new Bundle();
         try {
             android.content.SharedPreferences prefs =
                     context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+            bundle.putBoolean("config_ready", prefs.getBoolean("config_ready", false));
             bundle.putBoolean("master_switch", prefs.getBoolean("master_switch", true));
             bundle.putInt("trigger_threshold", prefs.getInt("trigger_threshold", 76));
             bundle.putString("trigger_position", prefs.getString("trigger_position", "bottom"));
             bundle.putBoolean("landscape_trigger", prefs.getBoolean("landscape_trigger", false));
+            bundle.putInt("long_press_duration", prefs.getInt("long_press_duration", 800));
+            bundle.putInt("touch_slop", prefs.getInt("touch_slop", 24));
             bundle.putBoolean("prefer_png_for_gif", prefs.getBoolean("prefer_png_for_gif", true));
             bundle.putBoolean("same_window_guard", prefs.getBoolean("same_window_guard", true));
             bundle.putBoolean("coloros_consume_anim", prefs.getBoolean("coloros_consume_anim", true));
@@ -728,9 +715,6 @@ public final class PortalSystemUiModule {
         }
         sBgExecutor.execute(() -> {
             ensureProviderHooksForContext(context);
-            if (!sPrefixGrantsIssued) {
-                grantIncomingPrefixToInstalledApps(context);
-            }
             Log.i(TAG, "SystemUiOverlay attached and listening for drag events!");
         });
     }
@@ -755,11 +739,13 @@ public final class PortalSystemUiModule {
         private Bitmap mBitmap;
         private Uri mImageUri;
         private String mImageMime;
+        private volatile String mImageUrl;
         private float mLastDropX = -1f;
         private float mLastDropY = -1f;
         private boolean mGallerySavedThisDrag = false;
 
         private final ExecutorService mQrExecutor = Executors.newSingleThreadExecutor();
+        private final ExecutorService mImageExecutor = Executors.newSingleThreadExecutor();
         private int mQrSessionId = 0;
         private String mDetectedQrContent = null;
         private TransferDockController mTransferDockController;
@@ -870,9 +856,7 @@ public final class PortalSystemUiModule {
 
         private Bundle loadCachedConfig() {
             try {
-                android.content.SharedPreferences prefs =
-                        mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
-                if (!prefs.contains("trigger_position")) {
+                if (!hasCachedConfig(mContext)) {
                     return null;
                 }
                 return getCachedConfigBundle(mContext);
@@ -884,8 +868,9 @@ public final class PortalSystemUiModule {
         private void saveCachedConfig(Bundle bundle) {
             if (bundle == null) return;
             try {
-                android.content.SharedPreferences.Editor editor =
-                        mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE).edit();
+                android.content.SharedPreferences prefs =
+                        mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+                android.content.SharedPreferences.Editor editor = prefs.edit();
                 if (bundle.containsKey("trigger_position")) {
                     editor.putString("trigger_position", bundle.getString("trigger_position"));
                 }
@@ -897,6 +882,12 @@ public final class PortalSystemUiModule {
                 }
                 if (bundle.containsKey("landscape_trigger")) {
                     editor.putBoolean("landscape_trigger", bundle.getBoolean("landscape_trigger", false));
+                }
+                if (bundle.containsKey("long_press_duration")) {
+                    editor.putInt("long_press_duration", bundle.getInt("long_press_duration", 800));
+                }
+                if (bundle.containsKey("touch_slop")) {
+                    editor.putInt("touch_slop", bundle.getInt("touch_slop", 24));
                 }
                 if (bundle.containsKey("prefer_png_for_gif")) {
                     editor.putBoolean("prefer_png_for_gif", bundle.getBoolean("prefer_png_for_gif", true));
@@ -939,7 +930,17 @@ public final class PortalSystemUiModule {
                             bundle.getBoolean("enable_qr_scan", true));
                 }
                 if (bundle.containsKey("target_usage")) {
-                    editor.putString("target_usage", bundle.getString("target_usage", ""));
+                    // Usage counters are owned by SystemUI now: only seed them
+                    // from the app when this cache has never seen usage data.
+                    // A later app broadcast must not roll back increments made
+                    // by drops handled in SystemUI.
+                    String existingUsage = prefs.getString("target_usage", "");
+                    if (TextUtils.isEmpty(existingUsage)) {
+                        editor.putString("target_usage", bundle.getString("target_usage", ""));
+                    }
+                }
+                if (bundle.containsKey("trigger_position")) {
+                    editor.putBoolean("config_ready", true);
                 }
                 editor.apply();
             } catch (Throwable ignored) {
@@ -974,6 +975,11 @@ public final class PortalSystemUiModule {
             mPinnedOrder = pinnedOrder == null ? new ArrayList<>() : pinnedOrder;
             Log.i(TAG, "config applied in " + cost + "ms master=" + mMasterEnabled
                     + " threshold=" + thresholdPct + " pos=" + mTriggerPosition);
+            // The shelf may have been built with defaults while the config
+            // read was still in flight (warmUp runs both in parallel).
+            if (mAppTargetsResolved) {
+                requestTargetsAsync();
+            }
         }
 
         /** Builds the shelf contents off the main thread; safe from any thread. */
@@ -1510,6 +1516,85 @@ public final class PortalSystemUiModule {
         }
 
         /**
+         * Best-effort fallback for payloads that only carry an image URL (for
+         * example Weibo original images). The bridge normally stages bytes
+         * already; this only runs when no bitmap or URI reached SystemUI.
+         */
+        private void downloadImageAsync(String url) {
+            final String sourceUrl = url;
+            mImageExecutor.execute(() -> {
+                File file = null;
+                try {
+                    java.net.URL parsed = new java.net.URL(sourceUrl);
+                    java.net.HttpURLConnection conn =
+                            (java.net.HttpURLConnection) parsed.openConnection();
+                    conn.setConnectTimeout(8000);
+                    conn.setReadTimeout(15000);
+                    conn.setInstanceFollowRedirects(true);
+                    conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android)");
+                    int code = conn.getResponseCode();
+                    if (code < 200 || code >= 300) {
+                        Log.w(TAG, "downloadImageAsync HTTP " + code + " for " + sourceUrl);
+                        return;
+                    }
+                    String path = parsed.getPath();
+                    String ext = ".png";
+                    if (path != null) {
+                        int dot = path.lastIndexOf('.');
+                        if (dot >= 0 && path.length() - dot <= 6) {
+                            ext = path.substring(dot).toLowerCase(Locale.US);
+                        }
+                    }
+                    File dir = getIncomingDir(mContext);
+                    String name = sanitizeIncomingFileName(
+                            "url_" + SystemClock.uptimeMillis() + ext);
+                    file = new File(dir, name);
+                    long total = 0;
+                    try (InputStream in = conn.getInputStream();
+                         OutputStream out = new FileOutputStream(file)) {
+                        byte[] buffer = new byte[65536];
+                        int count;
+                        while ((count = in.read(buffer)) > 0) {
+                            total += count;
+                            if (total > 64L * 1024 * 1024) {
+                                throw new java.io.IOException("image too large");
+                            }
+                            out.write(buffer, 0, count);
+                        }
+                        out.flush();
+                    }
+                    if (total <= 0) {
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                        return;
+                    }
+                    Uri uri = Uri.parse(INCOMING_URI_PREFIX + Uri.encode(file.getName()));
+                    grantReadToCommonTargets(mContext, uri);
+                    pruneIncomingCache(dir, file);
+                    final File staged = file;
+                    final String mime = sniffIncomingMime(file);
+                    final Uri stagedUri = uri;
+                    sHandler.post(() -> {
+                        if (!TextUtils.equals(sourceUrl, mImageUrl)) {
+                            return;
+                        }
+                        mImageUri = stagedUri;
+                        mImageMime = mime != null && mime.startsWith("image/") ? mime : "image/*";
+                        requestTargetsAsync();
+                        Log.i(TAG, "downloadImageAsync staged " + staged.getName()
+                                + " " + staged.length() + " bytes");
+                    });
+                } catch (Throwable t) {
+                    Log.w(TAG, "downloadImageAsync failed for " + sourceUrl, t);
+                    if (file != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                    }
+                }
+            });
+        }
+
+        /**
          * Writes a bitmap into SystemUI's exportable FileProvider incoming cache
          * (content://com.android.systemui.fileprovider/hyperportal_incoming/<name>).
          */
@@ -1863,13 +1948,39 @@ public final class PortalSystemUiModule {
 
 
         private void recordTargetUse(String key) {
-            // Fire-and-forget provider write: keep it off the main thread so a
-            // cold HyperPortal process cannot stall the drop.
+            if (TextUtils.isEmpty(key)) return;
+            // Target affinity is runtime state owned by SystemUI. Increment
+            // the cached counter locally instead of waking HyperPortal just
+            // to write one integer into its preferences.
             sBgExecutor.execute(() -> {
-                try {
-                    Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                    mContext.getContentResolver().call(uri, "recordTargetUse", key, null);
-                } catch (Throwable ignored) {
+                synchronized (SystemUiOverlay.this) {
+                    try {
+                        android.content.SharedPreferences prefs =
+                                mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+                        java.util.LinkedHashMap<String, Integer> usage =
+                                new java.util.LinkedHashMap<>();
+                        String raw = prefs.getString("target_usage", "");
+                        if (!TextUtils.isEmpty(raw)) {
+                            for (String line : raw.split("\n")) {
+                                int split = line.lastIndexOf('=');
+                                if (split <= 0) continue;
+                                try {
+                                    usage.put(line.substring(0, split),
+                                            Integer.parseInt(line.substring(split + 1)));
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        }
+                        int next = usage.containsKey(key) ? usage.get(key) + 1 : 1;
+                        usage.put(key, Math.min(next, 1000));
+                        StringBuilder sb = new StringBuilder();
+                        for (java.util.Map.Entry<String, Integer> entry : usage.entrySet()) {
+                            if (sb.length() > 0) sb.append('\n');
+                            sb.append(entry.getKey()).append('=').append(entry.getValue());
+                        }
+                        prefs.edit().putString("target_usage", sb.toString()).apply();
+                    } catch (Throwable ignored) {
+                    }
                 }
             });
         }
@@ -1956,7 +2067,10 @@ public final class PortalSystemUiModule {
                 rebuildTargets = false;
             }
             Bundle extras = intent.getExtras();
-            if (extras != null) {
+            if (extras != null && !intent.hasExtra("from_system_server")) {
+                // A system_server snapshot only carries trigger/guard/anim
+                // fields and may be built from defaults before SystemUI has
+                // read the app config. Never let it become the cache.
                 saveCachedConfig(extras);
             }
             if (intent.hasExtra("master_switch")) {
@@ -1976,8 +2090,10 @@ public final class PortalSystemUiModule {
             if (mDockBar != null && intent.hasExtra("edge_scroll_margin")) {
                 mDockBar.setEdgeScrollMarginDp(intent.getIntExtra("edge_scroll_margin", 86));
             }
-            mConfigLoaded = true;
-            mConfigFetchedAt = SystemClock.uptimeMillis();
+            if (!intent.hasExtra("from_system_server") || hasCachedConfig(mContext)) {
+                mConfigLoaded = true;
+                mConfigFetchedAt = SystemClock.uptimeMillis();
+            }
             Log.i(TAG, "config broadcast applied master=" + mMasterEnabled
                     + " threshold=" + mTriggerThreshold + " pos=" + mTriggerPosition);
             // Target limit / pin / hidden changes need a rebuilt shelf.
@@ -2039,6 +2155,7 @@ public final class PortalSystemUiModule {
                 mBitmap = null;
                 mImageUri = null;
                 mImageMime = null;
+                mImageUrl = intent.getStringExtra("imageUrl");
                 Object bmp = intent.getParcelableExtra("viewBitmap");
                 if (bmp instanceof Bitmap) {
                     mBitmap = (Bitmap) bmp;
@@ -2050,8 +2167,11 @@ public final class PortalSystemUiModule {
                 mImageMime = intent.getStringExtra("imageMimeType");
                 Log.i(TAG, "ACTION_SHOW text=" + (mText == null ? "null" : mText.length())
                         + " bitmap=" + (mBitmap == null ? "null" : mBitmap.getWidth() + "x" + mBitmap.getHeight())
-                        + " uri=" + mImageUri + " mime=" + mImageMime);
+                        + " uri=" + mImageUri + " url=" + mImageUrl + " mime=" + mImageMime);
                 updateDockTargets();
+                if (mImageUri == null && mBitmap == null && !TextUtils.isEmpty(mImageUrl)) {
+                    downloadImageAsync(mImageUrl);
+                }
                 triggerQrScanAsync();
             } else if (ACTION_DRAG_STATE.equals(action) || "com.github.leaf.hyperportal.DRAG_STATE_CHANGED".equals(action)) {
                 int state = intent.getIntExtra("state", 0);
@@ -2148,6 +2268,7 @@ public final class PortalSystemUiModule {
                 mBitmap = null;
                 mImageUri = null;
                 mImageMime = null;
+                mImageUrl = null;
                 return;
             }
 
