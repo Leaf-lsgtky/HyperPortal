@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorFilter;
+import android.graphics.Insets;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -16,6 +17,8 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -177,6 +180,29 @@ public class ColorOSDockBar extends FrameLayout {
 
     private int dp(float dpValue) {
         return (int) (dpValue * mDensity + 0.5f);
+    }
+
+    /**
+     * MIUI/HyperOS installs GestureStubLeft/Right windows (com.miui.home,
+     * TYPE_MAGNIFICATION_OVERLAY, base layer 281000) above the portal overlay.
+     * Their touchable region eats the outer ~122 px of each screen edge, so
+     * DragEvent coordinates never reach the physical edge: the last sample is
+     * x=1097 on a 1220 px display. Measure the system-gesture inset and treat
+     * its inner boundary as the usable edge; add 8 dp because the MIUI stub is
+     * wider than the framework's systemGestures inset.
+     */
+    private int edgeGestureInsetPx() {
+        int inset = 0;
+        try {
+            WindowManager wm = (WindowManager) getContext().getSystemService(Context.WINDOW_SERVICE);
+            if (wm != null) {
+                Insets insets = wm.getCurrentWindowMetrics().getWindowInsets()
+                        .getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures());
+                inset = Math.max(insets.left, insets.right);
+            }
+        } catch (Throwable ignored) {
+        }
+        return inset > 0 ? inset + dp(8) : 0;
     }
 
     public void setOrientation(int orientation) {
@@ -583,6 +609,9 @@ public class ColorOSDockBar extends FrameLayout {
         } else {
             // 1. Edge Auto-Scroll Handling (covering screen left and right edges, including lower corners)
             int screenWidth = getResources().getDisplayMetrics().widthPixels;
+            int edgeInset = edgeGestureInsetPx();
+            int leftEdge = edgeInset;
+            int rightEdge = screenWidth - edgeInset;
             int[] dockScreenLoc = new int[2];
             getLocationOnScreen(dockScreenLoc);
             // Vertical active range: from slightly above the dock all the way to screen bottom
@@ -590,11 +619,11 @@ public class ColorOSDockBar extends FrameLayout {
             boolean canScroll = mScrollView != null && mRow.getWidth() > mScrollView.getWidth();
 
             if (canScroll && inLowerZone) {
-                if (rawX <= zoomMargin) {
-                    boolean fast = (rawX <= quickMargin);
+                if (rawX <= leftEdge + zoomMargin) {
+                    boolean fast = (rawX <= leftEdge + quickMargin);
                     startAutoScroll(-1, fast);
-                } else if (rawX >= screenWidth - zoomMargin) {
-                    boolean fast = (rawX >= screenWidth - quickMargin);
+                } else if (rawX >= rightEdge - zoomMargin) {
+                    boolean fast = (rawX >= rightEdge - quickMargin);
                     startAutoScroll(1, fast);
                 } else {
                     stopAutoScroll();
