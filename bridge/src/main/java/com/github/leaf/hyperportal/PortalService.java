@@ -57,6 +57,7 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.WindowMetrics;
 import android.view.animation.DecelerateInterpolator;
+import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -1438,6 +1439,39 @@ public class PortalService extends Service {
         private float mTargetScaleX = 0f;
         private float mCurrentScaleX = 0f;
 
+        /*
+         * ColorOS bottom glow state machine, taken from
+         * assets/glow_effect.coz (process1_StandardPhone / process2_StandardPhone).
+         *
+         * process1 is NOT a distance-driven wash: it is a thin aurora rim hugging
+         * the bottom edge (center 4.02 screen-widths below the edge, radius 4.0,
+         * 0.18*width falloff, alpha 1). process2 is the transient bloom played when
+         * the drop zone is entered: it expands for 300 ms while alpha falls to 0
+         * by 380 ms. The old code held process2's end values as a permanent state,
+         * which is why the glow looked far heavier than ColorOS.
+         */
+        private static final float RIM_CENTER_Y = -4.02f;
+        private static final float RIM_START = 4.0f;
+        private static final float RIM_SPACE = 0.18f;
+        private static final float OPEN_CENTER_Y = -1.16f;
+        private static final float OPEN_START = 1.0f;
+        private static final float OPEN_SPACE = 0.76f;
+        private static final long OPEN_MOVE_MS = 300L;
+        private static final long OPEN_ALPHA_DELAY_MS = 80L;
+        private static final long OPEN_ALPHA_MS = 300L;
+        private static final long OPEN_TOTAL_MS = 380L;
+
+        private final PathInterpolator mOpenMoveInterp =
+                new PathInterpolator(0.30f, 0f, 0.10f, 1f);
+        private final PathInterpolator mOpenFadeInterp =
+                new PathInterpolator(0.17f, 0f, 0.83f, 1f);
+        private boolean mOpenAnim = false;
+        private long mOpenAnimStart = 0L;
+        private float mOpenFromCenterY = RIM_CENTER_Y;
+        private float mOpenFromStart = RIM_START;
+        private float mOpenFromSpace = RIM_SPACE;
+        private float mOpenFromAlpha = 0f;
+
         public GlowView(Context context) {
             super(context);
             initShader(context);
@@ -1482,7 +1516,7 @@ public class PortalService extends Service {
                                 + "float2 rotate2d(float2 p, float angle) {\n"
                                 + "    float s = sin(angle);\n"
                                 + "    float c = cos(angle);\n"
-                                + "    return float2(p.x * c - p.y * s, p.x * s + p.y * c);\n"
+                                + "    return float2(p.x * c + p.y * s, -p.x * s + p.y * c);\n"
                                 + "}\n"
                                 + "half4 generateColorLayer(float2 uv, float2 center,\n"
                                 + "                    float2 colorShakeDisplacement, float colorShakeSpeed, float colorSpeed,\n"
@@ -1532,7 +1566,7 @@ public class PortalService extends Service {
                                 + "}\n";
 
                         mShader = new RuntimeShader(agsl);
-                        BitmapShader bmpShader = new BitmapShader(mNoiseBmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT);
+                        BitmapShader bmpShader = new BitmapShader(mNoiseBmp, Shader.TileMode.MIRROR, Shader.TileMode.MIRROR);
                         mShader.setInputShader("u_HaloColorNoiseTex", bmpShader);
                         mShader.setFloatUniform("_HaloColor1", 0.76078f, 0.3647f, 1.0f, 1.0f);
                         mShader.setFloatUniform("_HaloColor2", 0.16078f, 0.8980f, 0.2863f, 1.0f);
@@ -1578,6 +1612,7 @@ public class PortalService extends Service {
             mIsRight = isRight;
             float p = Math.max(0f, Math.min(1.0f, progress));
             if (isRight) {
+                mOpenAnim = false;
                 int h = getHeight() > 0 ? getHeight() : getResources().getDisplayMetrics().heightPixels;
                 if (touchY > 0f) {
                     mTargetTouchY = touchY;
@@ -1591,11 +1626,15 @@ public class PortalService extends Service {
                 mTargetScaleX = 0.35f + 0.65f * p;
                 mTargetAlpha = 0.30f + 0.65f * p;
             } else {
+                // OPPO process1_StandardPhone: a constant thin rim at the very
+                // bottom edge. progress is deliberately ignored (ColorOS does not
+                // scale the halo with drag distance).
+                mOpenAnim = false;
                 mTargetCenterX = 0.5f;
-                mTargetCenterY = -2.5f + 1.34f * p;
-                mTargetStart = 2.5f - 1.5f * p;
-                mTargetSpace = 0.30f + 0.46f * p;
-                mTargetAlpha = 0.50f + 0.45f * p;
+                mTargetCenterY = RIM_CENTER_Y;
+                mTargetStart = RIM_START;
+                mTargetSpace = RIM_SPACE;
+                mTargetAlpha = 1.0f;
             }
             postInvalidateOnAnimation();
         }
@@ -1611,6 +1650,7 @@ public class PortalService extends Service {
         public void setPhase2(boolean isRight, float touchY) {
             mIsRight = isRight;
             if (isRight) {
+                mOpenAnim = false;
                 if (touchY > 0f) {
                     mTargetTouchY = touchY;
                     if (mCurrentTouchY < 0f) {
@@ -1620,16 +1660,36 @@ public class PortalService extends Service {
                 mTargetScaleX = 1.15f;
                 mTargetAlpha = 1.0f;
             } else {
+                // OPPO process2_StandardPhone: bloom upward and fade to zero over
+                // 380 ms while the shelf opens. Do not hold the expanded geometry
+                // at a visible alpha afterwards.
                 mTargetCenterX = 0.5f;
-                mTargetCenterY = -1.16f;
-                mTargetStart = 1.0f;
-                mTargetSpace = 0.76f;
-                mTargetAlpha = 0.95f;
+                mTargetCenterY = OPEN_CENTER_Y;
+                mTargetStart = OPEN_START;
+                mTargetSpace = OPEN_SPACE;
+                mTargetAlpha = 0f;
+                if (!mOpenAnim) {
+                    mOpenAnim = true;
+                    mOpenAnimStart = SystemClock.uptimeMillis();
+                    mOpenFromCenterY = mCurrentCenterY;
+                    mOpenFromStart = mCurrentStart;
+                    mOpenFromSpace = mCurrentSpace;
+                    mOpenFromAlpha = mCurrentAlpha;
+                }
             }
             postInvalidateOnAnimation();
         }
 
         public void resetState() {
+            mOpenAnim = false;
+            mTargetCenterX = 0.5f;
+            mCurrentCenterX = 0.5f;
+            mTargetCenterY = -4.134f;
+            mCurrentCenterY = -4.134f;
+            mTargetStart = RIM_START;
+            mCurrentStart = RIM_START;
+            mTargetSpace = RIM_SPACE;
+            mCurrentSpace = RIM_SPACE;
             mTargetAlpha = 0f;
             mCurrentAlpha = 0f;
             mTargetScaleX = 0f;
@@ -1706,12 +1766,32 @@ public class PortalService extends Service {
             }
 
             // Bottom Mode (ColorOS Aurora AGSL / RadialGradient)
-            float damping = 0.20f;
-            mCurrentCenterX += (mTargetCenterX - mCurrentCenterX) * damping;
-            mCurrentCenterY += (mTargetCenterY - mCurrentCenterY) * damping;
-            mCurrentStart += (mTargetStart - mCurrentStart) * damping;
-            mCurrentSpace += (mTargetSpace - mCurrentSpace) * damping;
-            mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * damping;
+            if (mOpenAnim) {
+                long elapsed = SystemClock.uptimeMillis() - mOpenAnimStart;
+                float moveT = mOpenMoveInterp.getInterpolation(
+                        Math.min(1f, elapsed / (float) OPEN_MOVE_MS));
+                mCurrentCenterX = 0.5f;
+                mCurrentCenterY = mOpenFromCenterY + (OPEN_CENTER_Y - mOpenFromCenterY) * moveT;
+                mCurrentStart = mOpenFromStart + (OPEN_START - mOpenFromStart) * moveT;
+                mCurrentSpace = mOpenFromSpace + (OPEN_SPACE - mOpenFromSpace) * moveT;
+                float fadeT = (elapsed - OPEN_ALPHA_DELAY_MS) / (float) OPEN_ALPHA_MS;
+                fadeT = Math.max(0f, Math.min(1f, fadeT));
+                mCurrentAlpha = mOpenFromAlpha * (1f - mOpenFadeInterp.getInterpolation(fadeT));
+                if (elapsed >= OPEN_TOTAL_MS) {
+                    mOpenAnim = false;
+                    mCurrentCenterY = OPEN_CENTER_Y;
+                    mCurrentStart = OPEN_START;
+                    mCurrentSpace = OPEN_SPACE;
+                    mCurrentAlpha = 0f;
+                }
+            } else {
+                float damping = 0.20f;
+                mCurrentCenterX += (mTargetCenterX - mCurrentCenterX) * damping;
+                mCurrentCenterY += (mTargetCenterY - mCurrentCenterY) * damping;
+                mCurrentStart += (mTargetStart - mCurrentStart) * damping;
+                mCurrentSpace += (mTargetSpace - mCurrentSpace) * damping;
+                mCurrentAlpha += (mTargetAlpha - mCurrentAlpha) * damping;
+            }
 
             if (mShader != null) {
                 float time = (SystemClock.uptimeMillis() % 60000) / 1000.0f;
