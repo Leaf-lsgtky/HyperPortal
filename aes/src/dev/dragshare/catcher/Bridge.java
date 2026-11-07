@@ -241,9 +241,34 @@ public final class Bridge {
                         + " duration=" + sLongPressDurationMs + " radius=" + sTouchSlopDp
                         + " threshold=" + sTriggerThreshold
                         + " blacklist=" + sBlacklist.size());
+            } else {
+                sLastConfigFailTime = SystemClock.uptimeMillis();
+                requestSystemWakePortal(context);
             }
         } catch (Throwable t) {
             sLastConfigFailTime = SystemClock.uptimeMillis();
+            requestSystemWakePortal(context);
+        }
+    }
+
+    /**
+     * Asks system_server (UID 1000) and PortalReceiver to thaw or cold-start
+     * the HyperPortal process so PortalFileProvider is ready before the finger
+     * finishes a long-press and starts dragging.
+     */
+    private static void requestSystemWakePortal(Context context) {
+        if (context == null) return;
+        try {
+            Intent wake = new Intent("com.github.leaf.hyperportal.ACTION_WAKE_PORTAL");
+            wake.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            context.sendBroadcast(wake);
+
+            Intent appWake = new Intent("com.github.leaf.hyperportal.SHOW");
+            appWake.setPackage(PORTAL_PACKAGE);
+            appWake.putExtra("keepAlive", true);
+            appWake.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            context.sendBroadcast(appWake);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -313,10 +338,6 @@ public final class Bridge {
     private static volatile boolean sShadowDim;
     private static volatile ValueAnimator sShadowMorphAnimator;
     private static volatile boolean sShadowReceiverRegistered;
-    // MediaStore is only a transport fallback when the portal provider cannot be
-    // reached. Track all fallback items for this gesture so an unhandled drop
-    // or cancelled drag can delete them instead of leaving "saved" images in the gallery.
-    private static final Set<Uri> sActiveMediaStoreUris = Collections.synchronizedSet(new HashSet<>());
     private static final BroadcastReceiver sShadowReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -342,6 +363,8 @@ public final class Bridge {
     private static volatile long sDownAt;
     private static volatile int sGestureGeneration;
     private static volatile int sPendingGeneration;
+    private static volatile int sTriggeredGeneration = -1;
+    private static volatile int sDragStartedGeneration = -1;
     // Cache the reflective "what kind of view is this" answer per class. A long
     // press walks every leaf in the window; doing getDeclaredMethods() for each
     // one is a large part of the old 100-200ms stall.
@@ -442,7 +465,6 @@ public final class Bridge {
                     sGestureState.set(STATE_IDLE);
                     sMainHandler.removeCallbacks(sCustomLongPressRunnable);
                     sMainHandler.removeCallbacks(sWebPrefetchRunnable);
-                    cleanupActiveMediaStoreUris(appContext, true);
                     if (view != null) {
                         sLastTouchView = view;
                     }
@@ -468,6 +490,8 @@ public final class Bridge {
                     int generation = sGestureGeneration + 1;
                     sGestureGeneration = generation;
                     sPendingGeneration = generation;
+                    sTriggeredGeneration = -1;
+                    sDragStartedGeneration = -1;
                     sWebAwaitingGeneration = -1;
                     sWebAwaitingViewRef = null;
                     // Proactively prefetch WebView DOM/image under the finger 50ms into the press:
@@ -510,8 +534,9 @@ public final class Bridge {
 
 
 
-                    if (sGestureState.get() == STATE_DRAGGING) {
-                        // System drag is already active
+                    if (sGestureState.get() == STATE_DRAGGING
+                            || sDragStartedGeneration == sGestureGeneration) {
+                        // System drag is already active or already attempted for this gesture
                     } else if (sMovedSinceDown && sPendingPayload != null) {
                         sMainHandler.removeCallbacks(sCustomLongPressRunnable);
                         Bundle pending = sPendingPayload;
@@ -546,7 +571,6 @@ public final class Bridge {
                         sPendingPayload = null;
                         sPendingContent = null;
                     }
-                    cleanupActiveMediaStoreUris(appContext, true);
                 }
             }
         } catch (Throwable throwable) {
@@ -561,6 +585,8 @@ public final class Bridge {
                 return;
             }
             if (!sGestureActive || sPendingGeneration != sGestureGeneration || sPendingPayload != null
+                    || sTriggeredGeneration == sGestureGeneration
+                    || sDragStartedGeneration == sGestureGeneration
                     || sGestureState.get() != STATE_IDLE || sActiveDragView != null) {
                 return;
             }
@@ -623,6 +649,7 @@ public final class Bridge {
                     + " bitmap=" + describeBitmap(content)
                     + " took=" + (SystemClock.uptimeMillis() - startedAt) + "ms");
 
+            sTriggeredGeneration = sGestureGeneration;
             content.putString("coordinate", ((int) sDownRawX) + "-" + ((int) sDownRawY));
             sLastTouchAt = SystemClock.uptimeMillis();
             if (touchTarget.isAttachedToWindow()) {
@@ -665,8 +692,10 @@ public final class Bridge {
                         + "ms), ignoring premature AES trigger");
                 return;
             }
-            if (sGestureState.get() != STATE_IDLE) {
-                Log.d(TAG, "recordTouch ignored (custom engine active)");
+            if (!sGestureActive || sTriggeredGeneration == sGestureGeneration
+                    || sDragStartedGeneration == sGestureGeneration
+                    || sPendingPayload != null || sGestureState.get() != STATE_IDLE) {
+                Log.d(TAG, "recordTouch ignored (custom engine active or already triggered)");
                 return;
             }
             // The pre-long-press anti-mistouch circle already cancelled our own
@@ -1431,7 +1460,9 @@ public final class Bridge {
             if (sWebAwaitingGeneration != cache.generation) {
                 return;
             }
-            if (sPendingPayload != null || sGestureState.get() == STATE_DRAGGING || sActiveDragView != null) {
+            if (sPendingPayload != null || sTriggeredGeneration == sGestureGeneration
+                    || sDragStartedGeneration == sGestureGeneration
+                    || sGestureState.get() == STATE_DRAGGING || sActiveDragView != null) {
                 return;
             }
             sWebAwaitingGeneration = -1;
@@ -1440,6 +1471,7 @@ public final class Bridge {
             if (bundle == null || !isBundleMeaningful(bundle)) {
                 return;
             }
+            sTriggeredGeneration = sGestureGeneration;
             sMainHandler.removeCallbacks(sCustomLongPressRunnable);
             bundle.putString("coordinate", ((int) sDownRawX) + "-" + ((int) sDownRawY));
             sLastTouchAt = SystemClock.uptimeMillis();
@@ -7011,14 +7043,23 @@ public final class Bridge {
      */
     public static void deliverContent(Object content) {
         try {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                Log.d(TAG, "deliverContent ignored (background thread)");
+                return;
+            }
             Context ctx = currentContext();
             ensureConfig(ctx);
             if (!sMasterSwitch || isBlacklisted(ctx) || (!sLandscapeTrigger && isLandscape(ctx))) {
                 Log.d(TAG, "deliverContent ignored (disabled, blacklisted, or landscape)");
                 return;
             }
-            if (content == null || sGestureState.get() == STATE_DRAGGING) {
-                Log.d(TAG, "deliverContent ignored (custom engine already dragging)");
+            if (!sGestureActive || content == null
+                    || sTriggeredGeneration == sGestureGeneration
+                    || sDragStartedGeneration == sGestureGeneration
+                    || sPendingPayload != null
+                    || sGestureState.get() != STATE_IDLE
+                    || sActiveDragView != null) {
+                Log.d(TAG, "deliverContent ignored (gesture inactive or already triggered)");
                 return;
             }
             long elapsed = SystemClock.uptimeMillis() - sDownAt;
@@ -7029,6 +7070,10 @@ public final class Bridge {
             }
             Object resultMap = getField(content, "mResultMap");
             Object catchType = getField(content, "mCatchType");
+            if (!Integer.valueOf(2).equals(catchType)) {
+                Log.d(TAG, "deliverContent ignored (non-long-press catchType=" + catchType + ")");
+                return;
+            }
             int size = resultMap instanceof Map ? ((Map<?, ?>) resultMap).size() : -1;
             Log.i(TAG, "deliver content catchType=" + catchType + " mapSize=" + size);
             if (!(resultMap instanceof Map)) {
@@ -7050,6 +7095,7 @@ public final class Bridge {
             }
             Bundle payload = pickPayload(map);
             if (payload != null) {
+                sTriggeredGeneration = sGestureGeneration;
                 sMainHandler.removeCallbacks(sCustomLongPressRunnable);
                 Object coordinate = map.get("coordinate");
                 if (coordinate instanceof String) {
@@ -8054,98 +8100,41 @@ public final class Bridge {
     }
 
     /**
-     * Fallback for HyperOS AutoStart rejection: QQ may not be allowed to start
-     * HyperPortal's ContentProvider, so write a media item through MediaStore instead.
-     * The returned content://media URI is readable by the normal system share/drag path.
+     * Wakes or thaws the HyperPortal provider process via system_server (UID 1000)
+     * and PortalReceiver when a direct ContentProvider write fails on the first try.
+     * Never writes temporary drag bitmaps into MediaStore/Pictures, so triggering a
+     * drag can never pollute the user's gallery.
      */
-    private static Uri insertBitmapToMediaStore(Context context, Bitmap bitmap) {
-        if (context == null || bitmap == null) {
-            return null;
+    private static boolean wakePortalForStaging(Context context) {
+        if (context == null) {
+            return false;
         }
-        Uri uri = null;
+        requestSystemWakePortal(context);
         try {
-            ContentResolver resolver = context.getContentResolver();
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME,
-                    "dragshare_" + SystemClock.uptimeMillis() + ".png");
-            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-            if (Build.VERSION.SDK_INT >= 29) {
-                values.put(MediaStore.Images.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_PICTURES + "/HyperPortal");
-                values.put(MediaStore.Images.Media.IS_PENDING, 1);
-            }
-            uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                return null;
-            }
-            try (OutputStream output = resolver.openOutputStream(uri)) {
-                if (output == null || !bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                    throw new IllegalStateException("MediaStore PNG compression failed");
-                }
-                output.flush();
-            }
-            if (Build.VERSION.SDK_INT >= 29) {
-                ContentValues done = new ContentValues();
-                done.put(MediaStore.Images.Media.IS_PENDING, 0);
-                resolver.update(uri, done, null, null);
+            Intent keepAlive = new Intent();
+            keepAlive.setClassName(PORTAL_PACKAGE, PORTAL_SERVICE);
+            keepAlive.putExtra("keepAlive", true);
+            context.startService(keepAlive);
+        } catch (Throwable ignored) {
+        }
+        Uri providerUri = Uri.parse("content://com.github.leaf.hyperportal.files");
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                Thread.sleep(35);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
             }
             try {
-                context.grantUriPermission(
-                        PORTAL_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (Throwable throwable) {
-                Log.w(TAG, "grant MediaStore uri to portal failed", throwable);
-            }
-            Log.i(TAG, "insertBitmapToMediaStore " + uri);
-            sActiveMediaStoreUris.add(uri);
-            return uri;
-        } catch (Throwable throwable) {
-            Log.w(TAG, "insertBitmapToMediaStore failed", throwable);
-            if (uri != null) {
-                try {
-                    context.getContentResolver().delete(uri, null, null);
-                } catch (Throwable ignored) {
+                Bundle res = context.getContentResolver().call(providerUri, "getConfig", null, null);
+                if (res != null) {
+                    Log.i(TAG, "wakePortalForStaging succeeded on attempt " + (attempt + 1));
+                    return true;
                 }
+            } catch (Throwable ignored) {
             }
-            return null;
         }
-    }
-
-    private static void deleteMediaStoreUri(Context context, Uri uri) {
-        if (context == null || uri == null) {
-            return;
-        }
-        try {
-            int rows = context.getContentResolver().delete(uri, null, null);
-            Log.i(TAG, "deleted MediaStore transport uri=" + uri + " rows=" + rows);
-        } catch (Throwable throwable) {
-            Log.w(TAG, "delete MediaStore transport failed uri=" + uri, throwable);
-        }
-    }
-
-    private static void cleanupActiveMediaStoreUris(Context context, boolean forceNow) {
-        if (context == null) {
-            return;
-        }
-        final List<Uri> toDelete;
-        synchronized (sActiveMediaStoreUris) {
-            if (sActiveMediaStoreUris.isEmpty()) {
-                return;
-            }
-            toDelete = new ArrayList<>(sActiveMediaStoreUris);
-            sActiveMediaStoreUris.clear();
-        }
-        if (forceNow) {
-            for (Uri uri : toDelete) {
-                deleteMediaStoreUri(context, uri);
-            }
-        } else {
-            final Context appCtx = context.getApplicationContext();
-            sMainHandler.postDelayed(() -> {
-                for (Uri uri : toDelete) {
-                    deleteMediaStoreUri(appCtx, uri);
-                }
-            }, 30000);
-        }
+        return false;
     }
 
     /**
@@ -8381,6 +8370,12 @@ public final class Bridge {
         }
         boolean preferPngForGif = sourceIsGif && dragBitmap != null && !animatedOriginal;
         if (prepareDrag) {
+            if (sDragStartedGeneration == sGestureGeneration) {
+                Log.i(TAG, "forwardToPortal(prepareDrag=true) skipped: already started for generation "
+                        + sGestureGeneration);
+                return;
+            }
+            sDragStartedGeneration = sGestureGeneration;
             sMainHandler.removeCallbacks(sCustomLongPressRunnable);
             // A URI owned by the source app (Weibo's own provider, a photo-picker
             // grant, ...) is opaque to the drop target. Re-stage it so every drag
@@ -8432,18 +8427,27 @@ public final class Bridge {
                 // Staging a bitmap failed; preserve the original file rather than dropping it.
                 imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
             }
-            if (imageCacheName == null && imageContentUri == null && dragBitmap != null) {
-                // HyperOS AutoStart may reject a ContentProvider start from QQ. Fall
-                // back to a MediaStore item owned by QQ, which needs no provider start.
-                // This is transport only: it is deleted when the drop is not handled.
-                cleanupActiveMediaStoreUris(context, true);
-                Uri mediaUri = insertBitmapToMediaStore(context, dragBitmap);
-                if (mediaUri != null) {
-                    imageContentUri = mediaUri;
-                    imageMimeType = "image/png";
-                    payload.putString("stagedImageUri", mediaUri.toString());
-                    payload.putString("stagedImageMime", imageMimeType);
-                    payload.putBoolean("stagedImageIsMediaStore", true);
+            if (imageCacheName == null && imageContentUri == null
+                    && (dragBitmap != null || filePfd instanceof ParcelFileDescriptor)) {
+                // If PortalFileProvider was frozen or cold-stopped, ask system_server
+                // (UID 1000) to wake it and retry staging once—never write temporary
+                // transport files into MediaStore / Pictures!
+                if (wakePortalForStaging(context)) {
+                    if (dragBitmap != null && (! (filePfd instanceof ParcelFileDescriptor) || preferPngForGif)) {
+                        imageCacheName = copyBitmapToPortal(context, dragBitmap);
+                        if (imageCacheName != null) {
+                            imageMimeType = "image/png";
+                        }
+                    }
+                    if (imageCacheName == null && filePfd instanceof ParcelFileDescriptor) {
+                        imageCacheName = copyPfdToPortal(context, (ParcelFileDescriptor) filePfd, payload);
+                    }
+                    if (imageCacheName == null && dragBitmap != null) {
+                        imageCacheName = copyBitmapToPortal(context, dragBitmap);
+                        if (imageCacheName != null) {
+                            imageMimeType = "image/png";
+                        }
+                    }
                 }
             }
             if (imageCacheName != null) {
@@ -8507,9 +8511,6 @@ public final class Bridge {
                 + " source=" + source);
         boolean dragStarted = prepareDrag
                 && startSystemDrag(context, text, dragBitmap, imageContentUri, imageMimeType);
-        if (!dragStarted && prepareDrag) {
-            cleanupActiveMediaStoreUris(context, true);
-        }
         intent.putExtra("dragActive", dragStarted);
         try {
             // The target app is foreground during long-press, so a plain
@@ -8797,16 +8798,12 @@ public final class Bridge {
 
             if (imageUri == null && bitmap != null && context != null) {
                 String name = copyBitmapToPortal(context, bitmap);
+                if (name == null && wakePortalForStaging(context)) {
+                    name = copyBitmapToPortal(context, bitmap);
+                }
                 if (name != null) {
                     imageUri = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
                     imageMime = "image/png";
-                } else {
-                    cleanupActiveMediaStoreUris(context, true);
-                    Uri mediaUri = insertBitmapToMediaStore(context, bitmap);
-                    if (mediaUri != null) {
-                        imageUri = mediaUri;
-                        imageMime = "image/png";
-                    }
                 }
             }
 
@@ -8959,15 +8956,6 @@ public final class Bridge {
                             sShadowMorphProgress = 0f;
                             sShadowDim = false;
                             sActiveShadowSquare = false;
-                            // A MediaStore item is only a transport fallback for the
-                            // drag URI. Clean up all temporary MediaStore transport items
-                            // so dragging an image never pollutes the user's gallery.
-                            boolean handled = false;
-                            try {
-                                handled = event.getResult();
-                            } catch (Throwable ignored) {
-                            }
-                            cleanupActiveMediaStoreUris(v.getContext(), !handled);
                             notifyPortalDragState(v.getContext(), 0, 0f, 0f);
                             sActiveDragView = null;
                             sActiveDragText = null;

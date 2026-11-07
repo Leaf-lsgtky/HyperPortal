@@ -86,6 +86,10 @@ public final class PortalSystemModule {
      */
     private static final String ACTION_CONFIG_SNAPSHOT =
             "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT";
+    private static final String ACTION_WAKE_PORTAL =
+            "com.github.leaf.hyperportal.ACTION_WAKE_PORTAL";
+    private static final String ACTION_SHOW_PORTAL =
+            "com.github.leaf.hyperportal.SHOW";
 
     private static volatile XposedInterface sXposed;
 
@@ -260,6 +264,7 @@ public final class PortalSystemModule {
             // SELinux context fixes for re-signed UID 1000 packages (ContentCatcher / AES)
             installSELinuxHooks(classLoader);
             installAppsFilterHooks(classLoader);
+            installAutoStartHooks(classLoader);
             installContentExtensionGateHook(classLoader);
             scheduleInitialConfigLoad();
         } catch (Throwable throwable) {
@@ -518,6 +523,73 @@ public final class PortalSystemModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "installAppsFilterHooks failed", t);
         }
+    }
+
+    /**
+     * Exempts {@code com.github.leaf.hyperportal} from HyperOS AutoStart blocks
+     * so third-party apps (QQ, WeChat, Coolapk, etc.) can always resolve
+     * {@code PortalFileProvider} and stage drag payloads into memory/cache
+     * without ever falling back to MediaStore gallery files.
+     */
+    private static void installAutoStartHooks(ClassLoader classLoader) {
+        String[] classNames = new String[]{
+                "com.android.server.am.AutoStartManagerServiceStubImpl",
+                "com.android.server.am.AutoStartManagerService"
+        };
+        ClassLoader[] loaders = new ClassLoader[]{
+                classLoader,
+                ClassLoader.getSystemClassLoader(),
+                Thread.currentThread().getContextClassLoader()
+        };
+        for (String clsName : classNames) {
+            Class<?> targetClass = null;
+            for (ClassLoader cl : loaders) {
+                if (cl == null) continue;
+                try {
+                    targetClass = Class.forName(clsName, false, cl);
+                    break;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (targetClass == null) continue;
+            try {
+                for (Method method : targetClass.getDeclaredMethods()) {
+                    String name = method.getName();
+                    if (("isAllowStartService".equals(name) || "canRestartServiceLocked".equals(name))
+                            && method.getReturnType() == boolean.class) {
+                        sXposed.hook(method)
+                                .setId("autostart-" + name + "-" + method.getParameterCount())
+                                .intercept(PortalSystemModule::onAutoStartCheck);
+                        log(Log.INFO, TAG, "hooked " + clsName + "." + name + ": " + method);
+                    }
+                }
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "installAutoStartHooks failed on " + clsName, t);
+            }
+        }
+    }
+
+    private static Object onAutoStartCheck(XposedInterface.Chain chain) throws Throwable {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args != null) {
+                for (Object arg : args) {
+                    if ("com.github.leaf.hyperportal".equals(arg)) {
+                        return Boolean.TRUE;
+                    }
+                    if (arg instanceof Intent) {
+                        Intent intent = (Intent) arg;
+                        if ("com.github.leaf.hyperportal".equals(intent.getPackage())
+                                || (intent.getComponent() != null
+                                && "com.github.leaf.hyperportal".equals(intent.getComponent().getPackageName()))) {
+                            return Boolean.TRUE;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return chain.proceed();
     }
 
     /**
@@ -1968,10 +2040,20 @@ public final class PortalSystemModule {
         if (sReceiverRegistered || ctx == null) return;
         try {
             IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+            filter.addAction(ACTION_WAKE_PORTAL);
+            filter.addAction(ACTION_SHOW_PORTAL);
             BroadcastReceiver receiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     if (intent != null) {
+                        String action = intent.getAction();
+                        if (ACTION_WAKE_PORTAL.equals(action) || ACTION_SHOW_PORTAL.equals(action)) {
+                            // A UID 1000 provider call thaws or cold-starts the HyperPortal
+                            // process immediately so third-party apps can stage into
+                            // PortalFileProvider without touching MediaStore.
+                            queryConfigAsync(context != null ? context : ctx);
+                            return;
+                        }
                         String pos = intent.getStringExtra("trigger_position");
                         if (pos != null) {
                             sTriggerPosition = pos;

@@ -1375,21 +1375,17 @@ public class PortalService extends Service {
         if (mBitmap == null) {
             return null;
         }
-        ContentResolver resolver = getContentResolver();
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Images.Media.DISPLAY_NAME,
-                "DragShare_" + System.currentTimeMillis() + ".png");
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-        values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/DragShare");
-        Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-        if (uri == null) {
-            return null;
-        }
-        try (OutputStream output = resolver.openOutputStream(uri)) {
-            if (output == null || !mBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                return null;
+        try {
+            File target = File.createTempFile("dragshare_", ".png", incomingDir());
+            try (OutputStream output = new FileOutputStream(target)) {
+                if (!mBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    target.delete();
+                    return null;
+                }
+                output.flush();
             }
-            return uri;
+            return Uri.parse("content://com.github.leaf.hyperportal.files/incoming/"
+                    + Uri.encode(target.getName()));
         } catch (Throwable throwable) {
             Log.w(TAG, "ensureImageUri failed", throwable);
             return null;

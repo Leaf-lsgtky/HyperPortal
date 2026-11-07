@@ -273,6 +273,7 @@ public final class PortalSystemUiModule {
         private String mImageMime;
         private float mLastDropX = -1f;
         private float mLastDropY = -1f;
+        private boolean mGallerySavedThisDrag = false;
 
         private final ExecutorService mQrExecutor = Executors.newSingleThreadExecutor();
         private int mQrSessionId = 0;
@@ -894,6 +895,11 @@ public final class PortalSystemUiModule {
         }
 
         private void saveImageToGallery(Context ctx, Bitmap bmp, Uri uri) {
+            if (mGallerySavedThisDrag) {
+                Log.i(TAG, "saveImageToGallery skipped: already saved once for this drag");
+                return;
+            }
+            mGallerySavedThisDrag = true;
             try {
                 String extension = "png";
                 String mimeType = !TextUtils.isEmpty(mImageMime) ? mImageMime : "image/png";
@@ -1129,6 +1135,7 @@ public final class PortalSystemUiModule {
             mContainer.setOnDragListener((v, event) -> {
                 int action = event.getAction();
                 if (action == DragEvent.ACTION_DRAG_STARTED) {
+                    mGallerySavedThisDrag = false;
                     if (TransferDockDragGuard.isDragging() || mTransferDockBroadcastDragging) {
                         handleDragStateChanged(0, 0f);
                         return false;
@@ -1438,6 +1445,7 @@ public final class PortalSystemUiModule {
                 return;
             }
             if (ACTION_SHOW.equals(action)) {
+                mGallerySavedThisDrag = false;
                 mText = intent.getStringExtra("viewContent");
                 mBitmap = null;
                 mImageUri = null;
