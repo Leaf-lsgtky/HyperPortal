@@ -32,7 +32,6 @@ import android.graphics.drawable.Drawable;
 import android.content.res.Resources;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
-import android.provider.MediaStore;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -112,7 +111,6 @@ import java.util.regex.Pattern;
 public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
-    private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
     private static final String SYSUI_PROVIDER_AUTHORITY = "com.android.systemui.fileprovider";
     private static final String SYSUI_INCOMING_PREFIX =
             "content://com.android.systemui.fileprovider/hyperportal_incoming/";
@@ -300,7 +298,6 @@ public final class Bridge {
         String pkg = context.getPackageName();
         return pkg != null && sBlacklist.contains(pkg);
     }
-    private static final String PORTAL_SERVICE = PORTAL_PACKAGE + ".PortalService";
     private static volatile WeakReference<Context> sContextRef;
     private static volatile PointF sLastTouchPoint;
     private static volatile View sLastTouchView;
@@ -7921,6 +7918,33 @@ public final class Bridge {
         }
     }
 
+    /**
+     * Opens a staging file in SystemUI's FileProvider. If the source app has
+     * not been granted the incoming prefix yet, request the grant from the
+     * SystemUI module and retry. There is deliberately no app-provider
+     * fallback: all drag payload staging lives in SystemUI now.
+     */
+    private static OutputStream openSystemUiOutput(Context context, Uri target) {
+        if (context == null || target == null) return null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                OutputStream out = context.getContentResolver().openOutputStream(target, "w");
+                if (out != null) return out;
+            } catch (SecurityException sec) {
+                requestSystemUiGrant(context);
+            } catch (Throwable t) {
+                Log.w(TAG, "openSystemUiOutput failed attempt " + (attempt + 1), t);
+            }
+            try {
+                Thread.sleep(40);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        return null;
+    }
+
     private static String copyPfdToPortal(Context context, ParcelFileDescriptor pfd, Bundle payload) {
         if (context == null || pfd == null) {
             return null;
@@ -7974,24 +7998,9 @@ public final class Bridge {
             }
         } catch (Throwable ignored) {
         }
-        OutputStream output = null;
-        try {
-            output = context.getContentResolver().openOutputStream(target, "w");
-        } catch (SecurityException sec) {
-            requestSystemUiGrant(context);
-            try {
-                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
-                output = context.getContentResolver().openOutputStream(target, "w");
-            } catch (Throwable ignored) {
-            }
-        } catch (Throwable ignored) {
-            try {
-                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
-                output = context.getContentResolver().openOutputStream(target, "w");
-            } catch (Throwable ignored2) {
-            }
-        }
+        OutputStream output = openSystemUiOutput(context, target);
         if (output == null) {
+            Log.w(TAG, "copyPfdToPortal: SystemUI provider unavailable for " + name);
             return null;
         }
         try (OutputStream out = output;
@@ -8039,12 +8048,10 @@ public final class Bridge {
         }
     }
 
-    /** True when the URI is already served by this app's staging provider. */
+    /** True when the URI is already served by SystemUI's staging provider. */
     private static boolean isPortalUri(Uri uri) {
         if (uri == null || !"content".equals(uri.getScheme())) return false;
-        String auth = uri.getAuthority();
-        return SYSUI_PROVIDER_AUTHORITY.equals(auth)
-                || "com.github.leaf.hyperportal.files".equals(auth);
+        return SYSUI_PROVIDER_AUTHORITY.equals(uri.getAuthority());
     }
 
     private static String queryDisplayName(Context context, Uri uri) {
@@ -8114,23 +8121,7 @@ public final class Bridge {
         String ext = hasAlpha ? ".png" : ".jpg";
         String name = "drag_" + SystemClock.uptimeMillis() + ext;
         Uri target = Uri.parse(SYSUI_INCOMING_PREFIX + Uri.encode(name));
-        OutputStream output = null;
-        try {
-            output = context.getContentResolver().openOutputStream(target, "w");
-        } catch (SecurityException sec) {
-            requestSystemUiGrant(context);
-            try {
-                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
-                output = context.getContentResolver().openOutputStream(target, "w");
-            } catch (Throwable ignored) {
-            }
-        } catch (Throwable ignored) {
-            try {
-                target = Uri.parse("content://com.github.leaf.hyperportal.files/incoming/" + Uri.encode(name));
-                output = context.getContentResolver().openOutputStream(target, "w");
-            } catch (Throwable ignored2) {
-            }
-        }
+        OutputStream output = openSystemUiOutput(context, target);
         if (output == null) return null;
         try (OutputStream os = output) {
             if (hasAlpha) {
@@ -8515,8 +8506,7 @@ public final class Bridge {
             intent.putExtra("imageUri", imageContentUri.toString());
             intent.putExtra("imageFileName", imageFileName);
             intent.putExtra("imageMimeType", imageMimeType);
-            Log.i(TAG, "staged image fallback MediaStore uri=" + imageContentUri
-                    + " reused=" + payload.getBoolean("stagedImageIsMediaStore", false));
+            Log.i(TAG, "staged image uri=" + imageContentUri);
         }
         if (dragBitmap != null) {
             // Preview thumbnail for UI and drag shadow (small so Intent parcel doesn't exceed 1MB)
@@ -8786,12 +8776,6 @@ public final class Bridge {
 
             ClipData clip;
             if (imageUri != null) {
-                if (context != null) {
-                    try {
-                        context.grantUriPermission("com.android.systemui", imageUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    } catch (Throwable ignored) {
-                    }
-                }
                 String mime = mimeForUri(imageUri, imageMime);
                 if (TextUtils.isEmpty(mime)) {
                     mime = "application/octet-stream";
