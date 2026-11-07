@@ -48,12 +48,87 @@ public class PortalFileProvider extends ContentProvider {
     private static volatile int sSystemUiPid = 0;
 
     /**
+     * The liveness flag above only lives in this process. HyperPortal is a
+     * cached background app, so HyperOS re-creates the process all the time -
+     * and then the flag is gone even though the SystemUI overlay is still up
+     * and drawing, which made PortalService draw a second overlay on top of it
+     * (right shelf from the app, bottom row from SystemUI). Persist the pid so a
+     * fresh process can re-establish the handshake without bothering SystemUI.
+     */
+    private static final String HOST_PREFS = "hyperportal_systemui_host";
+    private static final String KEY_HOST_PID = "pid";
+    private static final String KEY_HOST_AT = "at";
+    private static final String KEY_HOST_BOOT = "boot";
+
+    /**
      * True only while the SystemUI overlay that reported itself is still the
      * live SystemUI process. The flag lives in this process, which outlives
      * SystemUI, so without the pid check a SystemUI that was killed (for
      * example by the cold-boot input ANR) would keep telling PortalService
      * "SystemUI is handling the portal" and no overlay would ever appear.
      */
+    /** Re-establishes the handshake in a freshly created process. */
+    public static void restoreSystemUiHost(Context context) {
+        if (context == null || sSystemUiActive) {
+            return;
+        }
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(HOST_PREFS, Context.MODE_PRIVATE);
+            int pid = prefs.getInt(KEY_HOST_PID, 0);
+            long at = prefs.getLong(KEY_HOST_AT, 0L);
+            if (pid <= 0 || System.currentTimeMillis() - at > 7L * 24 * 60 * 60 * 1000) {
+                return;
+            }
+            // A pid is only meaningful inside the boot it was recorded in; after
+            // a reboot the same number may belong to an unrelated process.
+            String boot = currentBootId();
+            String recordedBoot = prefs.getString(KEY_HOST_BOOT, null);
+            if (boot == null || recordedBoot == null || !boot.equals(recordedBoot)) {
+                return;
+            }
+            if (!new File("/proc/" + pid).exists()) {
+                return;
+            }
+            sSystemUiPid = pid;
+            sSystemUiActive = true;
+            Log.i(TAG_Q, "restored SystemUI overlay host pid=" + pid);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void rememberSystemUiHost(Context context, int pid) {
+        if (context == null || pid <= 0) {
+            return;
+        }
+        try {
+            context.getSharedPreferences(HOST_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putInt(KEY_HOST_PID, pid)
+                    .putLong(KEY_HOST_AT, System.currentTimeMillis())
+                    .putString(KEY_HOST_BOOT, currentBootId())
+                    .apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static String currentBootId() {
+        java.io.BufferedReader reader = null;
+        try {
+            reader = new java.io.BufferedReader(new java.io.FileReader("/proc/sys/kernel/random/boot_id"));
+            return reader.readLine();
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            if (reader != null) {
+                try {
+                    reader.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     public static boolean isSystemUiActive() {
         if (!sSystemUiActive) {
             return false;
@@ -72,8 +147,10 @@ public class PortalFileProvider extends ContentProvider {
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
         if ("reportSystemUiActive".equals(method)) {
-            sSystemUiPid = android.os.Binder.getCallingPid();
+            int pid = android.os.Binder.getCallingPid();
+            sSystemUiPid = pid;
             sSystemUiActive = true;
+            rememberSystemUiHost(getContext(), pid);
             PortalStatusStore.INSTANCE.recordSystemUiActive(getContext());
             return new Bundle();
         }

@@ -78,6 +78,14 @@ public final class PortalSystemModule {
                     "com.github.leaf.hyperportal",
                     "com.dragshare.portal"));
     private static final ExecutorService sNotifyExecutor = Executors.newSingleThreadExecutor();
+    /**
+     * Full settings snapshot, pushed by system_server. Consumers must not treat
+     * the per-event {@code position} extra of ACTION_DRAG_STATE as authoritative
+     * (three processes send that broadcast, and two of them may be stale), but a
+     * snapshot that only system_server produces is safe to cache.
+     */
+    private static final String ACTION_CONFIG_SNAPSHOT =
+            "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT";
 
     private static volatile XposedInterface sXposed;
 
@@ -253,9 +261,75 @@ public final class PortalSystemModule {
             installSELinuxHooks(classLoader);
             installAppsFilterHooks(classLoader);
             installContentExtensionGateHook(classLoader);
+            scheduleInitialConfigLoad();
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "installHooks failed", throwable);
         }
+    }
+
+    /**
+     * The portal settings live in the HyperPortal app, i.e. in an ordinary
+     * background process. HyperOS' freezer (Greeze) can freeze that uid at any
+     * moment - the process is still alive but its ContentProvider stops being
+     * resolvable for third-party callers, so Bridge.getConfig() fails and every
+     * consumer silently falls back to the default "bottom" trigger edge. That is
+     * exactly what turned a right-edge setup into a bottom shelf.
+     *
+     * <p>system_server is the only place that can always read the provider (a
+     * uid 1000 caller is allowed to thaw the frozen app), so it keeps the
+     * authoritative snapshot here and pushes it out instead of letting the
+     * renderers and the source-app bridge pull from a process that may be
+     * frozen. Load it once at startup, then keep it fresh through
+     * ACTION_CONFIG_CHANGED and the per-drag query.
+     */
+    private static void scheduleInitialConfigLoad() {
+        Thread thread = new Thread(() -> {
+            for (int attempt = 0; attempt < 120; attempt++) {
+                try {
+                    Context ctx = obtainSystemContext();
+                    if (ctx != null) {
+                        sSystemContext = ctx;
+                        ensureConfigReceiver(ctx);
+                        queryConfigAsync(ctx);
+                        log(Log.INFO, TAG, "config channel ready after " + attempt + " attempt(s)");
+                        return;
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+            }
+            log(Log.WARN, TAG, "config channel unavailable: no system context");
+        }, "HyperPortalConfig");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private static Context obtainSystemContext() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
+            if (thread != null) {
+                Object ctx = activityThread.getMethod("getSystemContext").invoke(thread);
+                if (ctx instanceof Context) {
+                    return (Context) ctx;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (sWms != null) {
+                Object ctx = getField(sWms, "mContext");
+                if (ctx instanceof Context) {
+                    return (Context) ctx;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private static void installSELinuxHooks(ClassLoader classLoader) {
@@ -1953,10 +2027,37 @@ public final class PortalSystemModule {
                     log(Log.INFO, TAG, "same-window guard queried: " + sSameWindowGuard);
                     sColorosConsumeAnim = res.getBoolean("coloros_consume_anim", sColorosConsumeAnim);
                     log(Log.INFO, TAG, "coloros consume anim queried: " + sColorosConsumeAnim);
+                    broadcastConfigSnapshot(ctx);
                 }
             } catch (Throwable ignored) {
             }
         });
+    }
+
+    /**
+     * Pushes the authoritative snapshot to the source-app bridge and to
+     * SystemUI. Cheap, background-executor only, and safe to repeat: consumers
+     * treat it as "the value system_server last read successfully".
+     */
+    private static void broadcastConfigSnapshot(Context ctx) {
+        if (ctx == null) return;
+        try {
+            Intent intent = new Intent(ACTION_CONFIG_SNAPSHOT);
+            intent.putExtra("from_system_server", true);
+            intent.putExtra("trigger_position", sTriggerPosition);
+            intent.putExtra("trigger_threshold", Math.round(sTriggerThreshold * 100));
+            intent.putExtra("same_window_guard", sSameWindowGuard);
+            intent.putExtra("coloros_consume_anim", sColorosConsumeAnim);
+            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            if (Build.VERSION.SDK_INT >= 29) {
+                intent.addFlags(0x01000000); // FLAG_RECEIVER_INCLUDE_BACKGROUND
+            }
+            ctx.sendBroadcast(intent);
+            log(Log.INFO, TAG, "config snapshot pushed pos=" + sTriggerPosition
+                    + " threshold=" + Math.round(sTriggerThreshold * 100));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "config snapshot push failed: " + throwable);
+        }
     }
 
     private static int dp(int value) {

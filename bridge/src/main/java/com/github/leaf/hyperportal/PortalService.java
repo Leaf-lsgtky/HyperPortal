@@ -151,10 +151,11 @@ public class PortalService extends Service {
             int state = intent.getIntExtra("state", 0);
             float x = intent.getFloatExtra("x", -1f);
             float y = intent.getFloatExtra("y", 0f);
-            String pos = intent.getStringExtra("position");
-            if (pos != null) {
-                mTriggerPosition = pos;
-            }
+            // Never trust the per-event "position" extra: it is multiplexed from
+            // three senders (Bridge, system_server, an old system module) and any
+            // of them may be running with a stale default. handleDragStateChanged
+            // re-reads our own preferences, which are always correct here because
+            // this service lives in the app process.
             handleDragStateChanged(state, x, y);
         }
     };
@@ -163,6 +164,9 @@ public class PortalService extends Service {
     public void onCreate() {
         super.onCreate();
         PortalFileProvider.pruneCacheAsync(this, null);
+        // A fresh process loses the in-memory "SystemUI is drawing" flag, and
+        // then we would render a second overlay on top of SystemUI's one.
+        PortalFileProvider.restoreSystemUiHost(this);
         sInstance = this;
         mWindowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         mTransferDockController = new TransferDockController(this);

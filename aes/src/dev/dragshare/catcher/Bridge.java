@@ -113,6 +113,18 @@ public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
     private static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
+    private static final String ACTION_CONFIG_CHANGED =
+            "com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED";
+    /**
+     * Pushed by the system_server module, which is the only component that can
+     * always read the portal settings: the HyperPortal process is a normal
+     * background app, and HyperOS' freezer can freeze its uid at any time. A
+     * frozen uid keeps its pid but its ContentProvider is no longer resolvable
+     * for third-party callers, so getConfig() fails and everything that pulls
+     * from it silently keeps the default trigger edge.
+     */
+    private static final String ACTION_CONFIG_SNAPSHOT =
+            "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT";
     private static volatile boolean sMasterSwitch = true;
     private static volatile boolean sLandscapeTrigger = false;
     private static volatile float sDragStartX = -1f;
@@ -136,28 +148,52 @@ public final class Bridge {
         public void onReceive(Context context, Intent intent) {
             sLastConfigCheckTime = 0;
             sLastConfigFailTime = 0;
-            if (intent != null) {
-                if (intent.hasExtra("trigger_position")) {
-                    String pos = intent.getStringExtra("trigger_position");
-                    if (pos != null) {
-                        sTriggerPosition = pos;
-                    }
-                }
-                if (intent.hasExtra("trigger_threshold")) {
-                    int pct = intent.getIntExtra("trigger_threshold", 76);
-                    if (pct >= 50 && pct <= 95) {
-                        sTriggerThreshold = pct / 100.0f;
-                    }
-                }
+            boolean hadPosition = applyPushedConfig(intent);
+            // The snapshot from system_server already carries everything we
+            // need; only fall back to (possibly blocked) provider reads when the
+            // broadcast did not contain a position.
+            if (!hadPosition) {
+                refreshConfig(context);
             }
-            refreshConfig(context);
         }
     };
+
+    /**
+     * Adopts trigger position / threshold pushed over a broadcast. Returns true
+     * when the intent carried a position, i.e. the caller can trust it as the
+     * current setting.
+     */
+    private static boolean applyPushedConfig(Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        String pos = intent.getStringExtra("position");
+        if (pos == null) {
+            pos = intent.getStringExtra("trigger_position");
+        }
+        boolean hasPosition = "right".equals(pos) || "bottom".equals(pos);
+        if (hasPosition) {
+            if (!pos.equals(sTriggerPosition)) {
+                Log.i(TAG, "trigger position pushed: " + sTriggerPosition + " -> " + pos);
+            }
+            sTriggerPosition = pos;
+        }
+        int pct = intent.getIntExtra("trigger_threshold", -1);
+        if (pct >= 50 && pct <= 95) {
+            sTriggerThreshold = pct / 100.0f;
+        }
+        return hasPosition;
+    }
 
     private static void ensureConfig(Context context) {
         if (context == null) return;
         long now = SystemClock.uptimeMillis();
-        if (now - sLastConfigFailTime < 30000) {
+        // A single failed read used to lock the trigger edge to the default
+        // "bottom" for 30s. On a device whose freezer keeps HyperPortal frozen
+        // that meant *every* drag in the window used the wrong edge, which is
+        // what produced a bottom shelf for a right-edge user. Retry quickly;
+        // the push channel above covers the frozen case anyway.
+        if (now - sLastConfigFailTime < 2000) {
             return;
         }
         if (now - sLastConfigCheckTime > 5000 || sLastConfigCheckTime == 0) {
@@ -166,7 +202,8 @@ public final class Bridge {
         }
         if (!sConfigReceiverRegistered) {
             try {
-                IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+                IntentFilter filter = new IntentFilter(ACTION_CONFIG_CHANGED);
+                filter.addAction(ACTION_CONFIG_SNAPSHOT);
                 if (android.os.Build.VERSION.SDK_INT >= 33) {
                     context.registerReceiver(sConfigReceiver, filter, Context.RECEIVER_EXPORTED);
                 } else {
@@ -287,7 +324,10 @@ public final class Bridge {
                 return;
             }
             final int state = intent.getIntExtra("state", 0);
-            Log.i(TAG, "shadow receiver state=" + state);
+            // system_server sends this together with every drag-state change and
+            // knows the real trigger edge even while HyperPortal is frozen.
+            applyPushedConfig(intent);
+            Log.i(TAG, "shadow receiver state=" + state + " pos=" + sTriggerPosition);
             if (state == 0) {
                 cancelShadowMorphAnimator();
                 return;

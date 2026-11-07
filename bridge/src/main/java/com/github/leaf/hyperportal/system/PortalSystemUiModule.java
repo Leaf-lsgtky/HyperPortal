@@ -289,6 +289,8 @@ public final class PortalSystemUiModule {
         // depend on SystemUI). Views are now built lazily, config and targets
         // are prepared on sBgExecutor, and nothing on the drag path blocks.
         private static final long CONFIG_TTL_MS = 60_000L;
+        /** Last successfully read settings, so a frozen provider cannot reset us to "bottom". */
+        private static final String CONFIG_CACHE_PREFS = "hyperportal_systemui";
         private volatile boolean mViewsReady = false;
         private volatile boolean mConfigLoaded = false;
         private volatile boolean mConfigRefreshing = false;
@@ -368,10 +370,63 @@ public final class PortalSystemUiModule {
                 } catch (Throwable t) {
                     Log.w(TAG, "getConfig failed", t);
                 }
+                if (result != null) {
+                    saveCachedConfig(result);
+                } else {
+                    // HyperOS' freezer can make the HyperPortal provider
+                    // unresolvable at any moment; keep the last good snapshot so
+                    // we never fall back to the "bottom" default for a
+                    // right-edge setup.
+                    result = loadCachedConfig();
+                }
                 final Bundle snapshot = result;
                 final long cost = SystemClock.uptimeMillis() - started;
                 sHandler.post(() -> applyConfig(snapshot, cost));
             });
+        }
+
+        private Bundle loadCachedConfig() {
+            try {
+                android.content.SharedPreferences prefs =
+                        mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
+                if (!prefs.contains("trigger_position")) {
+                    return null;
+                }
+                Bundle bundle = new Bundle();
+                bundle.putString("trigger_position", prefs.getString("trigger_position", "bottom"));
+                bundle.putInt("trigger_threshold", prefs.getInt("trigger_threshold", 76));
+                bundle.putBoolean("master_switch", prefs.getBoolean("master_switch", true));
+                bundle.putBoolean("landscape_trigger", prefs.getBoolean("landscape_trigger", false));
+                bundle.putInt("edge_scroll_margin", prefs.getInt("edge_scroll_margin", 86));
+                Log.i(TAG, "config restored from cache pos=" + bundle.getString("trigger_position"));
+                return bundle;
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+
+        private void saveCachedConfig(Bundle bundle) {
+            try {
+                android.content.SharedPreferences.Editor editor =
+                        mContext.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE).edit();
+                if (bundle.containsKey("trigger_position")) {
+                    editor.putString("trigger_position", bundle.getString("trigger_position"));
+                }
+                if (bundle.containsKey("trigger_threshold")) {
+                    editor.putInt("trigger_threshold", bundle.getInt("trigger_threshold", 76));
+                }
+                if (bundle.containsKey("master_switch")) {
+                    editor.putBoolean("master_switch", bundle.getBoolean("master_switch", true));
+                }
+                if (bundle.containsKey("landscape_trigger")) {
+                    editor.putBoolean("landscape_trigger", bundle.getBoolean("landscape_trigger", false));
+                }
+                if (bundle.containsKey("edge_scroll_margin")) {
+                    editor.putInt("edge_scroll_margin", bundle.getInt("edge_scroll_margin", 86));
+                }
+                editor.apply();
+            } catch (Throwable ignored) {
+            }
         }
 
         private void applyConfig(Bundle result, long cost) {
@@ -1252,6 +1307,7 @@ public final class PortalSystemUiModule {
             filter.addAction("com.github.leaf.hyperportal.DRAG_STATE_CHANGED");
             filter.addAction(ACTION_SHOW);
             filter.addAction("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+            filter.addAction("com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT");
             filter.addAction(TransferDockDragGuard.ACTION_STATE);
             filter.addAction("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK");
             filter.addAction("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
@@ -1314,6 +1370,13 @@ public final class PortalSystemUiModule {
          * is never stale for more than one broadcast. No provider call.
          */
         private void applyConfigBroadcast(Intent intent) {
+            boolean rebuildTargets = true;
+            if (intent.hasExtra("from_system_server")) {
+                // The snapshot is re-pushed at every drag start; only the trigger
+                // settings changed there, so rebuilding the 100+ entry shelf
+                // would be pure jank on the drag path.
+                rebuildTargets = false;
+            }
             if (intent.hasExtra("master_switch")) {
                 mMasterEnabled = intent.getBooleanExtra("master_switch", mMasterEnabled);
             }
@@ -1336,13 +1399,16 @@ public final class PortalSystemUiModule {
             Log.i(TAG, "config broadcast applied master=" + mMasterEnabled
                     + " threshold=" + mTriggerThreshold + " pos=" + mTriggerPosition);
             // Target limit / pin / hidden changes need a rebuilt shelf.
-            requestTargetsAsync();
+            if (rebuildTargets) {
+                requestTargetsAsync();
+            }
         }
 
         private void handleIntent(Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
-            if ("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED".equals(action)) {
+            if ("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED".equals(action)
+                    || "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT".equals(action)) {
                 applyConfigBroadcast(intent);
                 return;
             }
@@ -1394,10 +1460,13 @@ public final class PortalSystemUiModule {
                 int state = intent.getIntExtra("state", 0);
                 float x = intent.getFloatExtra("x", -1f);
                 float y = intent.getFloatExtra("y", 0f);
-                String pos = intent.getStringExtra("position");
-                if (pos != null) {
-                    mTriggerPosition = pos;
-                }
+                // Deliberately ignores the per-event "position" extra: three
+                // processes send this broadcast and only one of them can read
+                // the real settings (the other two fall back to "bottom" when
+                // the HyperPortal provider is frozen). Overwriting our own
+                // config here made the right shelf flip to a bottom row
+                // mid-drag. Trigger edge comes from applyConfig /
+                // applyConfigBroadcast only.
                 if (state > 0 && !isMasterEnabled()) {
                     handleDragStateChanged(0, -1f, 0f);
                     return;
