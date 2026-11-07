@@ -111,6 +111,8 @@ public final class PortalSystemUiModule {
     private static final int MAX_AES_ENTRIES = 16;
     private static final int MAX_CACHED_FILES = 5;
     private static final long MAX_CACHE_AGE_MS = 12L * 60L * 60L * 1000L;
+    /** Never evict a file that a share/drag may still be reading. */
+    private static final long CACHE_PROTECT_MS = 3L * 60L * 1000L;
     private static final int TYPE_NAVIGATION_BAR_PANEL = 2024;
 
     private static final String[] COMMON_SHARE_PACKAGES = new String[]{
@@ -149,6 +151,8 @@ public final class PortalSystemUiModule {
 
     private static final Set<String> sHookedProviderClasses =
             java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private static volatile String sLastAesPackage;
+    private static volatile long sLastAesWriteAt;
     private static volatile XposedInterface sXposed;
     private static volatile Context sSysUiContext;
     private static volatile SystemUiOverlay sOverlay;
@@ -399,6 +403,9 @@ public final class PortalSystemUiModule {
                 return mc;
             }
             if ("__status__".equals(rawName)) {
+                if (!isTrustedStatusCaller(ctx, android.os.Binder.getCallingUid())) {
+                    return null;
+                }
                 android.database.MatrixCursor mc = new android.database.MatrixCursor(new String[]{"key"});
                 mc.setExtras(buildStatusBundle(ctx));
                 return mc;
@@ -516,10 +523,17 @@ public final class PortalSystemUiModule {
         survivors.sort((a, b) -> Long.compare(b.lastModified(), a.lastModified()));
         for (int i = MAX_CACHED_FILES; i < survivors.size(); i++) {
             File victim = survivors.get(i);
-            if (!victim.equals(keep)) {
-                //noinspection ResultOfMethodCallIgnored
-                victim.delete();
+            if (victim.equals(keep)) {
+                continue;
             }
+            // A target app may still be streaming a file that was just
+            // staged; the old provider protected the last 3 minutes and the
+            // SystemUI copy must do the same.
+            if (now - victim.lastModified() < CACHE_PROTECT_MS) {
+                continue;
+            }
+            //noinspection ResultOfMethodCallIgnored
+            victim.delete();
         }
     }
 
@@ -545,6 +559,27 @@ public final class PortalSystemUiModule {
         }
     }
 
+    private static boolean isTrustedStatusCaller(Context context, int uid) {
+        if (context == null || uid <= 0) {
+            return false;
+        }
+        if (uid == android.os.Process.SYSTEM_UID || uid == android.os.Process.myUid()) {
+            return true;
+        }
+        try {
+            String[] packages = context.getPackageManager().getPackagesForUid(uid);
+            if (packages != null) {
+                for (String pkg : packages) {
+                    if (PortalShareContract.PORTAL_PACKAGE.equals(pkg)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     private static void recordAesHandshakeInSysUi(Context context, int callingUid) {
         if (context == null || callingUid <= 0
                 || callingUid == android.os.Process.SYSTEM_UID
@@ -561,6 +596,10 @@ public final class PortalSystemUiModule {
                     || "com.github.leaf.hyperportal".equals(pkg)) {
                 return;
             }
+            long now = System.currentTimeMillis();
+            if (pkg.equals(sLastAesPackage) && now - sLastAesWriteAt < 60_000L) {
+                return;
+            }
             CharSequence labelCs = pkg;
             try {
                 android.content.pm.ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
@@ -571,7 +610,6 @@ public final class PortalSystemUiModule {
             } catch (Throwable ignored) {
             }
             String safeLabel = labelCs.toString().replace('|', ' ').replace('\n', ' ').trim();
-            long now = System.currentTimeMillis();
             android.content.SharedPreferences prefs =
                     context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
             String raw = prefs.getString(KEY_AES_ENTRIES, "");
@@ -588,6 +626,8 @@ public final class PortalSystemUiModule {
                 }
             }
             prefs.edit().putString(KEY_AES_ENTRIES, sb.toString()).apply();
+            sLastAesPackage = pkg;
+            sLastAesWriteAt = now;
         } catch (Throwable ignored) {
         }
     }
@@ -641,7 +681,7 @@ public final class PortalSystemUiModule {
             bundle.putStringArrayList("target_hidden",
                     splitCsvToList(prefs.getString("target_hidden", "")));
             bundle.putBoolean("deduplicate_app_targets",
-                    prefs.getBoolean("deduplicate_app_targets", false));
+                    prefs.getBoolean("deduplicate_app_targets", true));
             bundle.putBoolean("enable_qr_scan", prefs.getBoolean("enable_qr_scan", true));
             bundle.putString("target_usage", prefs.getString("target_usage", ""));
         } catch (Throwable ignored) {
@@ -715,6 +755,11 @@ public final class PortalSystemUiModule {
         }
         sBgExecutor.execute(() -> {
             ensureProviderHooksForContext(context);
+            // The home page reads __status__ (and the AES handshake log) from
+            // SystemUI's FileProvider. Grant this once at startup: the earlier
+            // on-demand grants only covered apps that had staged a drag file,
+            // so a fresh boot with text-only drags showed "not handshaken".
+            grantIncomingPrefixToPackage(context, PortalShareContract.PORTAL_PACKAGE);
             Log.i(TAG, "SystemUiOverlay attached and listening for drag events!");
         });
     }
@@ -739,6 +784,7 @@ public final class PortalSystemUiModule {
         private Bitmap mBitmap;
         private Uri mImageUri;
         private String mImageMime;
+        private String mImageFileName;
         private volatile String mImageUrl;
         private float mLastDropX = -1f;
         private float mLastDropY = -1f;
@@ -843,6 +889,9 @@ public final class PortalSystemUiModule {
                         Log.w(TAG, "initial getConfig fallback failed", t);
                     }
                     if (result != null) {
+                        // The app provider returns the authoritative settings
+                        // but does not carry SystemUI's cache marker itself.
+                        result.putBoolean("config_ready", true);
                         saveCachedConfig(result);
                     } else {
                         result = getCachedConfigBundle(mContext);
@@ -923,7 +972,7 @@ public final class PortalSystemUiModule {
                 }
                 if (bundle.containsKey("deduplicate_app_targets")) {
                     editor.putBoolean("deduplicate_app_targets",
-                            bundle.getBoolean("deduplicate_app_targets", false));
+                            bundle.getBoolean("deduplicate_app_targets", true));
                 }
                 if (bundle.containsKey("enable_qr_scan")) {
                     editor.putBoolean("enable_qr_scan",
@@ -952,6 +1001,13 @@ public final class PortalSystemUiModule {
             mConfigFetchedAt = SystemClock.uptimeMillis();
             if (result == null) {
                 Log.w(TAG, "config unavailable after " + cost + "ms, keeping defaults");
+                return;
+            }
+            if (!result.getBoolean("config_ready", false)) {
+                // A cache that has never received a full app snapshot only
+                // contains defaults. Applying it here would overwrite the
+                // trigger edge / master switch pushed by system_server.
+                Log.w(TAG, "config cache not ready after " + cost + "ms, keeping current values");
                 return;
             }
             mConfigLoaded = true;
@@ -1069,6 +1125,10 @@ public final class PortalSystemUiModule {
 
         private DropAction createTargetAction(final ShareTargetEntry entry) {
             return (ctx, text, bmp, uri) -> {
+                // Snapshot payload metadata before any worker runs: ACTION_DROP
+                // clears mText/mImage* immediately after onDrop returns.
+                final String imageMime = mImageMime;
+                final String imageFileName = mImageFileName;
                 if (entry.kind == ShareTargetEntry.KIND_COPY) {
                     if (bmp != null || uri != null) {
                         copyImageToClipboard(ctx, bmp, uri);
@@ -1081,11 +1141,15 @@ public final class PortalSystemUiModule {
                     return;
                 }
                 if (entry.kind == ShareTargetEntry.KIND_TRANSFER_DOCK) {
-                    saveToTransferDock(ctx, text, bmp, uri);
+                    saveToTransferDock(ctx, text, bmp, uri, imageMime, imageFileName);
                     return;
                 }
                 if (entry.kind == ShareTargetEntry.KIND_SAVE) {
-                    saveImageToGallery(ctx, bmp, uri);
+                    if (!mGallerySavedThisDrag) {
+                        mGallerySavedThisDrag = true;
+                        sBgExecutor.execute(() ->
+                                saveImageToGallery(ctx, text, imageMime, imageFileName, bmp, uri));
+                    }
                     return;
                 }
                 if (entry.kind == ShareTargetEntry.KIND_SEGMENT) {
@@ -1311,32 +1375,47 @@ public final class PortalSystemUiModule {
         }
 
         private void openImageTextSegmentation(Context ctx, Bitmap bitmap, Uri uri) {
-            Bitmap source = bitmap;
-            if (source == null && uri != null) {
-                try (InputStream input = ctx.getContentResolver().openInputStream(uri)) {
-                    source = BitmapFactory.decodeStream(input);
-                } catch (Throwable t) {
-                    Log.w(TAG, "decode OCR image failed uri=" + uri, t);
+            // The bitmap extra is only a 360px drag preview. OCR needs the
+            // full-resolution staged image, so try the URI first and use the
+            // preview only when no URI arrived. Decode/scale on a worker; a
+            // 4K image decoded on SystemUI's main thread can ANR the device.
+            sBgExecutor.execute(() -> {
+                Bitmap source = null;
+                if (uri != null) {
+                    try (InputStream input = ctx.getContentResolver().openInputStream(uri)) {
+                        source = BitmapFactory.decodeStream(input);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "decode OCR image failed uri=" + uri, t);
+                    }
                 }
-            }
-            if (source == null || source.isRecycled()) {
-                toast("无法读取图片");
-                return;
-            }
-            source = scaleForOcr(source);
-            toast("正在识别图片文字…");
-            AicrOcrClient.recognize(ctx, source, (text, error) -> {
-                if (error != null) {
-                    Log.w(TAG, "image OCR failed", error);
-                    String message = error.getMessage();
-                    toast(TextUtils.isEmpty(message) ? "图片文字识别失败" : message);
+                if (source == null) {
+                    source = bitmap;
+                }
+                if (source == null || source.isRecycled()) {
+                    toastAsync("无法读取图片");
                     return;
                 }
-                if (TextUtils.isEmpty(text)) {
-                    toast("图片中没有识别到文字");
-                    return;
+                Bitmap scaled = scaleForOcr(source);
+                if (scaled != source && source != bitmap) {
+                    source.recycle();
                 }
-                openTextSegmentation(ctx, text);
+                final Bitmap ocrSource = scaled;
+                sHandler.post(() -> {
+                    toast("正在识别图片文字…");
+                    AicrOcrClient.recognize(ctx, ocrSource, (text, error) -> {
+                        if (error != null) {
+                            Log.w(TAG, "image OCR failed", error);
+                            String message = error.getMessage();
+                            toast(TextUtils.isEmpty(message) ? "图片文字识别失败" : message);
+                            return;
+                        }
+                        if (TextUtils.isEmpty(text)) {
+                            toast("图片中没有识别到文字");
+                            return;
+                        }
+                        openTextSegmentation(ctx, text);
+                    });
+                });
             });
         }
 
@@ -1375,72 +1454,71 @@ public final class PortalSystemUiModule {
             }
         }
 
-        private void saveToTransferDock(Context ctx, String text, Bitmap bmp, Uri uri) {
-            try {
-                TransferDockManager mgr = TransferDockManager.getInstance(ctx);
-                TransferDockItem item = null;
-                if (bmp != null) {
-                    item = mgr.saveBitmap(bmp, "dragshare");
-                } else if (uri != null) {
-                    Bitmap decoded = null;
-                    try (java.io.InputStream is = ctx.getContentResolver().openInputStream(uri)) {
-                        if (is != null) {
-                            decoded = BitmapFactory.decodeStream(is);
+        private void saveToTransferDock(Context ctx, String text, Bitmap bmp, Uri uri,
+                                        String mime, String fileName) {
+            // Copying the original bytes and generating the thumbnail is disk
+            // I/O; never do it on SystemUI's input-dispatch thread.
+            sBgExecutor.execute(() -> {
+                try {
+                    TransferDockManager mgr = TransferDockManager.getInstance(ctx);
+                    TransferDockItem item = null;
+                    if (uri != null) {
+                        // Prefer the staged original over the 360px preview
+                        // bitmap: this keeps full resolution and preserves
+                        // animated GIF / video files instead of a still frame.
+                        String displayName = !TextUtils.isEmpty(fileName)
+                                ? fileName
+                                : (!TextUtils.isEmpty(text) && text.contains(".") ? text : "文件");
+                        item = mgr.saveFile(uri, mime, displayName, "dragshare");
+                    } else if (bmp != null) {
+                        item = mgr.saveBitmap(bmp, "dragshare");
+                    } else if (!TextUtils.isEmpty(text)) {
+                        item = mgr.saveText(text, "dragshare");
+                    }
+                    final TransferDockItem result = item;
+                    sHandler.post(() -> {
+                        if (result != null) {
+                            if (mTransferDockController == null) {
+                                mTransferDockController = new TransferDockController(ctx);
+                            }
+                            mTransferDockController.showCapsule(result);
+                            toast("已存入中转站");
+                            Log.i(TAG, "saveToTransferDock succeeded, capsule shown: " + result.getTitle());
+                        } else {
+                            toast("存入中转站失败: 无有效内容");
+                            Log.w(TAG, "saveToTransferDock failed: no content");
                         }
-                    } catch (Throwable ignored) {
-                    }
-                    if (decoded != null) {
-                        item = mgr.saveBitmap(decoded, "dragshare");
-                    } else {
-                        String displayName = !TextUtils.isEmpty(text) && text.contains(".") ? text : "文件";
-                        item = mgr.saveFile(uri, mImageMime, displayName, "dragshare");
-                    }
-                } else if (!TextUtils.isEmpty(text)) {
-                    item = mgr.saveText(text, "dragshare");
+                    });
+                } catch (Throwable t) {
+                    Log.w(TAG, "saveToTransferDock failed", t);
+                    toastAsync("存入中转站失败");
                 }
-
-                if (item != null) {
-                    if (mTransferDockController == null) {
-                        mTransferDockController = new TransferDockController(ctx);
-                    }
-                    mTransferDockController.showCapsule(item);
-                    toast("已存入中转站");
-                    Log.i(TAG, "saveToTransferDock succeeded, capsule shown: " + item.getTitle());
-                } else {
-                    toast("存入中转站失败: 无有效内容");
-                    Log.w(TAG, "saveToTransferDock failed: no content");
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "saveToTransferDock failed", t);
-                toast("存入中转站失败");
-            }
+            });
         }
 
-        private void saveImageToGallery(Context ctx, Bitmap bmp, Uri uri) {
-            if (mGallerySavedThisDrag) {
-                Log.i(TAG, "saveImageToGallery skipped: already saved once for this drag");
-                return;
-            }
-            mGallerySavedThisDrag = true;
+        private void saveImageToGallery(Context ctx, String text, String mime,
+                                        String fileName, Bitmap bmp, Uri uri) {
             try {
                 String extension = "png";
-                String mimeType = !TextUtils.isEmpty(mImageMime) ? mImageMime : "image/png";
+                String mimeType = !TextUtils.isEmpty(mime) ? mime : "image/png";
                 if (uri != null) {
                     String path = uri.getPath();
                     if (path != null) {
                         int dot = path.lastIndexOf('.');
                         if (dot >= 0) {
                             extension = path.substring(dot + 1).toLowerCase(Locale.US);
-                            String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
-                            if (!TextUtils.isEmpty(mime)) {
-                                mimeType = mime;
+                            String detectedMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+                            if (!TextUtils.isEmpty(detectedMime)) {
+                                mimeType = detectedMime;
                             }
                         }
                     }
                 }
                 boolean isImage = mimeType.startsWith("image/");
-                String displayName = !TextUtils.isEmpty(mText) && mText.contains(".")
-                        ? mText : "HyperPortal_" + System.currentTimeMillis() + "." + extension;
+                String displayName = !TextUtils.isEmpty(fileName)
+                        ? fileName
+                        : (!TextUtils.isEmpty(text) && text.contains(".")
+                        ? text : "HyperPortal_" + System.currentTimeMillis() + "." + extension);
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
                 values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
@@ -1491,7 +1569,7 @@ public final class PortalSystemUiModule {
                             ctx.getContentResolver().delete(inserted, null, null);
                         } catch (Throwable ignored) {
                         }
-                        toast("保存失败");
+                        toastAsync("保存失败");
                         return;
                     }
                     if (Build.VERSION.SDK_INT >= 29) {
@@ -1500,14 +1578,14 @@ public final class PortalSystemUiModule {
                         ctx.getContentResolver().update(inserted, values, null, null);
                     }
                     if (isImage) {
-                        toast("原图已保存至相册 (Pictures/HyperPortal)");
+                        toastAsync("原图已保存至相册 (Pictures/HyperPortal)");
                     } else {
-                        toast("文件已保存至下载目录 (Download/HyperPortal)");
+                        toastAsync("文件已保存至下载目录 (Download/HyperPortal)");
                     }
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "saveImageToGallery failed", t);
-                toast("保存失败");
+                toastAsync("保存失败");
             }
         }
 
@@ -1581,6 +1659,10 @@ public final class PortalSystemUiModule {
                         mImageUri = stagedUri;
                         mImageMime = mime != null && mime.startsWith("image/") ? mime : "image/*";
                         requestTargetsAsync();
+                        // ACTION_SHOW already ran triggerQrScanAsync() while
+                        // mImageUri was still null; rescan now that the URL
+                        // image is actually staged.
+                        triggerQrScanAsync();
                         Log.i(TAG, "downloadImageAsync staged " + staged.getName()
                                 + " " + staged.length() + " bytes");
                     });
@@ -1962,7 +2044,7 @@ public final class PortalSystemUiModule {
                         String raw = prefs.getString("target_usage", "");
                         if (!TextUtils.isEmpty(raw)) {
                             for (String line : raw.split("\n")) {
-                                int split = line.lastIndexOf('=');
+                                int split = Math.max(line.lastIndexOf('='), line.lastIndexOf(':'));
                                 if (split <= 0) continue;
                                 try {
                                     usage.put(line.substring(0, split),
@@ -1989,6 +2071,10 @@ public final class PortalSystemUiModule {
             Toast.makeText(mContext, msg, Toast.LENGTH_SHORT).show();
         }
 
+        private void toastAsync(String msg) {
+            sHandler.post(() -> toast(msg));
+        }
+
         public void registerReceivers() {
             IntentFilter filter = new IntentFilter();
             filter.addAction(ACTION_DRAG_STATE);
@@ -2007,7 +2093,8 @@ public final class PortalSystemUiModule {
                     @Override
                     public void onReceive(Context context, Intent intent) {
                         try {
-                            handleIntent(intent);
+                            int senderUid = getSentFromUid();
+                            handleIntent(intent, senderUid);
                         } catch (Throwable t) {
                             Log.e(TAG, "handleIntent failed in SystemUI", t);
                         }
@@ -2018,13 +2105,36 @@ public final class PortalSystemUiModule {
                     @Override
                     public void onReceive(Context context, Intent intent) {
                         try {
-                            handleIntent(intent);
+                            handleIntent(intent, -1);
                         } catch (Throwable t) {
                             Log.e(TAG, "handleIntent failed in SystemUI", t);
                         }
                     }
                 }, filter);
             }
+        }
+
+        private boolean isSamePackageUid(int uid, String pkg) {
+            if (uid <= 0) {
+                // No sender information (e.g. a system-injected broadcast).
+                return true;
+            }
+            if (uid == android.os.Process.SYSTEM_UID
+                    || uid == android.os.Process.myUid()) {
+                return true;
+            }
+            try {
+                String[] packages = mContext.getPackageManager().getPackagesForUid(uid);
+                if (packages != null) {
+                    for (String candidate : packages) {
+                        if (pkg.equals(candidate)) {
+                            return true;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            return false;
         }
 
         private boolean isLandscape() {
@@ -2071,7 +2181,10 @@ public final class PortalSystemUiModule {
                 // A system_server snapshot only carries trigger/guard/anim
                 // fields and may be built from defaults before SystemUI has
                 // read the app config. Never let it become the cache.
-                saveCachedConfig(extras);
+                // SharedPreferences may hit disk on first load; keep it off
+                // the broadcast/input thread.
+                final Bundle cacheSnapshot = new Bundle(extras);
+                sBgExecutor.execute(() -> saveCachedConfig(cacheSnapshot));
             }
             if (intent.hasExtra("master_switch")) {
                 mMasterEnabled = intent.getBooleanExtra("master_switch", mMasterEnabled);
@@ -2103,6 +2216,10 @@ public final class PortalSystemUiModule {
         }
 
         private void handleIntent(Intent intent) {
+            handleIntent(intent, -1);
+        }
+
+        private void handleIntent(Intent intent, int senderUid) {
             if (intent == null) return;
             String action = intent.getAction();
             if (ACTION_REQUEST_GRANT.equals(action)) {
@@ -2110,9 +2227,17 @@ public final class PortalSystemUiModule {
                 if (TextUtils.isEmpty(pkg)) {
                     pkg = intent.getStringExtra("target_package");
                 }
-                if (!TextUtils.isEmpty(pkg)) {
-                    grantIncomingPrefixToPackage(mContext, pkg);
+                if (TextUtils.isEmpty(pkg)) {
+                    return;
                 }
+                // This receiver is exported. Only grant the prefix to the
+                // package that actually sent the request; otherwise any app
+                // could hand read/write to an arbitrary package name.
+                if (!isSamePackageUid(senderUid, pkg)) {
+                    Log.w(TAG, "rejecting grant request uid=" + senderUid + " pkg=" + pkg);
+                    return;
+                }
+                grantIncomingPrefixToPackage(mContext, pkg);
                 return;
             }
             if ("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED".equals(action)
@@ -2138,7 +2263,11 @@ public final class PortalSystemUiModule {
                 String text = intent.getStringExtra("text");
                 String uriStr = intent.getStringExtra("uri");
                 Uri uri = uriStr != null ? Uri.parse(uriStr) : null;
-                saveToTransferDock(mContext, text, null, uri);
+                String mime = intent.getStringExtra("mimeType");
+                if (TextUtils.isEmpty(mime)) {
+                    mime = intent.getStringExtra("imageMimeType");
+                }
+                saveToTransferDock(mContext, text, null, uri, mime, null);
                 return;
             }
             if (Intent.ACTION_USER_UNLOCKED.equals(action) || Intent.ACTION_BOOT_COMPLETED.equals(action)) {
@@ -2155,6 +2284,7 @@ public final class PortalSystemUiModule {
                 mBitmap = null;
                 mImageUri = null;
                 mImageMime = null;
+                mImageFileName = intent.getStringExtra("imageFileName");
                 mImageUrl = intent.getStringExtra("imageUrl");
                 Object bmp = intent.getParcelableExtra("viewBitmap");
                 if (bmp instanceof Bitmap) {
@@ -2268,6 +2398,7 @@ public final class PortalSystemUiModule {
                 mBitmap = null;
                 mImageUri = null;
                 mImageMime = null;
+                mImageFileName = null;
                 mImageUrl = null;
                 return;
             }

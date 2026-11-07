@@ -108,7 +108,10 @@ public final class TargetConfig {
         String usageText = bundle.getString("target_usage", "");
         if (!TextUtils.isEmpty(usageText)) {
             for (String item : usageText.split("\\n")) {
-                int split = item.lastIndexOf('=');
+                // Older SystemUI caches used "key:count"; current writes use
+                // "key=count". Keep both readable so a one-time upgrade does
+                // not wipe the user's target-affinity counters.
+                int split = Math.max(item.lastIndexOf('='), item.lastIndexOf(':'));
                 if (split <= 0) {
                     continue;
                 }

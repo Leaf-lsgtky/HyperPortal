@@ -219,24 +219,36 @@ public final class Bridge {
     private static void refreshConfig(Context context) {
         try {
             Bundle res = null;
+            boolean authoritative = false;
             try (android.database.Cursor cursor = context.getContentResolver().query(
                     Uri.parse(SYSUI_INCOMING_PREFIX + "__config__"),
                     null, null, null, null)) {
                 if (cursor != null) {
-                    res = cursor.getExtras();
+                    Bundle sysUiConfig = cursor.getExtras();
+                    // SystemUI serves a complete bundle of defaults even when its
+                    // cache has never been populated. config_ready=false means
+                    // "these are not the user's settings"; never apply them.
+                    if (sysUiConfig != null && sysUiConfig.getBoolean("config_ready", false)) {
+                        res = sysUiConfig;
+                        authoritative = true;
+                    }
                 }
             } catch (SecurityException sec) {
                 requestSystemUiGrant(context);
             } catch (Throwable ignored) {
             }
-            if (res == null || res.isEmpty()) {
+            if (!authoritative) {
                 try {
                     Uri uri = Uri.parse("content://com.github.leaf.hyperportal.files");
-                    res = context.getContentResolver().call(uri, "getConfig", null, null);
+                    Bundle appConfig = context.getContentResolver().call(uri, "getConfig", null, null);
+                    if (appConfig != null && !appConfig.isEmpty()) {
+                        res = appConfig;
+                        authoritative = true;
+                    }
                 } catch (Throwable ignored) {
                 }
             }
-            if (res != null) {
+            if (res != null && authoritative) {
                 sMasterSwitch = res.getBoolean("master_switch", true);
                 sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
                 sLongPressDurationMs = res.getInt("long_press_duration", 800);
@@ -7077,7 +7089,12 @@ public final class Bridge {
             }
             Object resultMap = getField(content, "mResultMap");
             Object catchType = getField(content, "mCatchType");
-            if (!Integer.valueOf(2).equals(catchType)) {
+            // AES reports the outer Content.mCatchType as 4 for a long-press
+            // trigger; the per-payload Bundle inside mResultMap carries the
+            // actual modality (1 = text, 2 = image). The old check for 2 here
+            // rejected every normal long press, so Bridge.deliverContent never
+            // ran and no drag shadow was started.
+            if (!Integer.valueOf(4).equals(catchType) && !Integer.valueOf(2).equals(catchType)) {
                 Log.d(TAG, "deliverContent ignored (non-long-press catchType=" + catchType + ")");
                 return;
             }

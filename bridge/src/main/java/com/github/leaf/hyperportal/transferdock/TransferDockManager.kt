@@ -144,19 +144,80 @@ class TransferDockManager private constructor(private val context: Context) {
 
     fun saveFile(uri: Uri, mimeType: String?, fileName: String?, sourcePkg: String?): TransferDockItem {
         val id = UUID.randomUUID().toString()
+        val mime = mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
         val displayName = fileName ?: "文件"
         val timeStr = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val extension = extensionForMime(mime)
+        val target = File(mediaDir, "file_${id}.$extension")
+        // SystemUI staging files live in a small LRU cache. Copy the original
+        // bytes into the dock's own media dir; storing the content:// URI here
+        // made the item disappear after a few more drags pruned the cache.
+        var storedPath: String? = null
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(target).use { output -> input.copyTo(output) }
+            }
+            if (target.length() > 0) {
+                storedPath = target.absolutePath
+            } else {
+                target.delete()
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to copy transfer dock file", e)
+            target.delete()
+        }
+        val isImage = mime.startsWith("image/")
+        val thumbnail = if (isImage && storedPath != null) {
+            createThumbnail(File(storedPath), id)
+        } else {
+            null
+        }
         val item = TransferDockItem(
             id = id,
-            type = TransferDockItem.TYPE_FILE,
-            uriString = uri.toString(),
+            type = if (isImage) TransferDockItem.TYPE_IMAGE else TransferDockItem.TYPE_FILE,
+            uriString = if (storedPath == null) uri.toString() else null,
+            filePath = storedPath,
             title = displayName,
             detail = timeStr,
-            mimeType = mimeType ?: "*/*",
+            mimeType = mime,
+            thumbnailPath = thumbnail,
             sourcePackage = sourcePkg
         )
         addItem(item)
         return item
+    }
+
+    private fun createThumbnail(source: File, id: String): String? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(source.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (bounds.outWidth / sample > 640 || bounds.outHeight / sample > 640) {
+                sample *= 2
+            }
+            val decoded = BitmapFactory.decodeFile(
+                source.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            ) ?: return null
+            val maxThumb = 320
+            val scale = Math.min(1.0f, maxThumb.toFloat() / Math.max(decoded.width, decoded.height))
+            val thumbW = Math.max(1, (decoded.width * scale).toInt())
+            val thumbH = Math.max(1, (decoded.height * scale).toInt())
+            val thumb = Bitmap.createScaledBitmap(decoded, thumbW, thumbH, true)
+            val file = File(mediaDir, "thumb_${id}.jpg")
+            FileOutputStream(file).use { out ->
+                thumb.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            if (thumb !== decoded) {
+                thumb.recycle()
+            }
+            decoded.recycle()
+            file.absolutePath
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to create transfer dock thumbnail", e)
+            null
+        }
     }
 
     private fun addItem(item: TransferDockItem) {

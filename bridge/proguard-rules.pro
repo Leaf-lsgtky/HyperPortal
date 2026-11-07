@@ -12,8 +12,6 @@
 # Android components resolved by name from the merged manifest or from explicit
 # ComponentName strings (PortalShareContract / BigBangContract).
 -keep class com.github.leaf.hyperportal.HyperPortalApplication { *; }
--keep class com.github.leaf.hyperportal.PortalService { *; }
--keep class com.github.leaf.hyperportal.PortalReceiver { *; }
 -keep class com.github.leaf.hyperportal.PortalFileProvider { *; }
 -keep class com.github.leaf.hyperportal.ShareProxyActivity { *; }
 -keep class com.github.leaf.hyperportal.ui.MainActivity { *; }

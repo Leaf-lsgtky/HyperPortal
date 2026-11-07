@@ -357,12 +357,39 @@ object HyperPortalPreferences {
         return isAdded
     }
 
+    /**
+     * Refreshes SystemUI's cache without waking every AES-enabled app.
+     *
+     * The home page calls this on every resume. notifyChanged() also sends the
+     * global ACTION_CONFIG_CHANGED broadcast so every patched app re-reads the
+     * config; using it here produced a broadcast/query storm (and a duplicate
+     * target rebuild in SystemUI) on every status refresh.
+     */
     fun syncToSystemUi(context: Context) {
-        notifyChanged(context)
+        try {
+            val intent = buildConfigIntent(context) ?: return
+            intent.setPackage("com.android.systemui")
+            context.sendBroadcast(intent)
+        } catch (_: Throwable) {
+        }
     }
 
     private fun notifyChanged(context: Context) {
         try {
+            val intent = buildConfigIntent(context) ?: return
+            context.sendBroadcast(intent)
+            try {
+                val sysUiIntent = Intent(intent)
+                sysUiIntent.setPackage("com.android.systemui")
+                context.sendBroadcast(sysUiIntent)
+            } catch (_: Throwable) {
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun buildConfigIntent(context: Context): Intent? {
+        return try {
             val cfg = getConfig(context)
             val intent = Intent(ACTION_CONFIG_CHANGED)
             intent.putExtra(KEY_MASTER_SWITCH, cfg.masterSwitch)
@@ -382,14 +409,9 @@ object HyperPortalPreferences {
             intent.putStringArrayListExtra("target_order", ArrayList(cfg.pinnedTargetOrder))
             intent.putStringArrayListExtra("target_hidden", ArrayList(cfg.hiddenTargetKeys))
             intent.putExtra("target_usage", cfg.targetUsage.entries.joinToString("\n") { "${it.key}=${it.value}" })
-            context.sendBroadcast(intent)
-            try {
-                val sysUiIntent = Intent(intent)
-                sysUiIntent.setPackage("com.android.systemui")
-                context.sendBroadcast(sysUiIntent)
-            } catch (_: Throwable) {
-            }
+            intent
         } catch (_: Throwable) {
+            null
         }
     }
 }
