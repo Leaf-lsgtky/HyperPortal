@@ -435,7 +435,7 @@ public final class Bridge {
 
     static {
         try {
-            Log.i(TAG, "Bridge loaded v44 pid=" + android.os.Process.myPid()
+            Log.i(TAG, "Bridge loaded v45 pid=" + android.os.Process.myPid()
                     + " uid=" + android.os.Process.myUid()
                     + " (classes2.dex)");
         } catch (Throwable ignored) {
@@ -629,6 +629,15 @@ public final class Bridge {
             View touchTarget = findDeepTouchView(root, sDownRawX, sDownRawY);
             if (touchTarget == null) {
                 touchTarget = root;
+            }
+            // "按住 说话" starts WeChat's voice recorder on touch-down. A
+            // portal long-press here would cancel the recorder and send the
+            // voice clip as soon as the finger moves, so leave the control
+            // entirely to WeChat.
+            if (isVoiceRecordControl(touchTarget)) {
+                Log.i(TAG, "customLongPress: skip voice record control");
+                sGestureState.set(STATE_PROCESSED);
+                return;
             }
 
             Bundle content = preExtract(touchTarget, 3, false);
@@ -1821,6 +1830,14 @@ public final class Bridge {
             Object candidate = findFileCandidate(view);
             if (candidate == null) {
                 String remoteUrl = findWeiboOriginalUrl(view);
+                if (remoteUrl == null) {
+                    // Fresco / SimpleDraweeView stores the original request URI
+                    // several objects deep instead of in a view field. Lofter
+                    // is the common case: getDrawable() only exposes the
+                    // 254x360 thumbnail, while the ImageRequest still knows the
+                    // full-size source URL.
+                    remoteUrl = findRemoteImageUrl(view);
+                }
                 if (remoteUrl != null) {
                     Bundle bundle = new Bundle();
                     bundle.putString("imageUrl", remoteUrl);
@@ -1958,6 +1975,78 @@ public final class Bridge {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /**
+     * Fresco's SimpleDraweeView does not keep the source Uri in a direct
+     * field; it lives in DraweeHolder -> controller -> ImageRequest. A
+     * bounded identity-walk recovers it without linking against Fresco.
+     */
+    private static String findRemoteImageUrl(View view) {
+        if (view == null || !isImageLikeView(view)) {
+            return null;
+        }
+        try {
+            return findRemoteUrlInObject(view, 0,
+                    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static String findRemoteUrlInObject(Object object, int depth,
+                                                java.util.Set<Object> seen) {
+        if (object == null || depth > 6 || seen.contains(object)) {
+            return null;
+        }
+        if (object instanceof Uri) {
+            String value = object.toString();
+            return isRemoteHttpUrl(value) ? value : null;
+        }
+        if (object instanceof String) {
+            String value = (String) object;
+            return isRemoteHttpUrl(value) ? value : null;
+        }
+        Class<?> type = object.getClass();
+        if (type.isPrimitive() || type.isArray() || type.getName().startsWith("java.")
+                || type.getName().startsWith("android.content.")
+                || type.getName().startsWith("android.content.res.")
+                || type.getName().startsWith("android.view.")) {
+            return null;
+        }
+        seen.add(object);
+        for (Class<?> current = type; current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                try {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                        continue;
+                    }
+                    String name = field.getName().toLowerCase(Locale.US);
+                    Class<?> fieldType = field.getType();
+                    boolean direct = fieldType == Uri.class || fieldType == String.class;
+                    boolean nested = name.contains("drawee") || name.contains("holder")
+                            || name.contains("controller") || name.contains("request")
+                            || name.contains("datasource") || name.contains("imageinfo")
+                            || name.contains("source") || name.contains("imageuri")
+                            || name.contains("url");
+                    if (!direct && !nested) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    String found = findRemoteUrlInObject(field.get(object), depth + 1, seen);
+                    if (found != null) {
+                        return found;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isRemoteHttpUrl(String value) {
+        return value != null && (value.startsWith("http://") || value.startsWith("https://"));
     }
 
     private static Object findFileCandidate(View view) {
@@ -3989,13 +4078,17 @@ public final class Bridge {
                     return deep;
                 }
             }
-            if (wantText) {
+            // Never aggregate an entire screen-sized container. WeChat keeps
+            // its MultiTask / floating-window panel inflated as a mostly
+            // off-screen overlay; harvesting every TextView below the decor
+            // view used to surface stale labels such as "星标" on any drag.
+            if (wantText && !isFullScreenContainer(candidate)) {
                 Bundle grpText = extractViewGroupText((ViewGroup) candidate);
                 if (grpText != null && isBundleMeaningful(grpText)) {
                     return grpText;
                 }
             }
-            if (wantBitmap) {
+            if (wantBitmap && !isFullScreenContainer(candidate)) {
                 Bundle grpImg = extractViewGroupImage((ViewGroup) candidate);
                 if (grpImg != null && isBundleMeaningful(grpImg)) {
                     return grpImg;
@@ -4230,11 +4323,13 @@ public final class Bridge {
     }
 
     private static void collectTextViewsRecursively(ViewGroup group, StringBuilder sb, int depth) {
-        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE) return;
+        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE
+                || !isRenderedOnScreen(group)) return;
         int count = group.getChildCount();
         for (int i = 0; i < count; i++) {
             View child = group.getChildAt(i);
             if (child == null || child.getVisibility() != View.VISIBLE) continue;
+            if (isPassthroughOverlay(child) || !isRenderedOnScreen(child)) continue;
             if (child instanceof TextView && !(child instanceof EditText)) {
                 CharSequence cs = ((TextView) child).getText();
                 if (!TextUtils.isEmpty(cs) && isMeaningfulUserText(cs)) {
@@ -4253,11 +4348,13 @@ public final class Bridge {
     }
 
     private static Bundle findFirstImageRecursively(ViewGroup group, int depth) {
-        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE) return null;
+        if (group == null || depth > 6 || group.getVisibility() != View.VISIBLE
+                || !isRenderedOnScreen(group)) return null;
         int count = group.getChildCount();
         for (int i = 0; i < count; i++) {
             View child = group.getChildAt(i);
             if (child == null || child.getVisibility() != View.VISIBLE) continue;
+            if (isPassthroughOverlay(child) || !isRenderedOnScreen(child)) continue;
             if (isAcceptableImageView(child)) {
                 Bitmap bmp = extractImageBitmap(child);
                 if (bmp != null) {
@@ -9253,6 +9350,116 @@ public final class Bridge {
         return false;
     }
 
+    /**
+     * A view is only a candidate for hit-testing / text aggregation when it is
+     * actually painted on screen. WeChat (and some other apps) keep whole
+     * panels attached with VISIBLE children while translating the panel
+     * thousands of pixels off-screen; those stale labels must never leak into
+     * a drag.
+     */
+    private static boolean isRenderedOnScreen(View view) {
+        if (view == null || view.getVisibility() != View.VISIBLE || !view.isShown()) {
+            return false;
+        }
+        if (view.getWidth() <= 0 || view.getHeight() <= 0 || view.getAlpha() <= 0f) {
+            return false;
+        }
+        try {
+            Rect visible = new Rect();
+            return view.getGlobalVisibleRect(visible) && !visible.isEmpty();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isFullScreenContainer(View view) {
+        if (view == null) {
+            return false;
+        }
+        View root = view.getRootView();
+        if (root == null || root.getWidth() <= 0 || root.getHeight() <= 0) {
+            return false;
+        }
+        return view.getWidth() >= root.getWidth() * 9 / 10
+                && view.getHeight() >= root.getHeight() * 9 / 10;
+    }
+
+    /**
+     * True when this group is only a shell around passthrough overlays (for
+     * example WeChat's MultiTask panel: a plain FrameLayout whose children are
+     * all MultiTaskContainerView instances). Returning null for such a shell
+     * lets findDeepTouchView() continue with the next sibling instead of
+     * treating the shell itself as the content under the finger.
+     */
+    private static boolean hasOnlyPassthroughChildren(ViewGroup group) {
+        if (group == null) {
+            return false;
+        }
+        boolean sawChild = false;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            sawChild = true;
+            if (!isPassthroughSubtree(child, 0)) {
+                return false;
+            }
+        }
+        return sawChild;
+    }
+
+    private static boolean isPassthroughSubtree(View view, int depth) {
+        if (view == null) {
+            return true;
+        }
+        if (isPassthroughOverlay(view)) {
+            return true;
+        }
+        if (!(view instanceof ViewGroup) || depth > 6) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) view;
+        boolean sawChild = false;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            sawChild = true;
+            if (!isPassthroughSubtree(child, depth + 1)) {
+                return false;
+            }
+        }
+        return sawChild;
+    }
+
+    private static boolean isVoiceRecordControl(View view) {
+        for (View current = view; current != null; ) {
+            if (current instanceof TextView) {
+                CharSequence text = ((TextView) current).getText();
+                if (text != null && isVoiceRecordLabel(text.toString())) {
+                    return true;
+                }
+            }
+            CharSequence description = current.getContentDescription();
+            if (description != null && isVoiceRecordLabel(description.toString())) {
+                return true;
+            }
+            android.view.ViewParent parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+        }
+        return false;
+    }
+
+    private static boolean isVoiceRecordLabel(String value) {
+        if (value == null) {
+            return false;
+        }
+        String label = value.replace(" ", "").replace("\u00a0", "").trim();
+        return "按住说话".equals(label);
+    }
+
     private static View findDeepTouchView(View root, float rawX, float rawY) {
         return findDeepTouchView(root, rawX, rawY, false);
     }
@@ -9294,6 +9501,13 @@ public final class Bridge {
                 if (skipCompose) {
                     return null;
                 }
+                // A plain shell around a passthrough panel is not content.
+                // WeChat's off-screen MultiTask container otherwise wins the
+                // hit test for every point on the chat screen because its
+                // right edge still reaches the display.
+                if (hasOnlyPassthroughChildren(group)) {
+                    return null;
+                }
             }
             return root;
         } catch (Throwable ignored) {
@@ -9306,7 +9520,8 @@ public final class Bridge {
         int[] location = new int[2];
         for (int i = count - 1; i >= 0; i--) {
             View child = group.getChildAt(i);
-            if (child == null || child.getVisibility() != View.VISIBLE) {
+            if (child == null || child.getVisibility() != View.VISIBLE
+                    || !isRenderedOnScreen(child)) {
                 continue;
             }
             if (isPassthroughOverlay(child)) {

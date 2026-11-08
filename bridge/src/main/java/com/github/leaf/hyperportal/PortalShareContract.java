@@ -21,6 +21,9 @@ public final class PortalShareContract {
     public static final String PORTAL_PACKAGE = "com.github.leaf.hyperportal";
     public static final String SHARE_PROXY_ACTIVITY =
             "com.github.leaf.hyperportal.ShareProxyActivity";
+    /** Home-page action: ask SystemUI's module to restart its own process. */
+    public static final String ACTION_RESTART_SYSTEMUI =
+            "com.github.leaf.hyperportal.RESTART_SYSTEMUI";
 
     private PortalShareContract() {
     }

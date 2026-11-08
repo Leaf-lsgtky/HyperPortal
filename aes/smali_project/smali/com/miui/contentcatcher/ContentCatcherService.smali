@@ -134,7 +134,11 @@
 
     const-string v0, "clipboard"
 
-    invoke-static {v0}, Landroid/os/ServiceManager;->getServiceOrThrow(Ljava/lang/String;)Landroid/os/IBinder;
+    # getServiceOrThrow() is a hidden API that the platform-signed
+    # ContentCatcher may use, but a re-signed patch loses that exemption and
+    # crashes during ContentCatcherService.<init> on Android 17. getService()
+    # is public and only returns null when the clipboard service is absent.
+    invoke-static {v0}, Landroid/os/ServiceManager;->getService(Ljava/lang/String;)Landroid/os/IBinder;
 
     move-result-object v0
 

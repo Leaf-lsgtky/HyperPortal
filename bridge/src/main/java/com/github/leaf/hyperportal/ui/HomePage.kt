@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package com.github.leaf.hyperportal.ui
 
+import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,13 +40,18 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.github.leaf.hyperportal.PortalShareContract
 import com.github.leaf.hyperportal.data.LsposedStatus
 import com.github.leaf.hyperportal.data.PortalStatus
 import com.github.leaf.hyperportal.data.PortalStatusRepository
 import com.github.leaf.hyperportal.ui.component.PortalPageScaffold
 import com.github.leaf.hyperportal.ui.component.firstBlock
 import com.github.leaf.hyperportal.ui.component.nextBlock
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -94,10 +103,12 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int, isCurrent: () -> Boolean) {
         title = "HyperPortal",
         bottomPadding = bottomPadding,
         actions = {
-            IconButton(onClick = { scope.launch { refresh() } }) {
+            IconButton(onClick = {
+                scope.launch { restartSystemUi(context, status.systemUiReady) }
+            }) {
                 Icon(
                     imageVector = MiuixIcons.Refresh,
-                    contentDescription = "重新检查",
+                    contentDescription = "重启 SystemUI",
                     tint = MiuixTheme.colorScheme.onBackground,
                 )
             }
@@ -153,6 +164,55 @@ fun HomePage(bottomPadding: Dp, resumeKey: Int, isCurrent: () -> Boolean) {
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+/**
+ * 重启 SystemUI。优先走已注入的 SystemUI 模块自毁，模块不在时退回 root。
+ * 不直接把 kill 命令交给普通 shell：SystemUI 不是本应用能 force-stop 的进程。
+ */
+private suspend fun restartSystemUi(context: Context, systemUiReady: Boolean) {
+    if (systemUiReady && requestSystemUiRestart(context)) {
+        Toast.makeText(context, "正在重启 SystemUI…", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val killed = withContext(Dispatchers.IO) {
+        try {
+            ProcessBuilder("su", "-c", "kill -9 $(pidof com.android.systemui)")
+                .redirectErrorStream(true)
+                .start()
+                .waitFor() == 0
+        } catch (_: Throwable) {
+            false
+        }
+    }
+    Toast.makeText(
+        context,
+        if (killed) "已通过 root 重启 SystemUI" else "重启失败：SystemUI 钩子未就绪且 root 不可用",
+        Toast.LENGTH_SHORT,
+    ).show()
+}
+
+/** Ordered broadcast：只有当前 SystemUI 模块真的收到并返回 OK，才算请求成功。 */
+private suspend fun requestSystemUiRestart(context: Context): Boolean {
+    val handled = CompletableDeferred<Boolean>()
+    val receiver = object : BroadcastReceiver() {
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
+            handled.complete(resultCode == Activity.RESULT_OK)
+        }
+    }
+    val intent = Intent(PortalShareContract.ACTION_RESTART_SYSTEMUI).apply {
+        setPackage("com.android.systemui")
+    }
+    context.sendOrderedBroadcast(
+        intent,
+        null,
+        receiver,
+        null,
+        Activity.RESULT_CANCELED,
+        null,
+        null,
+    )
+    return withTimeoutOrNull(700) { handled.await() } ?: false
 }
 
 /**

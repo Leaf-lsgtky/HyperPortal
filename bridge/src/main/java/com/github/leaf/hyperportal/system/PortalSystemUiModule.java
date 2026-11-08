@@ -1,5 +1,6 @@
 package com.github.leaf.hyperportal.system;
 
+import android.app.Activity;
 import android.app.Application;
 import android.app.SearchManager;
 import android.content.BroadcastReceiver;
@@ -2112,6 +2113,34 @@ public final class PortalSystemUiModule {
                     }
                 }, filter);
             }
+            // Home-page restart button. Only the HyperPortal app (or the
+            // system) may ask SystemUI to recycle itself; the actual kill is
+            // posted so the broadcast returns before the process dies.
+            IntentFilter restartFilter = new IntentFilter(
+                    com.github.leaf.hyperportal.PortalShareContract.ACTION_RESTART_SYSTEMUI);
+            BroadcastReceiver restartReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    int uid = getSentFromUid();
+                    if (!isTrustedStatusCaller(context, uid)) {
+                        Log.w(TAG, "ignoring untrusted SystemUI restart request uid=" + uid);
+                        return;
+                    }
+                    Log.i(TAG, "SystemUI restart requested uid=" + uid);
+                    // Let the app's ordered-broadcast result receiver know
+                    // that a live SystemUI module handled the request before
+                    // the process goes away.
+                    setResultCode(Activity.RESULT_OK);
+                    sHandler.postDelayed(() -> {
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                    }, 300);
+                }
+            };
+            if (Build.VERSION.SDK_INT >= 33) {
+                mContext.registerReceiver(restartReceiver, restartFilter, Context.RECEIVER_EXPORTED);
+            } else {
+                mContext.registerReceiver(restartReceiver, restartFilter);
+            }
         }
 
         private boolean isSamePackageUid(int uid, String pkg) {
@@ -2299,7 +2328,12 @@ public final class PortalSystemUiModule {
                         + " bitmap=" + (mBitmap == null ? "null" : mBitmap.getWidth() + "x" + mBitmap.getHeight())
                         + " uri=" + mImageUri + " url=" + mImageUrl + " mime=" + mImageMime);
                 updateDockTargets();
-                if (mImageUri == null && mBitmap == null && !TextUtils.isEmpty(mImageUrl)) {
+                // The bitmap in ACTION_SHOW is only a 360px drag preview.
+                // When the bridge also supplied an image URL (WebView apps such
+                // as Lofter/Weibo), fetch the original in the background even
+                // though a preview bitmap is present; otherwise a drop before
+                // the download would persist the 254×360 preview.
+                if (mImageUri == null && !TextUtils.isEmpty(mImageUrl)) {
                     downloadImageAsync(mImageUrl);
                 }
                 triggerQrScanAsync();
