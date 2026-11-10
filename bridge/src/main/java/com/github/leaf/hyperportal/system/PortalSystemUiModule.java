@@ -371,7 +371,9 @@ public final class PortalSystemUiModule {
                         | android.os.ParcelFileDescriptor.MODE_CREATE
                         | android.os.ParcelFileDescriptor.MODE_TRUNCATE;
                 android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.open(target, flags);
-                grantReadToCommonTargets(ctx, uri);
+                // No blanket pre-grant: the file is handed to exactly one app at
+                // drop time (dispatchImageShare), and the chooser flow grants on
+                // its own branch (dispatchSystemShare).
                 pruneIncomingCache(dir, target);
                 return pfd;
             }
@@ -538,6 +540,16 @@ public final class PortalSystemUiModule {
         }
     }
 
+    /**
+     * 系统分享面板（chooser）专用的兜底授权：面板里点哪个 App 是运行期才知道的，
+     * 所以只能按常见分享目标预铺一层。
+     *
+     * 只允许 dispatchSystemShare() 调用。正常拖到某个具体 App 的路径**不要**用它 ——
+     * 那条路只需要 dispatchImageShare() 对唯一目标授一次权。之前每次暂存（openFile
+     * 写入、downloadImageAsync、stageBitmapInPortal）都调这个，等于把每张拖拽图片
+     * 提前授权给 31 个应用：权限面过宽、dumpsys 里每个文件挂 31 条记录、在
+     * SystemUI 跑在 android.uid.system（uid 1000）的机型上还会刷 31 条拒绝日志。
+     */
     public static void grantReadToCommonTargets(Context context, Uri uri) {
         if (context == null || uri == null) return;
         for (String pkg : COMMON_SHARE_PACKAGES) {
@@ -1648,7 +1660,6 @@ public final class PortalSystemUiModule {
                         return;
                     }
                     Uri uri = Uri.parse(INCOMING_URI_PREFIX + Uri.encode(file.getName()));
-                    grantReadToCommonTargets(mContext, uri);
                     pruneIncomingCache(dir, file);
                     final File staged = file;
                     final String mime = sniffIncomingMime(file);
@@ -1696,7 +1707,6 @@ public final class PortalSystemUiModule {
                     return null;
                 }
                 output.flush();
-                grantReadToCommonTargets(ctx, target);
                 pruneIncomingCache(dir, file);
                 Log.i(TAG, "stageBitmapInPortal " + name + " "
                         + bmp.getWidth() + "x" + bmp.getHeight());
