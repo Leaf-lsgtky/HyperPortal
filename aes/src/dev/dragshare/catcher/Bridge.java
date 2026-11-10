@@ -438,6 +438,7 @@ public final class Bridge {
     // press walks every leaf in the window; doing getDeclaredMethods() for each
     // one is a large part of the old 100-200ms stall.
     private static final WeakHashMap<Class<?>, Integer> sViewKindCache = new WeakHashMap<>();
+    private static final WeakHashMap<Class<?>, Boolean> sAndroidViewsHandlerCache = new WeakHashMap<>();
     private static final int VIEW_KIND_NORMAL = 0;
     private static final int VIEW_KIND_COMPOSE = 1;
     private static final int VIEW_KIND_WEBVIEW = 2;
@@ -566,10 +567,10 @@ public final class Bridge {
                     sDragStartedGeneration = -1;
                     sWebAwaitingGeneration = -1;
                     sWebAwaitingViewRef = null;
-                    // Wait past the tap window before walking/reflection of the
-                    // host view tree. Normal scrolling must cancel this work.
-                    sMainHandler.postDelayed(sWebPrefetchRunnable,
-                            Math.max(150, ViewConfiguration.getTapTimeout()));
+                    // No view-tree/reflection work before the configured long
+                    // press threshold. Even a 150ms head-start stalled slow
+                    // scroll starts on deep React Native trees (Discord).
+                    sMainHandler.postDelayed(sWebPrefetchRunnable, getLongPressDuration());
                     // Schedule fallback at sLongPressDurationMs + 150ms (after AES u/a's timer).
                     // If u/a fires, recordTouch() cancels this runnable so it never duplicates work;
                     // if u/a was cancelled by micro-tremor or a non-DecorView window, this fallback catches it cleanly.
@@ -855,14 +856,23 @@ public final class Bridge {
         if (!(view instanceof ViewGroup)) {
             return false;
         }
-        String name = view.getClass().getName();
+        Class<?> clazz = view.getClass();
+        Boolean cached = sAndroidViewsHandlerCache.get(clazz);
+        if (cached != null) return cached;
+        String name = clazz.getName();
         if (name.equals("androidx.compose.ui.platform.AndroidViewsHandler")
                 || (name.startsWith("androidx.compose.ui.platform.") && name.endsWith(".e0"))) {
+            sAndroidViewsHandlerCache.put(clazz, true);
             return true;
         }
         // R8-renamed AndroidViewsHandler keeps these two unique method names.
-        return findMethod(view.getClass(), "getHolderToLayoutNode") != null
-                && findMethod(view.getClass(), "getLayoutNodeToHolder") != null;
+        // Hit-testing calls this outside viewKind()'s cache for every group.
+        // Cache misses too: otherwise every ordinary ReactViewGroup scans all
+        // declared methods of ViewGroup/View on every held touch.
+        boolean handler = findMethod(clazz, "getHolderToLayoutNode") != null
+                && findMethod(clazz, "getLayoutNodeToHolder") != null;
+        sAndroidViewsHandlerCache.put(clazz, handler);
+        return handler;
     }
 
     private static int viewKind(View view) {

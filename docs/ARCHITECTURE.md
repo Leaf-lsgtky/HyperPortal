@@ -147,10 +147,16 @@ it can delay scrolling even when no portal drag is attempted.
   older in-flight replies must not overwrite the pushed settings. Full app broadcasts apply
   all gesture settings immediately; partial system_server snapshots preserve missing keys
   and request an asynchronous refresh. Failed reads retain the cache and retry after 2 s.
-- WebView prefetch waits at least 150 ms and is cancelled once movement exceeds Android's
-  scroll slop. It must not use the larger configurable portal drag circle to decide whether
-  a normal scroll needs a view-tree/reflection walk. View access and JavaScript evaluation
-  still run on the main thread, after this gesture gate.
+- WebView prefetch waits for the configured long-press threshold and is cancelled once
+  movement exceeds Android's scroll slop. Even a 150 ms delay still allowed 150–238 ms
+  main-thread walks on Discord's React Native hierarchy before a slow scroll. It must not
+  use the larger configurable portal drag circle to decide whether a normal scroll needs
+  that work. View access and JavaScript evaluation still run on the main thread, after
+  this gesture gate.
+- Cache the `isAndroidViewsHandler()` answer per view class, including negative answers.
+  Hit-testing calls it outside `viewKind()`'s cache, so ordinary ViewGroups otherwise
+  repeatedly enumerate all declared methods up their class hierarchy. Keep the reflective
+  fallback for renamed Compose interop classes and continue traversing native children.
 - Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
   `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture.
   A config refresh must appear on the worker, never nested inside main-thread input delivery.
