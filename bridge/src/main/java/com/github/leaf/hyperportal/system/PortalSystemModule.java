@@ -261,6 +261,7 @@ public final class PortalSystemModule {
             installSELinuxHooks(classLoader);
             installAppsFilterHooks(classLoader);
             installContentExtensionGateHook(classLoader);
+            installUriGrantWhitelistHook(classLoader);
             scheduleInitialConfigLoad();
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "installHooks failed", throwable);
@@ -330,6 +331,71 @@ public final class PortalSystemModule {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /** Providers owned by us whose uri grants the core system uid may issue. */
+    private static final List<String> GRANT_WHITELIST_AUTHORITIES = Arrays.asList(
+            "com.android.systemui.fileprovider",
+            "com.github.leaf.hyperportal.files");
+
+    /**
+     * HyperOS' UriGrantsManagerService.checkGrantUriPermissionUnlocked() drops
+     * every uri grant whose granter is the core system uid (1000):
+     *
+     * <pre>
+     * W UriGrantsManagerService: For security reasons, the system cannot issue a
+     *   Uri permission grant to content://...; use startActivityAsCaller() instead
+     * </pre>
+     *
+     * Devices whose SystemUI runs inside {@code android.uid.system} (factory
+     * Android 16 images such as vermeer/OS4.0.29.0) therefore can never hand a
+     * staged drag payload to the drop target: the target hits
+     * "Permission Denial: ... not exported from UID 1000", WeChat reports
+     * "获取资源失败", and the whole image-share path dies silently - our own
+     * {@code ctx.grantUriPermission()} and the intent's
+     * FLAG_GRANT_READ_URI_PERMISSION are both discarded. Devices whose SystemUI
+     * owns a dedicated uid ({@code android.uid.systemui}, e.g.
+     * pudding/OS4.0.6.0) never enter that branch, which is why the bug looks
+     * model-specific.
+     *
+     * The vendor left an authority whitelist for exactly this case: before
+     * refusing, the service consults
+     * {@code ActivityManagerServiceStub#ignoreSpecifiedAuthority(authority)} and
+     * only refuses when that returns false. Whitelisting our own two providers
+     * relaxes that single gate; every other check (provider present,
+     * grantUriPermissions, path patterns, target uid, holding permissions) is
+     * still enforced by the framework.
+     */
+    private static void installUriGrantWhitelistHook(ClassLoader classLoader) {
+        try {
+            Class<?> stub = Class.forName("com.android.server.am.ActivityManagerServiceStub",
+                    false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+            for (Method method : stub.getDeclaredMethods()) {
+                if ("ignoreSpecifiedAuthority".equals(method.getName())
+                        && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0] == String.class) {
+                    sXposed.hook(method)
+                            .setId("am-stub-ignoreSpecifiedAuthority")
+                            .intercept(PortalSystemModule::onIgnoreSpecifiedAuthority);
+                    log(Log.INFO, TAG, "hooked ignoreSpecifiedAuthority, whitelist="
+                            + GRANT_WHITELIST_AUTHORITIES);
+                    return;
+                }
+            }
+            log(Log.WARN, TAG, "ignoreSpecifiedAuthority missing; system-uid uri grants stay blocked");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "ignoreSpecifiedAuthority hook unavailable", throwable);
+        }
+    }
+
+    private static Object onIgnoreSpecifiedAuthority(XposedInterface.Chain chain) throws Throwable {
+        List<Object> args = chain.getArgs();
+        Object authority = args.isEmpty() ? null : args.get(0);
+        if (authority instanceof String && GRANT_WHITELIST_AUTHORITIES.contains((String) authority)) {
+            log(Log.INFO, TAG, "system-uid uri grant allowed for " + authority);
+            return Boolean.TRUE;
+        }
+        return chain.proceed();
     }
 
     private static void installSELinuxHooks(ClassLoader classLoader) {
