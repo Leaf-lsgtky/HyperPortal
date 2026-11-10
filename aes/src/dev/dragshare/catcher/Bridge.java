@@ -39,6 +39,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.os.Trace;
 import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
@@ -56,6 +57,7 @@ import android.view.WindowManager;
 import android.view.WindowMetrics;
 import android.view.HapticFeedbackConstants;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.TextureView;
@@ -143,19 +145,33 @@ public final class Bridge {
     private static volatile long sLastConfigCheckTime = 0;
     private static volatile long sLastConfigFailTime = 0;
     private static volatile boolean sConfigReceiverRegistered = false;
+    private static final AtomicBoolean sConfigRefreshPending = new AtomicBoolean();
+    private static final AtomicInteger sConfigRevision = new AtomicInteger();
+    private static final java.util.concurrent.ExecutorService sConfigExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "HyperPortal-Config");
+                t.setDaemon(true);
+                return t;
+            });
 
     private static final BroadcastReceiver sConfigReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            sLastConfigCheckTime = 0;
+            if (intent == null) return;
+            sConfigRevision.incrementAndGet();
             sLastConfigFailTime = 0;
-            boolean hadPosition = applyPushedConfig(intent);
-            // The snapshot from system_server already carries everything we
-            // need; only fall back to (possibly blocked) provider reads when the
-            // broadcast did not contain a position.
-            if (!hadPosition) {
-                refreshConfig(context);
-            }
+            applyPushedConfig(intent);
+            Bundle config = intent.getExtras();
+            if (config != null) applyConfig(config);
+            // The app broadcasts the complete gesture config. system_server
+            // only pushes edge settings; fetch the remaining keys off-thread.
+            boolean complete = config != null && config.containsKey("master_switch")
+                    && config.containsKey("landscape_trigger")
+                    && config.containsKey("long_press_duration")
+                    && config.containsKey("touch_slop")
+                    && config.containsKey("gesture_blacklist");
+            sLastConfigCheckTime = complete ? SystemClock.uptimeMillis() : 0;
+            ensureConfig(context);
         }
     };
 
@@ -189,18 +205,32 @@ public final class Bridge {
     private static void ensureConfig(Context context) {
         if (context == null) return;
         long now = SystemClock.uptimeMillis();
-        // A single failed read used to lock the trigger edge to the default
-        // "bottom" for 30s. On a device whose freezer keeps HyperPortal frozen
-        // that meant *every* drag in the window used the wrong edge, which is
-        // what produced a bottom shelf for a right-edge user. Retry quickly;
-        // the push channel above covers the frozen case anyway.
-        if (now - sLastConfigFailTime < 2000) {
+        if (sLastConfigFailTime != 0 && now - sLastConfigFailTime < 2000) {
             return;
         }
-        if (now - sLastConfigCheckTime > 5000 || sLastConfigCheckTime == 0) {
-            sLastConfigCheckTime = now;
-            refreshConfig(context);
+        if (sLastConfigCheckTime != 0 && now - sLastConfigCheckTime <= 5000) {
+            return;
         }
+        // ping() runs before the host app receives every touch event. Even a
+        // warm provider needs several synchronous Binder calls; a frozen/cold
+        // provider can stall the first DOWN after idle for much longer. Never
+        // wait for it here, and never enqueue a refresh per MOVE while it waits.
+        if (!sConfigRefreshPending.compareAndSet(false, true)) return;
+        try {
+            Context application = context.getApplicationContext();
+            final Context appContext = application != null ? application : context;
+            final int revision = sConfigRevision.get();
+            sConfigExecutor.execute(() -> {
+                ensureConfigReceiver(appContext);
+                refreshConfig(appContext, revision);
+            });
+        } catch (Throwable ignored) {
+            sConfigRefreshPending.set(false);
+            sLastConfigFailTime = now;
+        }
+    }
+
+    private static void ensureConfigReceiver(Context context) {
         if (!sConfigReceiverRegistered) {
             try {
                 IntentFilter filter = new IntentFilter(ACTION_CONFIG_CHANGED);
@@ -216,7 +246,10 @@ public final class Bridge {
         }
     }
 
-    private static void refreshConfig(Context context) {
+    private static void refreshConfig(Context context, int revision) {
+        Trace.beginSection("HyperPortal.configRefresh");
+        long startedAt = SystemClock.uptimeMillis();
+        Bundle result = null;
         try {
             Bundle res = null;
             boolean authoritative = false;
@@ -249,35 +282,51 @@ public final class Bridge {
                 }
             }
             if (res != null && authoritative) {
-                sMasterSwitch = res.getBoolean("master_switch", true);
-                sLandscapeTrigger = res.getBoolean("landscape_trigger", false);
-                sLongPressDurationMs = res.getInt("long_press_duration", 800);
-                sTouchSlopDp = res.getInt("touch_slop", 24);
-                int thresholdPct = res.getInt("trigger_threshold", 76);
-                if (thresholdPct >= 50 && thresholdPct <= 95) {
-                    sTriggerThreshold = thresholdPct / 100.0f;
-                }
-                String pos = res.getString("trigger_position");
-                if (pos != null) {
-                    sTriggerPosition = pos;
-                }
-                java.util.ArrayList<String> list = res.getStringArrayList("gesture_blacklist");
-                if (list != null) {
-                    sBlacklist = new java.util.HashSet<>(list);
-                }
-                sRuleEngineEnabled = res.getBoolean("drag_rules", true);
-                Log.d(TAG, "config refreshed: master=" + sMasterSwitch + " landscape=" + sLandscapeTrigger
-                        + " duration=" + sLongPressDurationMs + " radius=" + sTouchSlopDp
-                        + " threshold=" + sTriggerThreshold
-                        + " blacklist=" + sBlacklist.size());
+                result = res;
             } else {
-                sLastConfigFailTime = SystemClock.uptimeMillis();
                 requestSystemUiGrant(context);
             }
         } catch (Throwable t) {
-            sLastConfigFailTime = SystemClock.uptimeMillis();
             requestSystemUiGrant(context);
+        } finally {
+            Trace.endSection();
         }
+        final Bundle config = result;
+        final long elapsed = SystemClock.uptimeMillis() - startedAt;
+        // Serialize cache publication with pushed settings on the main thread.
+        // A provider reply started before a broadcast must not undo that push.
+        sMainHandler.post(() -> {
+            try {
+                if (revision != sConfigRevision.get()) return;
+                if (config == null) {
+                    sLastConfigFailTime = SystemClock.uptimeMillis();
+                    return;
+                }
+                applyConfig(config);
+                sLastConfigCheckTime = SystemClock.uptimeMillis();
+                sLastConfigFailTime = 0;
+                Log.d(TAG, "config refreshed async: master=" + sMasterSwitch
+                        + " duration=" + sLongPressDurationMs + " radius=" + sTouchSlopDp
+                        + " threshold=" + sTriggerThreshold + " took=" + elapsed + "ms");
+            } finally {
+                sConfigRefreshPending.set(false);
+            }
+        });
+    }
+
+    /** Apply only keys present: system_server's snapshots carry edge settings only. */
+    private static void applyConfig(Bundle config) {
+        if (config.containsKey("master_switch")) sMasterSwitch = config.getBoolean("master_switch", true);
+        if (config.containsKey("landscape_trigger")) sLandscapeTrigger = config.getBoolean("landscape_trigger", false);
+        if (config.containsKey("long_press_duration")) sLongPressDurationMs = config.getInt("long_press_duration", 800);
+        if (config.containsKey("touch_slop")) sTouchSlopDp = config.getInt("touch_slop", 24);
+        int thresholdPct = config.getInt("trigger_threshold", -1);
+        if (thresholdPct >= 50 && thresholdPct <= 95) sTriggerThreshold = thresholdPct / 100.0f;
+        String pos = config.getString("trigger_position");
+        if ("right".equals(pos) || "bottom".equals(pos)) sTriggerPosition = pos;
+        java.util.ArrayList<String> list = config.getStringArrayList("gesture_blacklist");
+        if (list != null) sBlacklist = new java.util.HashSet<>(list);
+        if (config.containsKey("drag_rules")) sRuleEngineEnabled = config.getBoolean("drag_rules", true);
     }
 
     private static void requestSystemUiGrant(Context context) {
@@ -340,6 +389,7 @@ public final class Bridge {
     private static volatile float sLastMoveRawX;
     private static volatile float sLastMoveRawY;
     private static volatile boolean sMovedSinceDown;
+    private static int sScrollTouchSlopPx = 8;
     private static volatile Bundle sPendingPayload;
     private static volatile Object sPendingContent;
     private static volatile boolean sGestureActive;
@@ -465,6 +515,7 @@ public final class Bridge {
     }
 
     public static void ping(MotionEvent event, View view, Activity activity) {
+        Trace.beginSection("HyperPortal.ping");
         try {
             rememberContext(activity);
             Context appContext = activity != null ? activity.getApplicationContext() : currentContext();
@@ -497,6 +548,8 @@ public final class Bridge {
                     sLastTouchAt = SystemClock.uptimeMillis();
                     sDownAt = sLastTouchAt;
                     sMovedSinceDown = false;
+                    sScrollTouchSlopPx = appContext != null
+                            ? ViewConfiguration.get(appContext).getScaledTouchSlop() : 8;
                     sPendingPayload = null;
                     sPendingContent = null;
                     sGestureActive = true;
@@ -513,10 +566,10 @@ public final class Bridge {
                     sDragStartedGeneration = -1;
                     sWebAwaitingGeneration = -1;
                     sWebAwaitingViewRef = null;
-                    // Proactively prefetch WebView DOM/image under the finger 50ms into the press:
-                    // short taps/flings cancel it without running JS, while long-presses get a
-                    // ~750ms head-start for async evaluateJavascript + image download.
-                    sMainHandler.postDelayed(sWebPrefetchRunnable, 50);
+                    // Wait past the tap window before walking/reflection of the
+                    // host view tree. Normal scrolling must cancel this work.
+                    sMainHandler.postDelayed(sWebPrefetchRunnable,
+                            Math.max(150, ViewConfiguration.getTapTimeout()));
                     // Schedule fallback at sLongPressDurationMs + 150ms (after AES u/a's timer).
                     // If u/a fires, recordTouch() cancels this runnable so it never duplicates work;
                     // if u/a was cancelled by micro-tremor or a non-DecorView window, this fallback catches it cleanly.
@@ -531,6 +584,12 @@ public final class Bridge {
 
                     float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
                     float slopPx = Math.max(8f, sTouchSlopDp * density);
+                    // Web prefetch uses Android's scroll slop, not the larger
+                    // user-configurable portal circle. A slow scroll can leave
+                    // the former while still being inside the latter.
+                    if (dist > sScrollTouchSlopPx) {
+                        sMainHandler.removeCallbacks(sWebPrefetchRunnable);
+                    }
                     // Anti-mistouch for the pre-long-press phase: drift beyond
                     // the circle cancels the pending long press.
                     if (dist > slopPx) {
@@ -594,6 +653,8 @@ public final class Bridge {
             }
         } catch (Throwable throwable) {
             Log.w(TAG, "ping failed", throwable);
+        } finally {
+            Trace.endSection();
         }
     }
 
@@ -971,6 +1032,7 @@ public final class Bridge {
     }
 
     private static void prefetchWebViewAt(View root, float rawX, float rawY) {
+        Trace.beginSection("HyperPortal.webPrefetch");
         try {
             View webView = findWebViewAt(root, rawX, rawY);
             if (webView != null) {
@@ -982,6 +1044,8 @@ public final class Bridge {
             }
         } catch (Throwable throwable) {
             Log.d(TAG, "prefetchWebViewAt failed: " + throwable);
+        } finally {
+            Trace.endSection();
         }
     }
 

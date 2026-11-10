@@ -131,3 +131,30 @@ restart the provider was warm and the next drag worked.
   `system_server`; a cache that has not yet received a full app snapshot must not be
   treated as authoritative, otherwise the default `bottom` / `76%` values mask the user's
   real trigger edge and threshold. `PortalFileProvider` remains only the bootstrap fallback.
+
+## 6. AES Host: Keep Configuration IPC Out of Touch Dispatch
+
+`Interceptor.dispatchTouchEvent()` calls `Bridge.ping()` before delivering the event to the
+foreground app. Configuration has a 5 s cache lifetime. Refreshing it synchronously here
+charged provider acquisition, query, cursor extras and release calls to the first touch
+after idle. The cost depends on whether SystemUI and the fallback app provider are warm;
+it can delay scrolling even when no portal drag is attempted.
+
+- `ensureConfig()` only schedules work on `HyperPortal-Config`. Receiver registration and
+  both provider paths run there. One refresh may be pending at a time, including while its
+  result waits to be applied, so MOVE events cannot queue more blocked queries.
+- Publish provider results on the main thread. A config broadcast increments a revision;
+  older in-flight replies must not overwrite the pushed settings. Full app broadcasts apply
+  all gesture settings immediately; partial system_server snapshots preserve missing keys
+  and request an asynchronous refresh. Failed reads retain the cache and retry after 2 s.
+- WebView prefetch waits at least 150 ms and is cancelled once movement exceeds Android's
+  scroll slop. It must not use the larger configurable portal drag circle to decide whether
+  a normal scroll needs a view-tree/reflection walk. View access and JavaScript evaluation
+  still run on the main thread, after this gesture gate.
+- Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
+  `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture.
+  A config refresh must appear on the worker, never nested inside main-thread input delivery.
+
+Replacing the AES APK does not replace `Bridge` classes already loaded in app processes.
+Reopen the test app to validate new code; device and system process restarts are unnecessary
+for this AES-only change.
