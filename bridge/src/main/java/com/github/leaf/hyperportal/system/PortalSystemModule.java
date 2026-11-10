@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.Uri;
+import android.text.TextUtils;
 import android.os.Bundle;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -86,6 +87,9 @@ public final class PortalSystemModule {
      */
     private static final String ACTION_CONFIG_SNAPSHOT =
             "com.github.leaf.hyperportal.ACTION_CONFIG_SNAPSHOT";
+    /** system_server 侧的一次性授权自检（见 runGrantSelfTest）。 */
+    private static final String ACTION_GRANT_SELFTEST =
+            "com.github.leaf.hyperportal.GRANT_SELFTEST";
 
     private static volatile XposedInterface sXposed;
 
@@ -262,6 +266,7 @@ public final class PortalSystemModule {
             installAppsFilterHooks(classLoader);
             installContentExtensionGateHook(classLoader);
             installUriGrantWhitelistHook(classLoader);
+            installUriGrantGateHook(classLoader);
             scheduleInitialConfigLoad();
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "installHooks failed", throwable);
@@ -379,12 +384,17 @@ public final class PortalSystemModule {
                             .intercept(PortalSystemModule::onIgnoreSpecifiedAuthority);
                     log(Log.INFO, TAG, "hooked ignoreSpecifiedAuthority, whitelist="
                             + GRANT_WHITELIST_AUTHORITIES);
+                    Log.println(Log.INFO, "HyperPortalHotReload",
+                            "hooked ignoreSpecifiedAuthority, whitelist=" + GRANT_WHITELIST_AUTHORITIES);
                     return;
                 }
             }
             log(Log.WARN, TAG, "ignoreSpecifiedAuthority missing; system-uid uri grants stay blocked");
+            Log.println(Log.WARN, "HyperPortalHotReload", "ignoreSpecifiedAuthority missing");
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "ignoreSpecifiedAuthority hook unavailable", throwable);
+            Log.println(Log.WARN, "HyperPortalHotReload",
+                    "ignoreSpecifiedAuthority hook unavailable: " + throwable);
         }
     }
 
@@ -393,9 +403,112 @@ public final class PortalSystemModule {
         Object authority = args.isEmpty() ? null : args.get(0);
         if (authority instanceof String && GRANT_WHITELIST_AUTHORITIES.contains((String) authority)) {
             log(Log.INFO, TAG, "system-uid uri grant allowed for " + authority);
+            Log.println(Log.INFO, "HyperPortalHotReload", "system-uid uri grant allowed for " + authority);
             return Boolean.TRUE;
         }
         return chain.proceed();
+    }
+
+    /**
+     * 同一个问题的第二道保险：直接在真正执行的那个方法上判定。
+     *
+     * 上面的 authority 白名单是厂商留的正规口子，但实测（LSPosed 2.2.1 / 本机 OS4.0.6.0）
+     * 把 {@code ignoreSpecifiedAuthority} 挂上之后，框架仍然照旧打印拒绝日志——那个
+     * `return false` 的桩方法已经被 ART 折进调用方，钩子永远不进栈。所以这里钩
+     * {@code UriGrantsManagerService#checkGrantUriPermissionUnlocked}，也就是打印那句
+     * warning 的方法本身：命中我们的 provider + core uid 时，直接按框架「成功」的语义返回
+     * 目标 App 的 uid（该方法正常路径的返回值就是 target uid，-1 表示拒绝）。
+     */
+    private static void installUriGrantGateHook(ClassLoader classLoader) {
+        try {
+            Class<?> service = Class.forName("com.android.server.uri.UriGrantsManagerService",
+                    false, classLoader != null ? classLoader : ClassLoader.getSystemClassLoader());
+            int hooked = 0;
+            for (Method method : service.getDeclaredMethods()) {
+                if ("checkGrantUriPermissionUnlocked".equals(method.getName())
+                        && method.getParameterCount() == 5
+                        && method.getParameterTypes()[1] == String.class) {
+                    // Two overloads share the name and the first five parameters:
+                    // one takes a Uri (thin wrapper), one takes a GrantUri (the
+                    // real guard). Both have to be covered - hooking only the
+                    // first match left the GrantUri path unguarded.
+                    sXposed.hook(method)
+                            .setId("ugm-checkGrantUriPermission-" + method.getParameterTypes()[2].getSimpleName())
+                            .intercept(PortalSystemModule::onCheckGrantUriPermission);
+                    hooked++;
+                }
+            }
+            if (hooked > 0) {
+                log(Log.INFO, TAG, "hooked checkGrantUriPermissionUnlocked x" + hooked);
+                Log.println(Log.INFO, "HyperPortalHotReload",
+                        "hooked checkGrantUriPermissionUnlocked x" + hooked);
+                return;
+            }
+            log(Log.WARN, TAG, "checkGrantUriPermissionUnlocked not found");
+            Log.println(Log.WARN, "HyperPortalHotReload", "checkGrantUriPermissionUnlocked not found");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "checkGrantUriPermissionUnlocked hook unavailable", throwable);
+            Log.println(Log.WARN, "HyperPortalHotReload",
+                    "checkGrantUriPermissionUnlocked hook unavailable: " + throwable);
+        }
+    }
+
+    private static Object onCheckGrantUriPermission(XposedInterface.Chain chain) throws Throwable {
+        List<Object> args = chain.getArgs();
+        if (args.size() == 5 && args.get(0) instanceof Integer) {
+            Object grantee = args.get(2);
+            String authority = grantee instanceof Uri
+                    ? ((Uri) grantee).getAuthority()
+                    : authorityOf(grantee);
+            if (authority != null
+                    && GRANT_WHITELIST_AUTHORITIES.contains(authority)
+                    && isCoreUid(((Integer) args.get(0)).intValue())) {
+                int targetUid = resolveTargetUid(args.get(1));
+                if (targetUid >= 0) {
+                    log(Log.INFO, TAG, "system-uid uri grant allowed for " + authority
+                            + " -> " + args.get(1) + " (" + targetUid + ")");
+                    Log.println(Log.INFO, "HyperPortalHotReload",
+                            "system-uid uri grant allowed for " + authority);
+                    return targetUid;
+                }
+            }
+        }
+        return chain.proceed();
+    }
+
+    /** appId 1000 (system) 或 0 (root)：HyperOS 那道 gate 针对的正是这类 uid。 */
+    private static boolean isCoreUid(int uid) {
+        int appId = uid % 100000; // PER_USER_RANGE
+        return appId == android.os.Process.SYSTEM_UID || appId == 0;
+    }
+
+    private static String authorityOf(Object grantUri) {
+        if (grantUri == null) {
+            return null;
+        }
+        try {
+            Object uri = getField(grantUri, "uri");
+            if (uri instanceof Uri) {
+                return ((Uri) uri).getAuthority();
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static int resolveTargetUid(Object targetPkg) {
+        if (!(targetPkg instanceof String)) {
+            return -1;
+        }
+        Context context = sSystemContext != null ? sSystemContext : obtainSystemContext();
+        if (context == null) {
+            return -1;
+        }
+        try {
+            return context.getPackageManager().getPackageUid((String) targetPkg, 0);
+        } catch (Throwable ignored) {
+            return -1;
+        }
     }
 
     private static void installSELinuxHooks(ClassLoader classLoader) {
@@ -2024,13 +2137,56 @@ public final class PortalSystemModule {
         });
     }
 
+    /**
+     * 端到端自检：system_server 自己就是 uid 1000，用它去给第三方 App 授一个
+     * SystemUI 暂存文件的读权限，正好复刻「SystemUI 在 android.uid.system 里的机型」
+     * 那条失败链路。没有 hook 时框架会打
+     * {@code For security reasons, the system cannot issue a Uri permission grant}；
+     * 有 hook 时应打印 landed=true。
+     *
+     *   adb shell am broadcast -a com.github.leaf.hyperportal.GRANT_SELFTEST \
+     *       --es target com.tencent.mm --es file <暂存文件名>
+     */
+    private static void runGrantSelfTest(Context context, String target, String fileName) {
+        final String pkg = TextUtils.isEmpty(target) ? "com.tencent.mm" : target;
+        final String name = TextUtils.isEmpty(fileName) ? "selftest.png" : fileName;
+        Uri uri = Uri.parse("content://com.android.systemui.fileprovider/hyperportal_incoming/" + name);
+        int targetUid = resolveTargetUid(pkg);
+        String verdict = "landed=false";
+        try {
+            context.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (targetUid >= 0) {
+                boolean granted = context.checkUriPermission(uri, -1, targetUid,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                verdict = "landed=" + granted;
+            } else {
+                verdict = "landed=unknown (uid not resolved for " + pkg + ")";
+            }
+        } catch (Throwable throwable) {
+            verdict = "landed=false (" + throwable + ")";
+        }
+        log(Log.INFO, TAG, "grant self-test " + verdict + " target=" + pkg + " uri=" + uri);
+        Log.println(Log.INFO, "HyperPortalHotReload",
+                "grant self-test " + verdict + " target=" + pkg);
+        try {
+            context.revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static void ensureConfigReceiver(Context ctx) {
         if (sReceiverRegistered || ctx == null) return;
         try {
             IntentFilter filter = new IntentFilter("com.github.leaf.hyperportal.ACTION_CONFIG_CHANGED");
+            filter.addAction(ACTION_GRANT_SELFTEST);
             BroadcastReceiver receiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
+                    if (intent != null && ACTION_GRANT_SELFTEST.equals(intent.getAction())) {
+                        runGrantSelfTest(context, intent.getStringExtra("target"),
+                                intent.getStringExtra("file"));
+                        return;
+                    }
                     if (intent != null) {
                         String pos = intent.getStringExtra("trigger_position");
                         if (pos != null) {

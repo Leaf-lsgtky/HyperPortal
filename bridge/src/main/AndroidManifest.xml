@@ -50,6 +50,19 @@
             android:label="@string/bigbang_overlay_title"
             android:theme="@style/Theme.HyperPortal.BigBangOverlay" />
 
+        <!--
+          Development aid: asks libxposed (API 102) to hot-reload this module into
+          the running system_server / SystemUI, so a rebuilt module can be
+          verified without rebooting. Only adb shell / root / system may trigger.
+        -->
+        <receiver
+            android:name=".HotReloadReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.github.leaf.hyperportal.HOT_RELOAD" />
+            </intent-filter>
+        </receiver>
+
         <!-- Transparent BAL trampoline for image shares launched from SystemUI. -->
         <activity
             android:name=".ShareProxyActivity"
