@@ -556,41 +556,46 @@ public final class Bridge {
                 || view.getWidth() <= 0 || view.getHeight() <= 0
                 || !rectContainsPoint(view, rawX, rawY, 0)) return null;
         String name = view.getClass().getName();
-        if (name.contains("CanvasProxyView") || name.contains("Slidr")
+        if (isTransparentOverlayName(name)) return null;
+        // Deepest node under the finger owns the content, whatever its class.
+        // Weibo's FeedBlogItemMixView (a plain View that paints the whole image
+        // grid), Telegram's ChatMessageCell and most cover/video widgets draw
+        // themselves; requiring TextView/ImageView/TextureView/WebView here used
+        // to skip them and promote the enclosing card instead, which then
+        // matched no rule and aborted the drag.
+        if (!(view instanceof ViewGroup)) {
+            return view;
+        }
+        ViewGroup group = (ViewGroup) view;
+        for (int i = group.getChildCount() - 1; i >= 0 && budget[0] > 0; i--) {
+            View child = findSourceOnDown(group.getChildAt(i), rawX, rawY, depth + 1, budget);
+            if (child != null) return child;
+        }
+        // No child covers the point, so this group itself has to own content.
+        // Empty Compose interop handlers and full-screen navigation shells do
+        // not; a real Compose host or a known self-drawing content owner does.
+        if (name.contains("AndroidViewsHandler") || name.endsWith(".e0")) return null;
+        boolean composeHost = name.contains("Compose") || isObfuscatedAndroidComposeView(view);
+        boolean contentOwner = name.contains("ChatMessageCell") || name.contains("BackupImageView")
+                || name.contains("PhotoViewer");
+        if (!composeHost && !contentOwner && isFullScreenContainer(view)) return null;
+        if (group.getChildCount() == 0 && view.getBackground() == null
+                && !view.isClickable() && !view.isLongClickable()
+                && !composeHost) return null;
+        return view;
+    }
+
+    /**
+     * Views that only forward touches (slide-back helpers, floating balls, task
+     * panels). They must never become the extracted source; see AGENTS.md rule 6.
+     */
+    private static boolean isTransparentOverlayName(String name) {
+        return name.contains("CanvasProxyView") || name.contains("Slidr")
                 || name.contains("SwipeBack") || name.contains("SlideBack")
                 || name.contains("TouchProxy") || name.contains("GestureOverlay")
                 || name.contains("TouchInterceptor") || name.contains("FloatBall")
                 || name.contains("FloatView") || name.contains("FloatIndicator")
-                || name.contains("TalkRoom") || name.contains("MultiTask")) return null;
-        // Telegram draws a whole message itself. The cell may have no
-        // background/click listener and may add checkbox children when selected;
-        // keep the content owner rather than rejecting it or capturing a control.
-        if (name.contains("ChatMessageCell") || name.contains("BackupImageView")
-                || name.contains("PhotoViewer")) return view;
-        if (view instanceof TextView || view instanceof ImageView
-                || view instanceof TextureView || view instanceof WebView) return view;
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = group.getChildCount() - 1; i >= 0 && budget[0] > 0; i--) {
-                View child = findSourceOnDown(group.getChildAt(i), rawX, rawY, depth + 1, budget);
-                if (child != null) return child;
-            }
-            // Empty Compose interop handlers are transparent, but an actual
-            // Compose host/custom content group must remain a valid source.
-            if (name.contains("AndroidViewsHandler") || name.endsWith(".e0")) return null;
-            boolean composeHost = name.contains("Compose") || isObfuscatedAndroidComposeView(view);
-            // Navigation stacks retain empty full-screen containers above the
-            // active page. They own no content when the hit test found no leaf.
-            // In particular Telegram's LayoutContainer must not hide the chat
-            // in its sibling. This is a source test, not event interception.
-            if (!composeHost && isFullScreenContainer(view)) return null;
-            if (group.getChildCount() == 0 && view.getBackground() == null
-                    && !view.isClickable() && !view.isLongClickable()
-                    && !composeHost) return null;
-            return view;
-        }
-        return view.getBackground() != null || view.isClickable() || view.isLongClickable()
-                || !TextUtils.isEmpty(view.getContentDescription()) ? view : null;
+                || name.contains("TalkRoom") || name.contains("MultiTask");
     }
 
     public static void ping(MotionEvent event, View view, Activity activity) {
@@ -1870,9 +1875,33 @@ public final class Bridge {
     public static Bundle preExtract(View view, int flags, boolean needHint) {
         View source = gestureSourceView();
         if (source != null && sDownSourcePayload != null) return sDownSourcePayload;
-        Bundle result = preExtractView(source != null ? source : view, flags, needHint);
-        if (source != null && isBundleMeaningful(result)) sDownSourcePayload = result;
+        View target = resolveExtractionTarget(view, source);
+        Bundle result = preExtractView(target, flags, needHint);
+        if (source != null && target == source && isBundleMeaningful(result)) {
+            sDownSourcePayload = result;
+        }
         return result;
+    }
+
+    /**
+     * The view captured on ACTION_DOWN only has to win when the gesture left the
+     * content it started on (an app menu or a different window opened). When the
+     * view AES resolved lies inside that captured subtree it is the more precise
+     * answer - it is the same content, one level deeper - so extraction, rule
+     * matching and fallbacks all follow it.
+     */
+    private static View resolveExtractionTarget(View aesView, View capturedSource) {
+        if (capturedSource == null) return aesView;
+        if (aesView == null || aesView == capturedSource) return capturedSource;
+        return isDescendantOf(aesView, capturedSource) ? aesView : capturedSource;
+    }
+
+    private static boolean isDescendantOf(View node, View ancestor) {
+        if (node == null || ancestor == null) return false;
+        for (View current = viewParentOf(node); current != null; current = viewParentOf(current)) {
+            if (current == ancestor) return true;
+        }
+        return false;
     }
 
     private static Bundle preExtractView(View view, int flags, boolean needHint) {
@@ -1881,7 +1910,8 @@ public final class Bridge {
                 return null;
             }
             rememberContext(view.getContext());
-            if (view != gestureSourceView() && !isTouchInsideView(view)) {
+            View captured = gestureSourceView();
+            if (view != captured && !isDescendantOf(view, captured) && !isTouchInsideView(view)) {
                 return null;
             }
             // A tagged file item is cheap to detect and should keep working even
@@ -2456,10 +2486,16 @@ public final class Bridge {
      */
     public static Bundle enhanceFetchViewContent(View view, int flags, boolean needHint, Bundle origin) {
         try {
-            // The stock fetcher may be walking a newly opened context menu.
-            // Its fallback cannot replace the source selected on ACTION_DOWN.
+            // The stock fetcher may be walking a newly opened context menu; the
+            // source captured on ACTION_DOWN wins in that case. But when the
+            // fetcher is still inside that source (its normal, deeper hit) it is
+            // the better answer, and a cached payload must never replace a real
+            // AES result with null.
             View source = gestureSourceView();
-            if (source != null && source != view) return sDownSourcePayload;
+            if (source != null && view != null && !isDescendantOf(view, source)
+                    && isBundleMeaningful(sDownSourcePayload)) {
+                return sDownSourcePayload;
+            }
             if (sGestureState.get() == STATE_DRAGGING) {
                 return null;
             }
@@ -3750,8 +3786,12 @@ public final class Bridge {
         float rawY = getTouchRawY();
         java.util.ArrayList<View> chain = new java.util.ArrayList<>();
         View source = gestureSourceView();
-        if (source != null) {
-            for (View current = source; current != null && chain.size() < 64;
+        // Match the rules against whatever extraction is really using: when the
+        // caller passes a view inside the captured subtree, that deeper view is
+        // the finger's content and its chain is the one the rule table expects.
+        View chainSeed = source != null && root != null && isDescendantOf(root, source) ? root : source;
+        if (chainSeed != null) {
+            for (View current = chainSeed; current != null && chain.size() < 64;
                     current = viewParentOf(current)) chain.add(current);
             Collections.reverse(chain);
         } else {
@@ -7400,6 +7440,13 @@ public final class Bridge {
             }
             View source = gestureSourceView();
             Bundle payload = source != null ? preExtract(source, 3, false) : pickPayload(map);
+            if (!isBundleMeaningful(payload)) {
+                // Our own extraction came up empty (the captured node may be a
+                // container): keep what AES itself delivered instead of dropping
+                // the drag on the floor.
+                Bundle delivered = pickPayload(map);
+                if (isBundleMeaningful(delivered)) payload = delivered;
+            }
             if (payload != null) {
                 sTriggeredGeneration = sGestureGeneration;
                 sMainHandler.removeCallbacks(sCustomLongPressRunnable);
