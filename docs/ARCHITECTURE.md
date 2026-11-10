@@ -166,6 +166,12 @@ it can delay scrolling even when no portal drag is attempted.
   extraction, WebView lookup, rule matching and native AES delivery use this source for
   the entire gesture. Stock extraction of a later menu overlay must not replace it.
   Clear the source on touch completion; a new DOWN may select an already-open menu.
+  Treat Telegram's self-drawn `ChatMessageCell`/`BackupImageView` as content owners,
+  even without a background or click listener, before descending into selection controls.
+  An empty full-screen navigation container is not a source; continue with its siblings.
+- `recordTouch()` reports a native long-press attempt, not successful extraction. Keep the
+  source-based fallback timer until a meaningful payload is delivered, so a selection-mode
+  transition that leaves native AES with no result cannot suppress the fallback too.
 - Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
   `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture;
   `HyperPortal.captureSource` measures the lightweight DOWN hit test.

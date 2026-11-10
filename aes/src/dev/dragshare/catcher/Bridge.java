@@ -562,6 +562,11 @@ public final class Bridge {
                 || name.contains("TouchInterceptor") || name.contains("FloatBall")
                 || name.contains("FloatView") || name.contains("FloatIndicator")
                 || name.contains("TalkRoom") || name.contains("MultiTask")) return null;
+        // Telegram draws a whole message itself. The cell may have no
+        // background/click listener and may add checkbox children when selected;
+        // keep the content owner rather than rejecting it or capturing a control.
+        if (name.contains("ChatMessageCell") || name.contains("BackupImageView")
+                || name.contains("PhotoViewer")) return view;
         if (view instanceof TextView || view instanceof ImageView
                 || view instanceof TextureView || view instanceof WebView) return view;
         if (view instanceof ViewGroup) {
@@ -573,9 +578,15 @@ public final class Bridge {
             // Empty Compose interop handlers are transparent, but an actual
             // Compose host/custom content group must remain a valid source.
             if (name.contains("AndroidViewsHandler") || name.endsWith(".e0")) return null;
+            boolean composeHost = name.contains("Compose") || isObfuscatedAndroidComposeView(view);
+            // Navigation stacks retain empty full-screen containers above the
+            // active page. They own no content when the hit test found no leaf.
+            // In particular Telegram's LayoutContainer must not hide the chat
+            // in its sibling. This is a source test, not event interception.
+            if (!composeHost && isFullScreenContainer(view)) return null;
             if (group.getChildCount() == 0 && view.getBackground() == null
                     && !view.isClickable() && !view.isLongClickable()
-                    && !name.contains("Compose") && !isObfuscatedAndroidComposeView(view)) return null;
+                    && !composeHost) return null;
             return view;
         }
         return view.getBackground() != null || view.isClickable() || view.isLongClickable()
@@ -642,8 +653,8 @@ public final class Bridge {
                     // scroll starts on deep React Native trees (Discord).
                     sMainHandler.postDelayed(sWebPrefetchRunnable, getLongPressDuration());
                     // Schedule fallback at sLongPressDurationMs + 150ms (after AES u/a's timer).
-                    // If u/a fires, recordTouch() cancels this runnable so it never duplicates work;
-                    // if u/a was cancelled by micro-tremor or a non-DecorView window, this fallback catches it cleanly.
+                    // Successful native delivery cancels this runnable; a native
+                    // attempt with no payload must leave the source fallback alive.
                     int fallbackDelay = (sLongPressDurationMs > 0 ? sLongPressDurationMs : 800) + 150;
                     sMainHandler.postDelayed(sCustomLongPressRunnable, fallbackDelay);
                 } else if (action == MotionEvent.ACTION_MOVE) {
@@ -850,7 +861,9 @@ public final class Bridge {
     /** Called at the beginning of Interceptor.l(PointF, PointF, View). */
     public static void recordTouch(PointF first, PointF second, View view) {
         try {
-            sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+            // Native AES may find no content after an app changes selection
+            // state. Keep our source-based fallback until delivery succeeds;
+            // deliverContent() cancels it once a real payload has been accepted.
             long elapsed = SystemClock.uptimeMillis() - sDownAt;
             if (sDownAt > 0 && elapsed < (sLongPressDurationMs - 100)) {
                 Log.w(TAG, "recordTouch arrived too early (" + elapsed + "ms < " + sLongPressDurationMs
