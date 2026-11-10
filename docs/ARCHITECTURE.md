@@ -160,8 +160,15 @@ it can delay scrolling even when no portal drag is attempted.
 - Getter/action reflection uses targeted zero-argument lookups with cached hits and misses.
   All `findMethod()` callers invoke methods without arguments; enumerating every declared
   method for absent Compose getters added substantial allocation on the first long press.
+- Capture the original source View on DOWN with a bounded geometry-only hit test (256
+  nodes, 64 levels), before the app opens a context menu. Keep plain TextView content as a
+  string snapshot; do not decode images or run reflective extraction here. Long-press
+  extraction, WebView lookup, rule matching and native AES delivery use this source for
+  the entire gesture. Stock extraction of a later menu overlay must not replace it.
+  Clear the source on touch completion; a new DOWN may select an already-open menu.
 - Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
-  `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture.
+  `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture;
+  `HyperPortal.captureSource` measures the lightweight DOWN hit test.
   A config refresh must appear on the worker, never nested inside main-thread input delivery.
 
 Replacing the AES APK does not replace `Bridge` classes already loaded in app processes.

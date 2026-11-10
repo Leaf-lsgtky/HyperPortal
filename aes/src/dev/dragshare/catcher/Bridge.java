@@ -390,6 +390,10 @@ public final class Bridge {
     private static volatile float sLastMoveRawY;
     private static volatile boolean sMovedSinceDown;
     private static int sScrollTouchSlopPx = 8;
+    private static View sDownSourceView;
+    private static String sDownSourceText;
+    private static Bundle sDownSourcePayload;
+    private static int sDownSourceGeneration = -1;
     private static volatile Bundle sPendingPayload;
     private static volatile Object sPendingContent;
     private static volatile boolean sGestureActive;
@@ -473,7 +477,9 @@ public final class Bridge {
                 if (!sGestureActive || sMovedSinceDown || sGestureState.get() != STATE_IDLE) {
                     return;
                 }
-                View root = sLastTouchView != null ? sLastTouchView.getRootView() : null;
+                View source = gestureSourceView();
+                View root = source != null ? source
+                        : (sLastTouchView != null ? sLastTouchView.getRootView() : null);
                 if (root == null && sLastActivity != null && sLastActivity.getWindow() != null) {
                     root = sLastActivity.getWindow().getDecorView();
                 }
@@ -514,6 +520,66 @@ public final class Bridge {
         } catch (Throwable throwable) {
             Log.w(TAG, "register shadow receiver failed", throwable);
         }
+    }
+
+    private static View gestureSourceView() {
+        return sGestureActive && sDownSourceGeneration == sGestureGeneration
+                ? sDownSourceView : null;
+    }
+
+    private static void captureGestureSource(View root, float rawX, float rawY) {
+        Trace.beginSection("HyperPortal.captureSource");
+        try {
+            sDownSourceView = null;
+            sDownSourceText = null;
+            sDownSourcePayload = null;
+            sDownSourceGeneration = sGestureGeneration;
+            sDownSourceView = findSourceOnDown(root, rawX, rawY, 0, new int[]{256});
+            if (sDownSourceView instanceof TextView && !(sDownSourceView instanceof EditText)) {
+                TextView text = (TextView) sDownSourceView;
+                int variation = text.getInputType() & 0x00000ff0;
+                if (variation != 0x80 && variation != 0x90 && variation != 0xe0) {
+                    CharSequence value = text.getText();
+                    if (!TextUtils.isEmpty(value)) sDownSourceText = value.toString();
+                }
+            }
+        } finally {
+            Trace.endSection();
+        }
+    }
+
+    /** Geometry only: no reflection, semantics, file probes or bitmap work on DOWN. */
+    private static View findSourceOnDown(View view, float rawX, float rawY,
+                                         int depth, int[] budget) {
+        if (view == null || depth > 64 || budget[0]-- <= 0
+                || view.getVisibility() != View.VISIBLE || view.getAlpha() <= 0f
+                || view.getWidth() <= 0 || view.getHeight() <= 0
+                || !rectContainsPoint(view, rawX, rawY, 0)) return null;
+        String name = view.getClass().getName();
+        if (name.contains("CanvasProxyView") || name.contains("Slidr")
+                || name.contains("SwipeBack") || name.contains("SlideBack")
+                || name.contains("TouchProxy") || name.contains("GestureOverlay")
+                || name.contains("TouchInterceptor") || name.contains("FloatBall")
+                || name.contains("FloatView") || name.contains("FloatIndicator")
+                || name.contains("TalkRoom") || name.contains("MultiTask")) return null;
+        if (view instanceof TextView || view instanceof ImageView
+                || view instanceof TextureView || view instanceof WebView) return view;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = group.getChildCount() - 1; i >= 0 && budget[0] > 0; i--) {
+                View child = findSourceOnDown(group.getChildAt(i), rawX, rawY, depth + 1, budget);
+                if (child != null) return child;
+            }
+            // Empty Compose interop handlers are transparent, but an actual
+            // Compose host/custom content group must remain a valid source.
+            if (name.contains("AndroidViewsHandler") || name.endsWith(".e0")) return null;
+            if (group.getChildCount() == 0 && view.getBackground() == null
+                    && !view.isClickable() && !view.isLongClickable()
+                    && !name.contains("Compose") && !isObfuscatedAndroidComposeView(view)) return null;
+            return view;
+        }
+        return view.getBackground() != null || view.isClickable() || view.isLongClickable()
+                || !TextUtils.isEmpty(view.getContentDescription()) ? view : null;
     }
 
     public static void ping(MotionEvent event, View view, Activity activity) {
@@ -568,6 +634,9 @@ public final class Bridge {
                     sDragStartedGeneration = -1;
                     sWebAwaitingGeneration = -1;
                     sWebAwaitingViewRef = null;
+                    captureGestureSource(view != null ? view
+                            : (activity != null && activity.getWindow() != null
+                            ? activity.getWindow().getDecorView() : null), rawX, rawY);
                     // No view-tree/reflection work before the configured long
                     // press threshold. Even a 150ms head-start stalled slow
                     // scroll starts on deep React Native trees (Discord).
@@ -639,6 +708,10 @@ public final class Bridge {
                         Log.d(TAG, "ignore touch up/cancel while dragging");
                         return;
                     }
+                    sDownSourceView = null;
+                    sDownSourceText = null;
+                    sDownSourcePayload = null;
+                    sDownSourceGeneration = -1;
                     cancelShadowMorphAnimator();
                     sShadowMorphProgress = 0f;
                     sActiveDragView = null;
@@ -677,7 +750,8 @@ public final class Bridge {
             }
             sPendingGeneration = -1;
             long startedAt = SystemClock.uptimeMillis();
-            View root = sLastTouchView;
+            View source = gestureSourceView();
+            View root = source != null ? source : sLastTouchView;
             Activity act = sLastActivity;
             if (root == null && act != null && act.getWindow() != null) {
                 root = act.getWindow().getDecorView();
@@ -797,10 +871,12 @@ public final class Bridge {
                 return;
             }
             sLastTouchPoint = first;
-            sLastTouchView = view;
+            View source = gestureSourceView();
+            sLastTouchView = source != null ? source : view;
             sLastTouchAt = SystemClock.uptimeMillis();
             Log.i(TAG, "longPress first=" + first + " second=" + second
-                    + " view=" + (view == null ? "null" : view.getClass().getName()));
+                    + " view=" + (sLastTouchView == null ? "null" : sLastTouchView.getClass().getName())
+                    + (source != null ? " (source captured on down)" : ""));
         } catch (Throwable throwable) {
             Log.w(TAG, "recordTouch failed", throwable);
         }
@@ -1779,12 +1855,20 @@ public final class Bridge {
 
     /** Called before the original AES fetcher, so WebView/Compose never crash it. */
     public static Bundle preExtract(View view, int flags, boolean needHint) {
+        View source = gestureSourceView();
+        if (source != null && sDownSourcePayload != null) return sDownSourcePayload;
+        Bundle result = preExtractView(source != null ? source : view, flags, needHint);
+        if (source != null && isBundleMeaningful(result)) sDownSourcePayload = result;
+        return result;
+    }
+
+    private static Bundle preExtractView(View view, int flags, boolean needHint) {
         try {
             if (view == null) {
                 return null;
             }
             rememberContext(view.getContext());
-            if (!isTouchInsideView(view)) {
+            if (view != gestureSourceView() && !isTouchInsideView(view)) {
                 return null;
             }
             // A tagged file item is cheap to detect and should keep working even
@@ -2359,6 +2443,10 @@ public final class Bridge {
      */
     public static Bundle enhanceFetchViewContent(View view, int flags, boolean needHint, Bundle origin) {
         try {
+            // The stock fetcher may be walking a newly opened context menu.
+            // Its fallback cannot replace the source selected on ACTION_DOWN.
+            View source = gestureSourceView();
+            if (source != null && source != view) return sDownSourcePayload;
             if (sGestureState.get() == STATE_DRAGGING) {
                 return null;
             }
@@ -3648,7 +3736,14 @@ public final class Bridge {
         float rawX = getTouchRawX();
         float rawY = getTouchRawY();
         java.util.ArrayList<View> chain = new java.util.ArrayList<>();
-        collectPointChain(root, rawX, rawY, chain, 0, true);
+        View source = gestureSourceView();
+        if (source != null) {
+            for (View current = source; current != null && chain.size() < 64;
+                    current = viewParentOf(current)) chain.add(current);
+            Collections.reverse(chain);
+        } else {
+            collectPointChain(root, rawX, rawY, chain, 0, true);
+        }
         if (chain.isEmpty()) {
             return null;
         }
@@ -4455,7 +4550,8 @@ public final class Bridge {
         if (variation == 0x80 || variation == 0x90 || variation == 0xe0) {
             return null;
         }
-        CharSequence text = tv.getText();
+        CharSequence text = tv == gestureSourceView() && sDownSourceText != null
+                ? sDownSourceText : tv.getText();
         if (!isMeaningfulUserText(text)) {
             text = tv.getContentDescription();
         }
@@ -7289,7 +7385,8 @@ public final class Bridge {
                 }
                 Log.i(TAG, "deliver item key=" + entry.getKey() + " value=" + summary);
             }
-            Bundle payload = pickPayload(map);
+            View source = gestureSourceView();
+            Bundle payload = source != null ? preExtract(source, 3, false) : pickPayload(map);
             if (payload != null) {
                 sTriggeredGeneration = sGestureGeneration;
                 sMainHandler.removeCallbacks(sCustomLongPressRunnable);
