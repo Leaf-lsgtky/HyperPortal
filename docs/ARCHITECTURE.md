@@ -157,6 +157,9 @@ it can delay scrolling even when no portal drag is attempted.
   Hit-testing calls it outside `viewKind()`'s cache, so ordinary ViewGroups otherwise
   repeatedly enumerate all declared methods up their class hierarchy. Keep the reflective
   fallback for renamed Compose interop classes and continue traversing native children.
+- Getter/action reflection uses targeted zero-argument lookups with cached hits and misses.
+  All `findMethod()` callers invoke methods without arguments; enumerating every declared
+  method for absent Compose getters added substantial allocation on the first long press.
 - Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
   `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture.
   A config refresh must appear on the worker, never nested inside main-thread input delivery.

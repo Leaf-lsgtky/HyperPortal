@@ -439,6 +439,7 @@ public final class Bridge {
     // one is a large part of the old 100-200ms stall.
     private static final WeakHashMap<Class<?>, Integer> sViewKindCache = new WeakHashMap<>();
     private static final WeakHashMap<Class<?>, Boolean> sAndroidViewsHandlerCache = new WeakHashMap<>();
+    private static final WeakHashMap<Class<?>, Map<String, Method>> sNoArgMethodCache = new WeakHashMap<>();
     private static final int VIEW_KIND_NORMAL = 0;
     private static final int VIEW_KIND_COMPOSE = 1;
     private static final int VIEW_KIND_WEBVIEW = 2;
@@ -10588,16 +10589,28 @@ public final class Bridge {
     }
 
     private static Method findMethod(Class<?> type, String name) {
+        if (type == null) return null;
+        Map<String, Method> cached = sNoArgMethodCache.get(type);
+        if (cached != null && cached.containsKey(name)) return cached.get(name);
+        // Every caller requests a zero-argument getter/action. Enumerating
+        // View's entire method table for each absent Compose getter allocates
+        // hundreds of Method objects per class, even on a native-only screen.
+        Method result = null;
         Class<?> cursor = type;
         while (cursor != null) {
-            for (Method m : cursor.getDeclaredMethods()) {
-                if (name.equals(m.getName())) {
-                    return m;
-                }
+            try {
+                result = cursor.getDeclaredMethod(name);
+                break;
+            } catch (NoSuchMethodException ignored) {
+                cursor = cursor.getSuperclass();
             }
-            cursor = cursor.getSuperclass();
         }
-        return null;
+        if (cached == null) {
+            cached = new java.util.HashMap<>();
+            sNoArgMethodCache.put(type, cached);
+        }
+        cached.put(name, result);
+        return result;
     }
 
     private static Field findFieldOrNull(Class<?> type, String name) {
