@@ -217,7 +217,15 @@ smali inputs so a changed Java/smali method signature cannot be paired with stal
 `classes.dex`. Verify the packaged DEX hook signatures as well as compiling Java.
 
 The initial passive trace contained no usable target-app touch samples, so this patch has
-no measured before/after frame-time result yet. Physical validation: reopen the test app to
+no measured before/after frame-time result yet. A subsequent passive trace of installed
+commit `742440e` recorded 181 `aesDispatch` calls on Xiaomi Market's main thread: mean 0.020 ms,
+maximum 0.066 ms (`ping`: mean 0.013 ms, maximum 0.042 ms). A 58.985 ms config read in
+LibChecker ran on `HyperPortal-Config`, not its UI thread. The trace also showed AES
+dispatch on an interceptor thread, so the small scroll-gate state uses synchronized
+access across dispatch and main-handler callbacks. These samples verify execution paths,
+not the user's idle-feed scenario or an improvement percentage.
+
+Physical validation: reopen the test app to
 load the new AES code, wait 10–30 s, test both immediate and slowly starting scrolls, then
 verify a stationary text/image hold, dragging out of the circle and native cancel fly-back.
 

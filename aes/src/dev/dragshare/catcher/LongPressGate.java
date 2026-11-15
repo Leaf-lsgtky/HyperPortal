@@ -1,20 +1,22 @@
 package dev.dragshare.catcher;
 
-/** Main-thread gesture eligibility, independent of the post-hold drag circle. */
+/** Gesture eligibility, independent of the post-hold drag circle. */
 final class LongPressGate {
     private float downX;
     private float downY;
     private float slopSquared;
     private boolean cancelled = true;
 
-    void reset(float x, float y, float slop) {
+    // AES can dispatch from its interceptor thread; timers and web callbacks
+    // run on main. Publish the coordinates and cancellation as one state.
+    synchronized void reset(float x, float y, float slop) {
         downX = x;
         downY = y;
         slopSquared = slop * slop;
         cancelled = false;
     }
 
-    void move(float x, float y) {
+    synchronized void move(float x, float y) {
         float dx = x - downX;
         float dy = y - downY;
         // Latch cancellation: returning inside the circle cannot turn a scroll
@@ -22,11 +24,11 @@ final class LongPressGate {
         if (dx * dx + dy * dy > slopSquared) cancelled = true;
     }
 
-    void cancel() {
+    synchronized void cancel() {
         cancelled = true;
     }
 
-    boolean isCancelled() {
+    synchronized boolean isCancelled() {
         return cancelled;
     }
 }
