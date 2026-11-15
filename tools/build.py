@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -91,6 +92,18 @@ def build_bridge(clean=False, r8=False):
     print(f"[2/2] [OK] Built & Verified: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
     return out_apk
 
+def smali_fingerprint(project):
+    """Invalidate classes.dex when patched sources change, including deletions."""
+    digest = hashlib.sha256()
+    inputs = list(project.glob("smali*/**/*.smali"))
+    inputs += [project / "AndroidManifest.xml", project / "apktool.yml"]
+    for path in sorted(inputs):
+        if path.is_file():
+            digest.update(path.relative_to(project).as_posix().encode("utf-8") + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def build_aes(clean=False, version_code=1000000048):
     print("=" * 60)
     print("Building AES (ContentCatcher Privileged Hook)...")
@@ -143,7 +156,10 @@ def build_aes(clean=False, version_code=1000000048):
 
     # 3. Ensure base classes.dex exists (from smali)
     cached_classes_dex = a_cache / "classes.dex"
-    if not cached_classes_dex.is_file() or clean:
+    fingerprint_file = a_cache / "smali.sha256"
+    fingerprint = smali_fingerprint(cfg.AES_SMALI_PROJECT)
+    cached_fingerprint = fingerprint_file.read_text().strip() if fingerprint_file.is_file() else None
+    if not cached_classes_dex.is_file() or clean or cached_fingerprint != fingerprint:
         print("[3/5] Assembling patched smali into classes.dex...")
         if not cfg.APKTOOL_JAR:
             raise RuntimeError("apktool.jar not found to compile smali!")
@@ -156,6 +172,7 @@ def build_aes(clean=False, version_code=1000000048):
                 out.write(z.read("classes.dex"))
         if rebuilt_apk.exists():
             rebuilt_apk.unlink()
+        fingerprint_file.write_text(fingerprint, encoding="utf-8")
     else:
         print("[3/5] Using cached base classes.dex...")
 

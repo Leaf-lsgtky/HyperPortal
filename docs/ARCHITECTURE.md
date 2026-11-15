@@ -160,22 +160,66 @@ it can delay scrolling even when no portal drag is attempted.
 - Getter/action reflection uses targeted zero-argument lookups with cached hits and misses.
   All `findMethod()` callers invoke methods without arguments; enumerating every declared
   method for absent Compose getters added substantial allocation on the first long press.
-- Capture the original source View on DOWN with a bounded geometry-only hit test (256
-  nodes, 64 levels), before the app opens a context menu. Keep plain TextView content as a
-  string snapshot; do not decode images or run reflective extraction here. Long-press
-  extraction, WebView lookup, rule matching and native AES delivery use this source for
-  the entire gesture. Stock extraction of a later menu overlay must not replace it.
-  Clear the source on touch completion; a new DOWN may select an already-open menu.
-  Treat Telegram's self-drawn `ChatMessageCell`/`BackupImageView` as content owners,
-  even without a background or click listener, before descending into selection controls.
-  An empty full-screen navigation container is not a source; continue with its siblings.
-- `recordTouch()` reports a native long-press attempt, not successful extraction. Keep the
-  source-based fallback timer until a meaningful payload is delivered, so a selection-mode
-  transition that leaves native AES with no result cannot suppress the fallback too.
-- Trace sections `HyperPortal.ping`, `HyperPortal.configRefresh` and
-  `HyperPortal.webPrefetch` expose these costs in an app-enabled atrace/Perfetto capture;
-  `HyperPortal.captureSource` measures the lightweight DOWN hit test.
+- DOWN only records gesture state. Extract from the node resolved at long-press time;
+  the earlier DOWN source snapshot was reverted because a self-drawn image grid can
+  contain multiple independently draggable images in one View.
+- `recordTouch()` now returns eligibility to the patched native interceptor. A rejected
+  timer must return **before** AES traverses the window, rather than merely skipping
+  Bridge's bookkeeping. An accepted native attempt that finds no content still leaves
+  the fallback alive until a meaningful payload is delivered.
+- Trace sections `HyperPortal.aesDispatch`, `HyperPortal.ping`,
+  `HyperPortal.configRefresh` and `HyperPortal.webPrefetch` expose these costs in an
+  app-enabled atrace/Perfetto capture. `aesDispatch` includes the stock AES detector and
+  event-copy overhead after `ping` returns.
   A config refresh must appear on the worker, never nested inside main-thread input delivery.
+
+### First scroll after idle (2026-11-15)
+
+Static inspection found remaining work charged to ordinary touches even after configuration
+IPC had been moved off-thread:
+
+- The shadow receiver still registered synchronously in `ping()`. It now registers on
+  `HyperPortal-Config` with the config receiver. `Interceptor` calls `Bridge.warmUp()` at
+  construction so bootstrap is requested before the first input event. The worker runs
+  at Android background priority.
+- An expired 5 s config cache used to trigger background provider work at the first touch
+  after idle. With a populated cache, refresh is now requested 1 s after UP/CANCEL; the
+  next DOWN cancels that deferred request. Bootstrap retries remain asynchronous and
+  pushed config still applies immediately. This reduces competition with the initial
+  input frame; it does not prove that every observed hitch was caused by config work.
+- MOVE cancelled WebView prefetch at Android scroll slop, but the custom long-press timer
+  survived until the much larger portal radius. `LongPressGate` now permanently cancels
+  prefetch, the fallback, native extraction and late web delivery for a scrolling gesture.
+  Batched historical positions count, so moving out and back cannot revive the hold.
+  UP/CANCEL and a second pointer also invalidate an unaccepted hold. A completed hold
+  retains the user-configured circle around the hold position for starting the drag.
+- Stock AES formatted `MotionEvent.toString()` on every event before checking whether
+  debug logging was enabled. The debug flag now gates string construction at the caller.
+  Bridge also avoids allocating another weak context reference for every MOVE.
+
+The local OPPO binaries were inspected directly with DEX SQL/smali:
+
+| Binary / entry point | Relevant behavior |
+| --- | --- |
+| `framework.jar`: `ViewRootImpl$ViewPostImeInputStage.processPointerEvent` | Calls the vendor extension in input dispatch; work done there still costs the input thread. |
+| `oplus-framework.jar`: `OplusActivityThreadExtImpl.hookHandleBindApplication` → `OplusViewDragManager.init` | Initializes at app binding and posts configuration processing to `OplusViewBackgroundThread`. |
+| `OplusViewDragManager.requestConfigLoadAsync` / `isFeatureEnabled` | Coalesces config loads and uses an activity configuration cache, including unsupported activities. |
+| `handleActionMove` / `OplusPendingDragState.shouldTriggerDragEvent` | Checks validity, elapsed hold time, pointer count and displacement before target lookup/content processing; invalid gestures are ignored until a new DOWN. |
+| `OplusViewDragTouchViewHelper.dispatchTouchView` | Records weak references from actual DOWN dispatch; MOVE does not perform another content-tree scan. This depends on OPPO's per-View framework hooks and is not copied into the AES-only bridge. |
+
+These are useful scheduling and gating patterns, not a portable GPU/CPU boost API. View
+access still belongs on the owning UI thread; moving arbitrary View traversal to a worker
+would introduce races. Normal scrolling should avoid entering extraction in the first place.
+
+`python -m unittest discover -s tests -v` checks the scroll gate (including diagonal drift,
+out-and-back samples and reset) and smali cache invalidation. `tools/build.py aes` hashes its
+smali inputs so a changed Java/smali method signature cannot be paired with stale cached
+`classes.dex`. Verify the packaged DEX hook signatures as well as compiling Java.
+
+The initial passive trace contained no usable target-app touch samples, so this patch has
+no measured before/after frame-time result yet. Physical validation: reopen the test app to
+load the new AES code, wait 10–30 s, test both immediate and slowly starting scrolls, then
+verify a stationary text/image hold, dragging out of the circle and native cancel fly-back.
 
 Replacing the AES APK does not replace `Bridge` classes already loaded in app processes.
 Reopen the test app to validate new code; device and system process restarts are unnecessary

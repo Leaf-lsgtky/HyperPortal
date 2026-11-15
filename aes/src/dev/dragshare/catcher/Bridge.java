@@ -149,7 +149,10 @@ public final class Bridge {
     private static final AtomicInteger sConfigRevision = new AtomicInteger();
     private static final java.util.concurrent.ExecutorService sConfigExecutor =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "HyperPortal-Config");
+                Thread t = new Thread(() -> {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                    r.run();
+                }, "HyperPortal-Config");
                 t.setDaemon(true);
                 return t;
             });
@@ -222,6 +225,7 @@ public final class Bridge {
             final int revision = sConfigRevision.get();
             sConfigExecutor.execute(() -> {
                 ensureConfigReceiver(appContext);
+                ensureShadowReceiver(appContext);
                 refreshConfig(appContext, revision);
             });
         } catch (Throwable ignored) {
@@ -390,6 +394,7 @@ public final class Bridge {
     private static volatile float sLastMoveRawY;
     private static volatile boolean sMovedSinceDown;
     private static int sScrollTouchSlopPx = 8;
+    private static final LongPressGate sLongPressGate = new LongPressGate();
     private static volatile Bundle sPendingPayload;
     private static volatile Object sPendingContent;
     private static volatile boolean sGestureActive;
@@ -445,6 +450,7 @@ public final class Bridge {
     private static final int VIEW_KIND_WEBVIEW = 2;
     private static final int VIEW_KIND_CUSTOM_CELL = 3;
     private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
+    private static final Runnable sDeferredConfigRefresh = () -> ensureConfig(currentContext());
     private static final Runnable sTiltTimeout = new Runnable() {
         @Override
         public void run() {
@@ -470,7 +476,8 @@ public final class Bridge {
         @Override
         public void run() {
             try {
-                if (!sGestureActive || sMovedSinceDown || sGestureState.get() != STATE_IDLE) {
+                if (!sGestureActive || sLongPressGate.isCancelled()
+                        || sMovedSinceDown || sGestureState.get() != STATE_IDLE) {
                     return;
                 }
                 View root = sLastTouchView != null ? sLastTouchView.getRootView() : null;
@@ -487,7 +494,7 @@ public final class Bridge {
 
     static {
         try {
-            Log.i(TAG, "Bridge loaded v45 pid=" + android.os.Process.myPid()
+            Log.i(TAG, "Bridge loaded (scroll-gated) pid=" + android.os.Process.myPid()
                     + " uid=" + android.os.Process.myUid()
                     + " (classes2.dex)");
         } catch (Throwable ignored) {
@@ -497,7 +504,19 @@ public final class Bridge {
     private Bridge() {
     }
 
-    /** Called at the very beginning of Interceptor.dispatchTouchEvent(). */
+    /** Called when AES creates its interceptor, before the first touch. */
+    public static void warmUp(Context context) {
+        try {
+            if (context == null) return;
+            Context application = context.getApplicationContext();
+            Context appContext = application != null ? application : context;
+            rememberContext(appContext);
+            ensureConfig(appContext);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Registration performs Binder IPC; only the config worker calls this. */
     private static void ensureShadowReceiver(Context context) {
         if (context == null || sShadowReceiverRegistered) {
             return;
@@ -521,16 +540,26 @@ public final class Bridge {
         try {
             rememberContext(activity);
             Context appContext = activity != null ? activity.getApplicationContext() : currentContext();
-            ensureShadowReceiver(appContext);
-            ensureConfig(appContext);
+            if (event == null) return;
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                sMainHandler.removeCallbacks(sDeferredConfigRefresh);
+                // Normally warmUp() has already bootstrapped the cache. Retry
+                // only a missing config here; an expired cache is refreshed
+                // after UP, away from the first input frame after idle.
+                if (sLastConfigCheckTime == 0) ensureConfig(appContext);
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                sMainHandler.removeCallbacks(sDeferredConfigRefresh);
+                sMainHandler.postDelayed(sDeferredConfigRefresh, 1000);
+            }
             if (!sMasterSwitch || isBlacklisted(appContext) || (!sLandscapeTrigger && isLandscape(appContext))) {
+                cancelPendingLongPress();
                 return;
             }
             if (activity != null) {
                 sLastActivity = activity;
             }
             if (event != null) {
-                int action = event.getActionMasked();
                 float rawX = event.getRawX();
                 float rawY = event.getRawY();
                 if (action == MotionEvent.ACTION_DOWN) {
@@ -552,6 +581,7 @@ public final class Bridge {
                     sMovedSinceDown = false;
                     sScrollTouchSlopPx = appContext != null
                             ? ViewConfiguration.get(appContext).getScaledTouchSlop() : 8;
+                    sLongPressGate.reset(rawX, rawY, sScrollTouchSlopPx);
                     sPendingPayload = null;
                     sPendingContent = null;
                     sGestureActive = true;
@@ -580,34 +610,39 @@ public final class Bridge {
                 } else if (action == MotionEvent.ACTION_MOVE) {
                     sLastMoveRawX = rawX;
                     sLastMoveRawY = rawY;
-                    float dx = rawX - sDownRawX;
-                    float dy = rawY - sDownRawY;
-                    float dist = (float) Math.hypot(dx, dy);
-
-                    float density = appContext != null ? appContext.getResources().getDisplayMetrics().density : 3.0f;
-                    float slopPx = Math.max(8f, sTouchSlopDp * density);
-                    // Web prefetch uses Android's scroll slop, not the larger
-                    // user-configurable portal circle. A slow scroll can leave
-                    // the former while still being inside the latter.
-                    if (dist > sScrollTouchSlopPx) {
-                        sMainHandler.removeCallbacks(sWebPrefetchRunnable);
-                    }
-                    // Anti-mistouch for the pre-long-press phase: drift beyond
-                    // the circle cancels the pending long press.
-                    if (dist > slopPx) {
-                        sMovedSinceDown = true;
-                        sMainHandler.removeCallbacks(sWebPrefetchRunnable);
-                        if (sGestureState.get() == STATE_IDLE) {
-                            sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+                    // Before a payload is accepted, use the host's scroll slop
+                    // for ALL long-press work. Previously only web prefetch was
+                    // cancelled here; the fallback still walked the feed tree.
+                    // Inspect batched samples too (an out-and-back MOVE is still
+                    // a scroll). After acceptance the user's drag circle wins.
+                    if (sPendingPayload == null && sTriggeredGeneration != sGestureGeneration
+                            && sDragStartedGeneration != sGestureGeneration
+                            && sGestureState.get() == STATE_IDLE) {
+                        if (sLongPressGate.isCancelled()) return;
+                        float rawOffsetX = rawX - event.getX();
+                        float rawOffsetY = rawY - event.getY();
+                        for (int i = 0; i < event.getHistorySize(); i++) {
+                            // Historical coordinates are local; translate using
+                            // the same event's raw/local offset, without a View walk.
+                            sLongPressGate.move(event.getHistoricalX(i) + rawOffsetX,
+                                    event.getHistoricalY(i) + rawOffsetY);
+                        }
+                        sLongPressGate.move(rawX, rawY);
+                        if (sLongPressGate.isCancelled()) {
+                            cancelPendingLongPress();
+                            return;
                         }
                     }
-                    // Drag gate for the post-long-press phase: the same radius,
-                    // but measured from the point where the long press
-                    // completed. Inside the circle the shadow does not exist.
+                    // After a completed hold, use the user-configured radius
+                    // measured from the hold position, never from the DOWN.
+                    // Inside this circle the shadow does not exist.
                     if (sPendingPayload != null && sDragOriginX >= 0f) {
+                        float density = appContext != null
+                                ? appContext.getResources().getDisplayMetrics().density : 3.0f;
+                        float slopPx = Math.max(8f, sTouchSlopDp * density);
                         float originDx = rawX - sDragOriginX;
                         float originDy = rawY - sDragOriginY;
-                        if (Math.hypot(originDx, originDy) > slopPx) {
+                        if (originDx * originDx + originDy * originDy > slopPx * slopPx) {
                             sMovedSinceDown = true;
                         }
                     }
@@ -626,9 +661,10 @@ public final class Bridge {
                         Log.i(TAG, "pending drag starts on move");
                         forwardToPortal(pending, pendingContent, true);
                     }
+                } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                    if (sPendingPayload == null && sActiveDragView == null) cancelPendingLongPress();
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                    sMainHandler.removeCallbacks(sCustomLongPressRunnable);
-                    sMainHandler.removeCallbacks(sWebPrefetchRunnable);
+                    cancelPendingLongPress();
                     sGestureActive = false;
                     sWebAwaitingGeneration = -1;
                     sWebAwaitingViewRef = null;
@@ -660,13 +696,23 @@ public final class Bridge {
         }
     }
 
+    private static void cancelPendingLongPress() {
+        sLongPressGate.cancel();
+        sPendingGeneration = -1;
+        sWebAwaitingGeneration = -1;
+        sWebAwaitingViewRef = null;
+        sMainHandler.removeCallbacks(sCustomLongPressRunnable);
+        sMainHandler.removeCallbacks(sWebPrefetchRunnable);
+    }
+
     private static void onCustomLongPressTriggered() {
         try {
             Context ctx = currentContext();
             if (!sMasterSwitch || isBlacklisted(ctx) || (!sLandscapeTrigger && isLandscape(ctx))) {
                 return;
             }
-            if (!sGestureActive || sPendingGeneration != sGestureGeneration || sPendingPayload != null
+            if (!sGestureActive || sLongPressGate.isCancelled()
+                    || sPendingGeneration != sGestureGeneration || sPendingPayload != null
                     || sTriggeredGeneration == sGestureGeneration
                     || sDragStartedGeneration == sGestureGeneration
                     || sGestureState.get() != STATE_IDLE || sActiveDragView != null) {
@@ -774,8 +820,13 @@ public final class Bridge {
     }
 
     /** Called at the beginning of Interceptor.l(PointF, PointF, View). */
-    public static void recordTouch(PointF first, PointF second, View view) {
+    public static boolean recordTouch(PointF first, PointF second, View view) {
         try {
+            Context ctx = currentContext();
+            if (!sGestureActive || sLongPressGate.isCancelled() || !sMasterSwitch
+                    || isBlacklisted(ctx) || (!sLandscapeTrigger && isLandscape(ctx))) {
+                return false;
+            }
             // Native AES may find no content after an app changes selection
             // state. Keep our source-based fallback until delivery succeeds;
             // deliverContent() cancels it once a real payload has been accepted.
@@ -783,28 +834,29 @@ public final class Bridge {
             if (sDownAt > 0 && elapsed < (sLongPressDurationMs - 100)) {
                 Log.w(TAG, "recordTouch arrived too early (" + elapsed + "ms < " + sLongPressDurationMs
                         + "ms), ignoring premature AES trigger");
-                return;
+                return false;
             }
-            if (!sGestureActive || sTriggeredGeneration == sGestureGeneration
+            if (sTriggeredGeneration == sGestureGeneration
                     || sDragStartedGeneration == sGestureGeneration
                     || sPendingPayload != null || sGestureState.get() != STATE_IDLE) {
                 Log.d(TAG, "recordTouch ignored (custom engine active or already triggered)");
-                return;
+                return false;
             }
-            // The pre-long-press anti-mistouch circle already cancelled our own
-            // fallback timer; without this guard a short long-press-duration
-            // lets AES' native 450ms trigger walk straight past the circle.
+            // Once the drag circle has been left, this gesture cannot start
+            // another native extraction.
             if (sMovedSinceDown) {
                 Log.i(TAG, "recordTouch ignored: finger moved beyond slop before long press");
-                return;
+                return false;
             }
             sLastTouchPoint = first;
             sLastTouchView = view;
             sLastTouchAt = SystemClock.uptimeMillis();
             Log.i(TAG, "longPress first=" + first + " second=" + second
                     + " view=" + (sLastTouchView == null ? "null" : sLastTouchView.getClass().getName()));
+            return true;
         } catch (Throwable throwable) {
             Log.w(TAG, "recordTouch failed", throwable);
+            return false;
         }
     }
 
@@ -1559,7 +1611,8 @@ public final class Bridge {
      */
     private static void onWebCacheReady(View webView, WebCache cache) {
         try {
-            if (!sGestureActive || cache == null || cache.generation != sGestureGeneration) {
+            if (!sGestureActive || sLongPressGate.isCancelled()
+                    || cache == null || cache.generation != sGestureGeneration) {
                 return;
             }
             if (sWebAwaitingGeneration != cache.generation) {
@@ -7255,7 +7308,7 @@ public final class Bridge {
                 Log.d(TAG, "deliverContent ignored (disabled, blacklisted, or landscape)");
                 return;
             }
-            if (!sGestureActive || content == null
+            if (!sGestureActive || sLongPressGate.isCancelled() || content == null
                     || sTriggeredGeneration == sGestureGeneration
                     || sDragStartedGeneration == sGestureGeneration
                     || sPendingPayload != null
@@ -10580,7 +10633,10 @@ public final class Bridge {
 
     private static void rememberContext(Context context) {
         if (context != null) {
-            sContextRef = new WeakReference<>(context);
+            WeakReference<Context> previous = sContextRef;
+            if (previous == null || previous.get() != context) {
+                sContextRef = new WeakReference<>(context);
+            }
         }
     }
 

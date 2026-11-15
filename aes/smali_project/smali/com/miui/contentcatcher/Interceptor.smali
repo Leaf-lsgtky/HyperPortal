@@ -147,6 +147,8 @@
 
     iput-object p1, p0, Lcom/miui/contentcatcher/Interceptor;->a:Landroid/app/Activity;
 
+    invoke-static {p1}, Ldev/dragshare/catcher/Bridge;->warmUp(Landroid/content/Context;)V
+
     invoke-static {p1}, Ljava/lang/System;->identityHashCode(Ljava/lang/Object;)I
 
     move-result v2
@@ -1247,6 +1249,9 @@
 .method public final dispatchTouchEvent(Landroid/view/MotionEvent;Landroid/view/View;Landroid/app/Activity;)Z
     .locals 4
 
+    const-string v0, "HyperPortal.aesDispatch"
+
+    invoke-static {v0}, Landroid/os/Trace;->beginSection(Ljava/lang/String;)V
 
     invoke-static {p1, p2, p3}, Ldev/dragshare/catcher/Bridge;->ping(Landroid/view/MotionEvent;Landroid/view/View;Landroid/app/Activity;)V
     const/4 p3, 0x0
@@ -1259,12 +1264,20 @@
 
     invoke-static {v0, p0}, Lp/b;->e(Ljava/lang/String;Ljava/lang/String;)V
 
+    invoke-static {}, Landroid/os/Trace;->endSection()V
+
     return p3
 
     :cond_0
     invoke-static {p1}, Landroid/view/MotionEvent;->obtain(Landroid/view/MotionEvent;)Landroid/view/MotionEvent;
 
     move-result-object v1
+
+    # Avoid MotionEvent.toString() and both StringBuilders on every MOVE when
+    # the logger will discard the result anyway.
+    sget-boolean v2, Lp/b;->a:Z
+
+    if-eqz v2, :skip_touch_debug
 
     new-instance v2, Ljava/lang/StringBuilder;
 
@@ -1280,6 +1293,7 @@
 
     invoke-static {v0, v2}, Lp/b;->b(Ljava/lang/String;Ljava/lang/String;)V
 
+    :skip_touch_debug
     invoke-virtual {v1}, Landroid/view/MotionEvent;->getPointerCount()I
 
     move-result v2
@@ -1386,6 +1400,8 @@
     invoke-virtual {v1}, Landroid/view/MotionEvent;->recycle()V
 
     :goto_3
+    invoke-static {}, Landroid/os/Trace;->endSection()V
+
     return p3
 
     :cond_5
@@ -1419,6 +1435,8 @@
     invoke-static {v0, p0}, Lp/b;->e(Ljava/lang/String;Ljava/lang/String;)V
 
     invoke-virtual {v1}, Landroid/view/MotionEvent;->recycle()V
+
+    invoke-static {}, Landroid/os/Trace;->endSection()V
 
     return p3
 .end method
@@ -2248,7 +2266,16 @@
     .locals 17
 
 
-    invoke-static/range {p1 .. p3}, Ldev/dragshare/catcher/Bridge;->recordTouch(Landroid/graphics/PointF;Landroid/graphics/PointF;Landroid/view/View;)V
+    # A rejected native timer must stop BEFORE walking or extracting the tree.
+    invoke-static/range {p1 .. p3}, Ldev/dragshare/catcher/Bridge;->recordTouch(Landroid/graphics/PointF;Landroid/graphics/PointF;Landroid/view/View;)Z
+
+    move-result v0
+
+    if-nez v0, :portal_long_press_allowed
+
+    return v0
+
+    :portal_long_press_allowed
     move-object/from16 v7, p0
 
     move-object/from16 v8, p1
