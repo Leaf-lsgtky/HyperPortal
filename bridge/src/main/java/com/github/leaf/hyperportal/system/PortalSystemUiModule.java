@@ -5,6 +5,7 @@ import android.app.Application;
 import android.app.SearchManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.ContentValues;
@@ -101,6 +102,7 @@ public final class PortalSystemUiModule {
 
     private static final String TAG = "HyperPortalSysUI";
     private static final String ACTION_DRAG_STATE = "com.github.leaf.hyperportal.ACTION_DRAG_STATE";
+    private static final String PORTAL_DRAG_MIME = "application/x-dragshare";
     private static final String ACTION_SHOW = "com.github.leaf.hyperportal.SHOW";
     public static final String ACTION_REQUEST_GRANT = "com.github.leaf.hyperportal.ACTION_REQUEST_GRANT";
     public static final String SYSUI_PROVIDER_AUTHORITY = "com.android.systemui.fileprovider";
@@ -831,6 +833,7 @@ public final class PortalSystemUiModule {
         private volatile List<String> mPinnedOrder = new ArrayList<>();
         private boolean mFirstDragLogged = false;
         private int mCurrentState = 0;
+        private boolean mOwnPortalDrag = false;
 
         public SystemUiOverlay(Context context) {
             // Deliberately trivial. initOverlay() registers the drag-state
@@ -1881,14 +1884,25 @@ public final class PortalSystemUiModule {
 
             // 4. Drag and Drop Listener on Container (ColorOS Dock Interaction & Fly-back)
             mContainer.setOnDragListener((v, event) -> {
+                if (event == null) {
+                    return false;
+                }
                 int action = event.getAction();
                 if (action == DragEvent.ACTION_DRAG_STARTED) {
+                    ClipDescription description = event.getClipDescription();
+                    mOwnPortalDrag = description != null
+                            && description.hasMimeType(PORTAL_DRAG_MIME);
+                    if (!mOwnPortalDrag) {
+                        return false;
+                    }
                     mGallerySavedThisDrag = false;
                     if (TransferDockDragGuard.isDragging() || mTransferDockBroadcastDragging) {
                         handleDragStateChanged(0, 0f);
                         return false;
                     }
                     return isMasterEnabled();
+                } else if (!mOwnPortalDrag) {
+                    return false;
                 } else if (action == DragEvent.ACTION_DRAG_LOCATION) {
                     if (event.getX() == 0f && event.getY() == 0f) {
                         return true;
@@ -1941,6 +1955,7 @@ public final class PortalSystemUiModule {
                         mDockBar.resetMagnification(false);
                     }
                     handleDragStateChanged(0, 0f);
+                    mOwnPortalDrag = false;
                     return true;
                 }
                 return true;

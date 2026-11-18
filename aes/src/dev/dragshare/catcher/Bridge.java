@@ -113,6 +113,7 @@ import java.util.regex.Pattern;
 public final class Bridge {
 
     private static final String TAG = "DragSharePoC";
+    private static final String PORTAL_DRAG_MIME = "application/x-dragshare";
     private static final String SYSUI_PROVIDER_AUTHORITY = "com.android.systemui.fileprovider";
     private static final String SYSUI_INCOMING_PREFIX =
             "content://com.android.systemui.fileprovider/hyperportal_incoming/";
@@ -9078,18 +9079,28 @@ public final class Bridge {
                 root.setOnDragListener(new View.OnDragListener() {
                     private float lastNotifiedMotionX = -1f;
                     private float lastNotifiedMotionY = -1f;
+                    private boolean portalDrag;
 
                     @Override
                     public boolean onDrag(View v, DragEvent event) {
                         if (event == null) return false;
                         int action = event.getAction();
                         if (action == DragEvent.ACTION_DRAG_STARTED) {
+                            ClipDescription description = event.getClipDescription();
+                            portalDrag = description != null
+                                    && description.hasMimeType(PORTAL_DRAG_MIME);
+                            if (!portalDrag) {
+                                return false;
+                            }
                             sDragStartY = -1f;
                             sDragStartX = -1f;
                             suppressChildDragTargets(v, event);
                             dismissTextSelectionUi(v);
                             notifyPortalDragState(v.getContext(), 1, 0f, 0f);
                             return true;
+                        }
+                        if (!portalDrag) {
+                            return false;
                         }
                         if (action == DragEvent.ACTION_DRAG_LOCATION) {
                             if (event.getX() == 0f && event.getY() == 0f) {
@@ -9177,6 +9188,7 @@ public final class Bridge {
                             sActiveDragText = null;
                             sActiveDragBitmap = null;
                             sGestureState.set(STATE_IDLE);
+                            portalDrag = false;
                             return true;
                         }
                         return false;
