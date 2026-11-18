@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
+import com.github.leaf.hyperportal.transferdock.TransferDockContract;
 
 /**
  * libxposed API 102 entry class.
@@ -1399,6 +1400,20 @@ public final class PortalSystemModule {
         return false;
     }
 
+    private static boolean isShareFallbackDrag(Object dragState) {
+        try {
+            Object clipObject = getField(dragState, "mData");
+            if (clipObject instanceof ClipData) {
+                ClipDescription description = ((ClipData) clipObject).getDescription();
+                return description != null
+                        && (description.filterMimeTypes(DRAG_MIME) != null
+                        || description.filterMimeTypes(TransferDockContract.DRAG_MIME) != null);
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     private static boolean playColorosEndAnimation(Object dragState, boolean success) {
         try {
             Object surfaceObj = getField(dragState, "mSurfaceControl");
@@ -1682,8 +1697,8 @@ public final class PortalSystemModule {
             return false;
         }
         Object dragState = getField(controller, "mDragState");
-        if (!isOurDrag(dragState)) {
-            return false; // preserve the source app's behavior for non-portal drags
+        if (!isShareFallbackDrag(dragState)) {
+            return false; // preserve native handling for unrelated drags
         }
         if (!dropToShareEnabled()) {
             return false;

@@ -635,7 +635,7 @@ public class TransferDockPanel extends FrameLayout {
                 mimeTypes.add("*/*");
             }
             mimeTypes.add(ClipDescription.MIMETYPE_TEXT_URILIST);
-            mimeTypes.add("application/x-dragshare");
+            mimeTypes.add(TransferDockContract.DRAG_MIME);
 
             ClipDescription desc = new ClipDescription(
                     TextUtils.isEmpty(item.getTitle()) ? "内容" : item.getTitle(),
@@ -651,7 +651,9 @@ public class TransferDockPanel extends FrameLayout {
 
         String text = item.getText();
         if (TextUtils.isEmpty(text)) text = item.getTitle();
-        return ClipData.newPlainText("TransferDock", text);
+        ClipDescription description = new ClipDescription("TransferDock",
+                new String[]{ClipDescription.MIMETYPE_TEXT_PLAIN, TransferDockContract.DRAG_MIME});
+        return new ClipData(description, new ClipData.Item(text));
     }
 
     private void startDragOut(View cardView, TransferDockItem item) {
