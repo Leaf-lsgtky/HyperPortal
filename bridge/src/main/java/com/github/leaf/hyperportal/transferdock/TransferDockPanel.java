@@ -87,6 +87,14 @@ public class TransferDockPanel extends FrameLayout {
     private static final int CARD_RADIUS_DP = 17;
     private static final int PANEL_RADIUS_DP = 20;
 
+    // The panel window slides ~110dp while yielding, so any threshold tied to
+    // its frame is a moving reference.  Make-way decisions instead use the
+    // finger's ABSOLUTE distance from the screen's right edge, with a wide
+    // hysteresis band that keeps an expanded dock stable near the edge.
+    private static final int DRAG_BACK_ENTER_DP = 56;
+    private static final int DRAG_BACK_EXIT_DP = 130;
+    private static final long DRAG_START_GUARD_MS = 260;
+
     private final float mDensity;
     private final int mPanelHeightPx;
 
@@ -112,6 +120,7 @@ public class TransferDockPanel extends FrameLayout {
     private boolean mDragActive;
     private boolean mDragPanelAside;
     private long mDragStartedAt;
+    private float mDragScreenX = -1f;
     private TransferDockTheme mTheme;
     private boolean mBlurAvailable;
     private boolean mIsDismissing = false;
@@ -285,29 +294,47 @@ public class TransferDockPanel extends FrameLayout {
                 mDragActive = true;
                 mDragPanelAside = true;
                 mDragStartedAt = android.os.SystemClock.uptimeMillis();
+                mDragScreenX = -1f;
                 return true;
             }
             if (action == DragEvent.ACTION_DRAG_ENTERED
                     || action == DragEvent.ACTION_DRAG_LOCATION) {
-                // Ignore the initial ENTERED at the drag origin.  Once the
-                // panel has slid aside, moving into its left 24dp expands it
-                // without interrupting the drag, so the user can drag back
-                // out on the same gesture.
-                maybeExpandDragPanel(event.getX());
+                // getX() is WINDOW-local and this window is sliding while it
+                // yields, so convert to a screen-absolute X.  Ignore the
+                // (0,0) placeholder events some firmware emits.
+                if (event.getX() != 0f || event.getY() != 0f) {
+                    int[] loc = new int[2];
+                    v.getLocationOnScreen(loc);
+                    mDragScreenX = loc[0] + event.getX();
+                    // The initial ENTERED fires on the card, before the panel
+                    // has slid aside.  Ignore make-way events until the yield
+                    // animation has settled; the drag STARTED at the dock, so
+                    // no expansion is possible before it moves out anyway.
+                    if (android.os.SystemClock.uptimeMillis() - mDragStartedAt
+                            >= DRAG_START_GUARD_MS) {
+                        updateDragMakeWay();
+                    }
+                }
                 return true;
             }
             if (action == DragEvent.ACTION_DRAG_EXITED) {
-                if (mDragActive && !mDragPanelAside) {
-                    mDragPanelAside = true;
-                    if (mController != null) {
-                        mController.onPanelDragExited();
-                    }
+                // Never collapse unconditionally.  EXITED also fires when the
+                // sliding window moves out from under a stationary finger, and
+                // a finger continuing right leaves the expanded window through
+                // its right edge (only 8dp from the screen edge).  Collapsing
+                // on either is what made the dock snap shut again on the same
+                // gesture.  Only a real exit back into the app area -- far from
+                // the right edge in screen-absolute coordinates -- re-yields.
+                if (mDragActive && !mDragPanelAside && mDragScreenX >= 0f
+                        && distanceFromRightEdge() > DRAG_BACK_EXIT_DP * mDensity) {
+                    setDragPanelAside(true);
                 }
                 return true;
             }
             if (action == DragEvent.ACTION_DRAG_ENDED) {
                 mDragActive = false;
                 mDragPanelAside = false;
+                mDragScreenX = -1f;
                 boolean success = event.getResult();
                 Log.i(TAG, "ACTION_DRAG_ENDED received in TransferDockPanel, success=" + success);
                 if (mController != null) {
@@ -593,22 +620,46 @@ public class TransferDockPanel extends FrameLayout {
         return card;
     }
 
-    private void maybeExpandDragPanel(float panelX) {
-        if (!mDragActive || !mDragPanelAside) {
+    /**
+     * Single source of truth for the make-way transitions, driven by the
+     * finger's ABSOLUTE distance from the right screen edge (invariant while
+     * the panel window slides ~110dp).
+     *
+     * Widely separated thresholds give hysteresis: the panel yields on drag
+     * start, expands again only when the payload comes back within
+     * {@link #DRAG_BACK_ENTER_DP} of the edge, and re-yields only beyond
+     * {@link #DRAG_BACK_EXIT_DP}.  Moving right toward the edge can therefore
+     * never collapse it -- the reported bug.
+     */
+    private void updateDragMakeWay() {
+        if (!mDragActive || mDragScreenX < 0f) {
             return;
         }
-        if (android.os.SystemClock.uptimeMillis() - mDragStartedAt < 260) {
+        float distance = distanceFromRightEdge();
+        if (mDragPanelAside) {
+            if (distance <= DRAG_BACK_ENTER_DP * mDensity) {
+                setDragPanelAside(false);
+            }
+        } else if (distance > DRAG_BACK_EXIT_DP * mDensity) {
+            setDragPanelAside(true);
+        }
+    }
+
+    private float distanceFromRightEdge() {
+        return getResources().getDisplayMetrics().widthPixels - mDragScreenX;
+    }
+
+    private void setDragPanelAside(boolean aside) {
+        if (mDragPanelAside == aside) {
             return;
         }
-        // At the aside position only the left 36dp is visible.  Expand only
-        // when the finger is safely inside the 24dp inner band, otherwise the
-        // expanded window would end right under the finger and immediately
-        // collapse again.
-        if (panelX > dp(24)) {
+        mDragPanelAside = aside;
+        if (mController == null) {
             return;
         }
-        mDragPanelAside = false;
-        if (mController != null) {
+        if (aside) {
+            mController.onPanelDragExited();
+        } else {
             mController.onPanelDragEntered();
         }
     }
@@ -687,6 +738,7 @@ public class TransferDockPanel extends FrameLayout {
         mDragActive = true;
         mDragPanelAside = true;
         mDragStartedAt = android.os.SystemClock.uptimeMillis();
+        mDragScreenX = -1f;
 
         if (mController != null) {
             mController.onPanelDragStarted();
@@ -697,6 +749,7 @@ public class TransferDockPanel extends FrameLayout {
         if (!started) {
             mDragActive = false;
             mDragPanelAside = false;
+            mDragScreenX = -1f;
             if (mController != null) {
                 mController.onPanelDragEnded(false);
             } else {
