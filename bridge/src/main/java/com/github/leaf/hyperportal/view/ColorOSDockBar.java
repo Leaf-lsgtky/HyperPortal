@@ -103,6 +103,7 @@ public class ColorOSDockBar extends FrameLayout {
     private android.animation.ValueAnimator mEnterAnimator;
     private float mLastTouchX = -1f;
     private float mLastTouchY = -1f;
+    private boolean mMagnificationReset = true;
 
     private final Runnable mAutoScrollRunnable = new Runnable() {
         @Override
@@ -522,10 +523,6 @@ public class ColorOSDockBar extends FrameLayout {
     }
 
     public void startEnterAnimation(float rawX, float rawY) {
-        if (mEnterAnimator != null) {
-            mEnterAnimator.cancel();
-        }
-        mExpansionProgress = 0f;
         resetMagnification(false);
         if (rawX >= 0 && mRow != null) {
             int[] rowScreenLoc = new int[2];
@@ -547,6 +544,7 @@ public class ColorOSDockBar extends FrameLayout {
         mEnterAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
+                mEnterAnimator = null;
                 mExpansionProgress = 1.0f;
                 if (mLastTouchX >= 0) {
                     applyFisheye(mLastTouchX, mLastTouchY);
@@ -651,6 +649,17 @@ public class ColorOSDockBar extends FrameLayout {
 
     private void applyFisheye(float rowTouchX, float rowTouchY) {
         if (mRow == null || mRow.getChildCount() == 0) return;
+        if (mMagnificationReset) {
+            // A returning finger takes over from the reset animation once.
+            // Otherwise its animator keeps overwriting the live fisheye values.
+            for (int i = 0; i < mRow.getChildCount(); i++) {
+                View child = mRow.getChildAt(i);
+                ImageView icon = child.findViewById(ID_ICON);
+                if (icon != null) icon.animate().cancel();
+                child.animate().cancel();
+            }
+            mMagnificationReset = false;
+        }
         if (mOrientation == ORIENTATION_VERTICAL) {
             applyFisheyeVertical(rowTouchX, rowTouchY);
         } else {
@@ -832,16 +841,27 @@ public class ColorOSDockBar extends FrameLayout {
      */
     public void resetMagnification(boolean animate) {
         if (mEnterAnimator != null) {
+            // Cancellation must not run the enter completion and restore the
+            // fisheye just as we are trying to reset it.
+            mEnterAnimator.removeAllListeners();
             mEnterAnimator.cancel();
+            mEnterAnimator = null;
         }
         mExpansionProgress = 0f;
         mLastTouchX = -1f;
         mLastTouchY = -1f;
         stopAutoScroll();
+        boolean alreadyReset = mMagnificationReset;
+        mMagnificationReset = true;
+        // Locations above the row arrive continuously on the way out. Do not
+        // rebuild two property animations per item for every location sample.
+        if (animate && alreadyReset) return;
         if (mRow == null) return;
         for (int i = 0; i < mRow.getChildCount(); i++) {
             View child = mRow.getChildAt(i);
             ImageView icon = child.findViewById(ID_ICON);
+            if (icon != null) icon.animate().cancel();
+            child.animate().cancel();
             if (animate) {
                 if (icon != null) {
                     icon.animate().scaleX(1.0f).scaleY(1.0f)

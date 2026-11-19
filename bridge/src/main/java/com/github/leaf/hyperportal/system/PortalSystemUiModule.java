@@ -1914,7 +1914,8 @@ public final class PortalSystemUiModule {
                     if (mGlowView != null) {
                         mGlowView.setTouchPosition(rawX, rawY);
                     }
-                    if (mShowing && mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
+                    if (mShowing && mCurrentState == 2 && mDockBar != null
+                            && mDockBar.getVisibility() == View.VISIBLE) {
                         mDockBar.onDragLocation(rawX, rawY);
                     }
                     return true;
@@ -2021,6 +2022,13 @@ public final class PortalSystemUiModule {
                         isRight ? dp(88) : FrameLayout.LayoutParams.MATCH_PARENT,
                         isRight ? FrameLayout.LayoutParams.MATCH_PARENT : dp(153));
             }
+            int oldWidth = dockParams.width;
+            int oldHeight = dockParams.height;
+            int oldGravity = dockParams.gravity;
+            int oldLeftMargin = dockParams.leftMargin;
+            int oldTopMargin = dockParams.topMargin;
+            int oldRightMargin = dockParams.rightMargin;
+            int oldBottomMargin = dockParams.bottomMargin;
             if (isRight) {
                 dockParams.width = dp(88);
                 dockParams.height = FrameLayout.LayoutParams.MATCH_PARENT;
@@ -2046,7 +2054,14 @@ public final class PortalSystemUiModule {
                 dockParams.leftMargin = 0;
                 dockParams.topMargin = 0;
             }
-            mDockBar.setLayoutParams(dockParams);
+            // setLayoutParams requests another measure/layout even when every
+            // value is unchanged. Motion broadcasts must not relayout the row.
+            if (lp != dockParams || oldWidth != dockParams.width || oldHeight != dockParams.height
+                    || oldGravity != dockParams.gravity || oldLeftMargin != dockParams.leftMargin
+                    || oldTopMargin != dockParams.topMargin || oldRightMargin != dockParams.rightMargin
+                    || oldBottomMargin != dockParams.bottomMargin) {
+                mDockBar.setLayoutParams(dockParams);
+            }
         }
 
         
@@ -2437,6 +2452,7 @@ public final class PortalSystemUiModule {
                         + " at " + msSinceProcessStart() + "ms views=" + mViewsReady
                         + " targets=" + mTargets.size() + " config=" + mConfigLoaded);
             }
+            int previousState = mCurrentState;
             mCurrentState = state;
 
             if (state == 0) {
@@ -2448,6 +2464,7 @@ public final class PortalSystemUiModule {
                     mGlowView.setVisibility(View.GONE);
                 }
                 if (mDockBar != null) {
+                    mDockBar.animate().cancel();
                     mDockBar.stopAutoScroll();
                     mDockBar.resetMagnification(false);
                     mDockBar.setVisibility(View.GONE);
@@ -2472,7 +2489,10 @@ public final class PortalSystemUiModule {
 
             boolean isRight = "right".equals(mTriggerPosition);
             updateWindowParams(isRight);
-            updateDockConfiguration(isRight);
+            if (previousState != state || mDockBar.getOrientation() != (isRight
+                    ? ColorOSDockBar.ORIENTATION_VERTICAL : ColorOSDockBar.ORIENTATION_HORIZONTAL)) {
+                updateDockConfiguration(isRight);
+            }
 
             if (state == 1) {
                 // Phase 1: Glow view active, shelf collapsed
@@ -2488,15 +2508,20 @@ public final class PortalSystemUiModule {
                     mGlowView.setPhase1Progress(progress, isRight, y);
                     mGlowView.setVisibility(View.VISIBLE);
                 }
-                if (mDockBar != null && mDockBar.getVisibility() == View.VISIBLE) {
-                    mDockBar.stopAutoScroll();
+                // State 1 also carries continuous position updates from AES
+                // and WMS. Start the exit once, rather than repeatedly cancelling
+                // and restarting its 160 ms timeline while the finger moves up.
+                if (previousState != 1 && mDockBar != null
+                        && mDockBar.getVisibility() == View.VISIBLE) {
+                    mDockBar.animate().cancel();
+                    mDockBar.onDragExited();
                     if (isRight) {
                         mDockBar.animate()
                                 .translationX(dp(60))
                                 .alpha(0f)
                                 .setDuration(160)
                                 .withEndAction(() -> {
-                                    if (mDockBar != null) mDockBar.setVisibility(View.GONE);
+                                    if (mCurrentState == 1) mDockBar.setVisibility(View.GONE);
                                 })
                                 .start();
                     } else {
@@ -2505,7 +2530,7 @@ public final class PortalSystemUiModule {
                                 .alpha(0f)
                                 .setDuration(160)
                                 .withEndAction(() -> {
-                                    if (mDockBar != null) mDockBar.setVisibility(View.GONE);
+                                    if (mCurrentState == 1) mDockBar.setVisibility(View.GONE);
                                 })
                                 .start();
                     }
@@ -2518,7 +2543,11 @@ public final class PortalSystemUiModule {
                     mGlowView.setPhase2(isRight, y);
                     mGlowView.setVisibility(View.VISIBLE);
                 }
-                if (mDockBar != null) {
+                if (mDockBar != null && (previousState != 2
+                        || mDockBar.getVisibility() != View.VISIBLE)) {
+                    // Re-entry can reverse a still-running exit. Cancel its end
+                    // action before it has a chance to hide the reopened row.
+                    mDockBar.animate().cancel();
                     if (mDockBar.getVisibility() != View.VISIBLE) {
                         mDockBar.resetScroll();
                         mDockBar.setVisibility(View.VISIBLE);
