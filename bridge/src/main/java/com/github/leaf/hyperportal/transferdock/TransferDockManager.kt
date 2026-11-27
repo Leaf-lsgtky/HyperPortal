@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.AtomicFile
 import android.text.TextUtils
 import android.util.Log
 import android.webkit.MimeTypeMap
@@ -48,7 +49,7 @@ class TransferDockManager private constructor(private val context: Context) {
             items.clear()
             if (!dataFile.exists()) return
             try {
-                val jsonStr = dataFile.readText(Charsets.UTF_8)
+                val jsonStr = AtomicFile(dataFile).readFully().toString(Charsets.UTF_8)
                 val jsonArr = JSONArray(jsonStr)
                 for (i in 0 until jsonArr.length()) {
                     val obj = jsonArr.getJSONObject(i)
@@ -62,14 +63,16 @@ class TransferDockManager private constructor(private val context: Context) {
 
     private fun saveToDisk() {
         synchronized(lock) {
+            val json = JSONArray()
+            for (item in items) json.put(item.toJson())
+            val atomic = AtomicFile(dataFile)
+            val stream = atomic.startWrite()
             try {
-                val jsonArr = JSONArray()
-                for (item in items) {
-                    jsonArr.put(item.toJson())
-                }
-                dataFile.writeText(jsonArr.toString(), Charsets.UTF_8)
-            } catch (e: Throwable) {
-                Log.e(TAG, "Failed to save transfer dock items", e)
+                stream.write(json.toString().toByteArray(Charsets.UTF_8))
+                atomic.finishWrite(stream)
+            } catch (e: Exception) {
+                atomic.failWrite(stream)
+                throw e
             }
         }
     }
@@ -102,15 +105,21 @@ class TransferDockManager private constructor(private val context: Context) {
         return item
     }
 
-    fun saveBitmap(bitmap: Bitmap, sourcePkg: String?): TransferDockItem {
+    fun saveBitmap(bitmap: Bitmap, sourcePkg: String?): TransferDockItem? {
         val id = UUID.randomUUID().toString()
         val imageFile = File(mediaDir, "img_${id}.png")
         val thumbFile = File(mediaDir, "thumb_${id}.jpg")
 
         try {
             FileOutputStream(imageFile).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
             }
+        } catch (e: Exception) {
+            imageFile.delete()
+            Log.e(TAG, "Failed to save transfer dock bitmap", e)
+            return null
+        }
+        try {
             // Generate compact thumbnail for fast stack preview
             val maxThumb = 320
             val scale = Math.min(1.0f, maxThumb.toFloat() / Math.max(bitmap.width, bitmap.height))
@@ -142,7 +151,7 @@ class TransferDockManager private constructor(private val context: Context) {
         return item
     }
 
-    fun saveFile(uri: Uri, mimeType: String?, fileName: String?, sourcePkg: String?): TransferDockItem {
+    fun saveFile(uri: Uri, mimeType: String?, fileName: String?, sourcePkg: String?): TransferDockItem? {
         val id = UUID.randomUUID().toString()
         val mime = mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
         val displayName = fileName ?: "文件"
@@ -152,31 +161,26 @@ class TransferDockManager private constructor(private val context: Context) {
         // SystemUI staging files live in a small LRU cache. Copy the original
         // bytes into the dock's own media dir; storing the content:// URI here
         // made the item disappear after a few more drags pruned the cache.
-        var storedPath: String? = null
         try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
+            val stream = context.contentResolver.openInputStream(uri) ?: return null
+            stream.use { input ->
                 FileOutputStream(target).use { output -> input.copyTo(output) }
             }
-            if (target.length() > 0) {
-                storedPath = target.absolutePath
-            } else {
-                target.delete()
-            }
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             Log.w(TAG, "Failed to copy transfer dock file", e)
             target.delete()
+            return null
         }
         val isImage = mime.startsWith("image/")
-        val thumbnail = if (isImage && storedPath != null) {
-            createThumbnail(File(storedPath), id)
+        val thumbnail = if (isImage) {
+            createThumbnail(target, id)
         } else {
             null
         }
         val item = TransferDockItem(
             id = id,
             type = if (isImage) TransferDockItem.TYPE_IMAGE else TransferDockItem.TYPE_FILE,
-            uriString = if (storedPath == null) uri.toString() else null,
-            filePath = storedPath,
+            filePath = target.absolutePath,
             title = displayName,
             detail = timeStr,
             mimeType = mime,
@@ -222,38 +226,56 @@ class TransferDockManager private constructor(private val context: Context) {
 
     private fun addItem(item: TransferDockItem) {
         synchronized(lock) {
-            items.add(0, item) // Newest at top
-            while (items.size > MAX_ITEMS) {
-                val removed = items.removeAt(items.size - 1)
-                cleanupItemFiles(removed)
+            items.add(0, item)
+            val removed = if (items.size > MAX_ITEMS) items.removeAt(items.lastIndex) else null
+            try {
+                saveToDisk()
+            } catch (e: Exception) {
+                items.removeAt(0)
+                if (removed != null) items.add(removed)
+                cleanupItemFiles(item)
+                throw e
             }
-            saveToDisk()
+            if (removed != null) cleanupItemFiles(removed)
         }
     }
 
     fun removeItem(id: String) {
         synchronized(lock) {
-            val it = items.iterator()
-            while (it.hasNext()) {
-                val item = it.next()
-                if (item.id == id) {
-                    it.remove()
-                    cleanupItemFiles(item)
-                    break
-                }
+            val index = items.indexOfFirst { it.id == id }
+            if (index < 0) return
+            val item = items.removeAt(index)
+            try {
+                saveToDisk()
+            } catch (e: Exception) {
+                items.add(index, item)
+                Log.e(TAG, "Failed to remove transfer dock item", e)
+                return
             }
-            saveToDisk()
+            cleanupItemFiles(item)
         }
     }
 
     fun clearAll() {
         synchronized(lock) {
-            for (item in items) {
-                cleanupItemFiles(item)
-            }
+            val removed = ArrayList(items)
             items.clear()
-            saveToDisk()
+            try {
+                saveToDisk()
+            } catch (e: Exception) {
+                items.addAll(removed)
+                Log.e(TAG, "Failed to clear transfer dock items", e)
+                return
+            }
+            removed.forEach(::cleanupItemFiles)
         }
+    }
+
+    internal fun storedItem(id: String): Pair<TransferDockItem, File>? = synchronized(lock) {
+        val item = items.firstOrNull { it.id == id } ?: return null
+        val file = item.filePath?.let(::File) ?: return null
+        if (file.parentFile != mediaDir || !file.isFile) return null
+        item to file
     }
 
     fun exportItemUri(item: TransferDockItem): Uri? {

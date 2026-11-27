@@ -41,6 +41,9 @@ fun SettingsPage(bottomPadding: Dp) {
     var masterSwitch by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).masterSwitch)
     }
+    var transferDockIsland by remember {
+        mutableStateOf(HyperPortalPreferences.getConfig(context).transferDockIsland)
+    }
     var landscapeTrigger by remember {
         mutableStateOf(HyperPortalPreferences.getConfig(context).landscapeTrigger)
     }
@@ -79,6 +82,7 @@ fun SettingsPage(bottomPadding: Dp) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 val config = HyperPortalPreferences.getConfig(context)
                 masterSwitch = config.masterSwitch
+                transferDockIsland = config.transferDockIsland
                 landscapeTrigger = config.landscapeTrigger
                 edgeScrollMargin = config.edgeScrollMargin
                 longPressDuration = config.longPressDuration
@@ -109,6 +113,16 @@ fun SettingsPage(bottomPadding: Dp) {
                     onCheckedChange = { checked ->
                         masterSwitch = checked
                         HyperPortalPreferences.setMasterSwitch(context, checked)
+                    },
+                )
+                OverlayDropdownPreference(
+                    title = "中转站方式",
+                    items = listOf("侧边栏", "超级岛"),
+                    selectedIndex = if (transferDockIsland) 1 else 0,
+                    enabled = masterSwitch,
+                    onSelectedIndexChange = { index ->
+                        transferDockIsland = index == 1
+                        HyperPortalPreferences.setTransferDockIsland(context, transferDockIsland)
                     },
                 )
                 ArrowPreference(
