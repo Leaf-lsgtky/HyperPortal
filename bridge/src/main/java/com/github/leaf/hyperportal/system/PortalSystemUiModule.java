@@ -201,9 +201,7 @@ public final class PortalSystemUiModule {
             installSystemUiProviderHooks(xposed, cl);
             TransferDockNativeIsland.install(xposed, cl, () -> {
                 SystemUiOverlay overlay = sOverlay;
-                if (overlay != null && overlay.mTransferDockIsland != null) {
-                    overlay.mTransferDockIsland.nativeBoundsChanged();
-                }
+                return overlay != null ? overlay.mTransferDockIsland : null;
             });
 
             try {
@@ -2010,6 +2008,9 @@ public final class PortalSystemUiModule {
                     mContainer.getLocationOnScreen(loc);
                     float rawX = loc[0] + event.getX();
                     float rawY = loc[1] + event.getY();
+                    if (mUseTransferDockIsland && mTransferDockIsland != null) {
+                        mTransferDockIsland.hoverAt(rawX, rawY);
+                    }
                     if (mGlowView != null) {
                         mGlowView.setTouchPosition(rawX, rawY);
                     }
@@ -2599,6 +2600,7 @@ public final class PortalSystemUiModule {
             }
             if (mUseTransferDockIsland && mTransferDockIsland != null) {
                 mTransferDockIsland.setIncoming(true);
+                mTransferDockIsland.hoverAt(x, y);
             }
 
             if (!mAppTargetsResolved || mTargets.isEmpty()) {

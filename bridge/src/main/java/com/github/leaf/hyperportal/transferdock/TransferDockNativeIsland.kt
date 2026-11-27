@@ -5,80 +5,98 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import android.view.DragEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.widget.RemoteViews
+import com.github.leaf.hyperportal.R
+import com.github.leaf.hyperportal.target.BuiltInIconDrawable
 import io.github.libxposed.api.XposedInterface
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.lang.reflect.Method
 import java.util.WeakHashMap
 import java.util.concurrent.Executor
+import java.util.function.Supplier
 
-/** Uses a dedicated notification slot so native island templates and HyperIsland can coexist. */
-internal class TransferDockNativeIsland(
-    private val context: Context,
-    private val worker: Executor,
-) {
-    private var published: Pair<String, String>? = null
+/** The plug-in owns the island window, the focus views and their transitions. */
+internal class TransferDockNativeIsland(private val context: Context, private val worker: Executor) {
+    private var published: String? = null
+    private val dockIcon by lazy {
+        val bitmap = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
+        BuiltInIconDrawable.create(BuiltInIconDrawable.TYPE_TRANSFER_DOCK).apply {
+            setBounds(0, 0, bitmap.width, bitmap.height)
+            draw(Canvas(bitmap))
+        }
+        Icon.createWithBitmap(bitmap)
+    }
 
-    fun show(left: String?, right: String) {
-        val next = left?.let { it to right }
-        if (next == published) return
-        val first = published == null
-        published = next
+    fun show(right: String?) {
+        if (right == published) return
+        val updating = published != null
+        published = right
         worker.execute {
             try {
                 val manager = context.getSystemService(NotificationManager::class.java)
-                if (next == null) {
+                if (right == null) {
                     manager.cancel(CHANNEL, NOTIFICATION_ID)
                     return@execute
                 }
-                manager.createNotificationChannel(
-                    NotificationChannel(CHANNEL, "HyperPortal 中转站", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                        setSound(null, null)
-                        enableVibration(false)
-                        setShowBadge(false)
-                        lockscreenVisibility = Notification.VISIBILITY_SECRET
-                    },
-                )
-                val picture = JSONObject().put("type", 1).put("pic", PICTURE)
-                val leftModule = JSONObject().put("type", 1).apply {
-                    if (next.first.isEmpty()) put("picInfo", picture)
-                    else put("textInfo", JSONObject().put("title", next.first))
+                if (!updating) {
+                    manager.createNotificationChannel(
+                        NotificationChannel(CHANNEL, TITLE, NotificationManager.IMPORTANCE_DEFAULT).apply {
+                            setSound(null, null)
+                            enableVibration(false)
+                            setShowBadge(false)
+                            lockscreenVisibility = Notification.VISIBILITY_SECRET
+                        },
+                    )
                 }
-                val rightModule = JSONObject().put("type", 2)
-                    .put("textInfo", JSONObject().put("title", next.second))
+                val picture = JSONObject().put("type", 1).put("pic", PICTURE)
                 val island = JSONObject()
+                    .put("business", CHANNEL)
                     .put("islandProperty", 0)
                     .put("islandPriority", 0)
                     .put("islandTimeout", Int.MAX_VALUE)
                     .put("bigIslandArea", JSONObject()
-                        .put("imageTextInfoLeft", leftModule)
-                        .put("imageTextInfoRight", rightModule))
+                        .put("imageTextInfoLeft", JSONObject().put("type", 1)
+                            .put("picInfo", picture)
+                            .put("textInfo", JSONObject().put("title", TITLE)))
+                        .put("imageTextInfoRight", JSONObject().put("type", 2)
+                            .put("textInfo", JSONObject().put("title", right))))
                     .put("smallIslandArea", JSONObject().put("picInfo", picture))
                 val focus = JSONObject()
-                    .put("business", CHANNEL)
                     .put("isShowNotification", false)
-                    .put("islandFirstFloat", first)
+                    .put("islandFirstFloat", false)
                     .put("enableFloat", false)
                     .put("updatable", true)
                     .put("param_island", island)
+                val panel = RemoteViews(PORTAL_PACKAGE, R.layout.hyperportal_transfer_dock_focus)
                 val notification = Notification.Builder(context, CHANNEL)
-                    .setSmallIcon(android.R.drawable.ic_menu_save)
-                    .setContentTitle("中转站")
+                    .setSmallIcon(dockIcon)
+                    .setContentTitle(TITLE)
                     .setOngoing(true)
                     .setOnlyAlertOnce(true)
                     .setVisibility(Notification.VISIBILITY_SECRET)
+                    .addExtras(Bundle().apply {
+                        putParcelable("miui.focus.rv", panel)
+                        putParcelable("miui.focus.rv.island.expand", panel)
+                        putString("miui.focus.param.custom", focus.toString())
+                        putBoolean("miui.island.firstFloat", false)
+                        putBoolean("miui.island.updateNoFloat", true)
+                        putBoolean("miui.enableFloat", false)
+                        putBoolean("show_notification", false)
+                        putBundle("miui.focus.pics", Bundle().apply { putParcelable(PICTURE, dockIcon) })
+                    })
                     .build()
-                notification.extras.putString("miui.focus.param",
-                    JSONObject().put("param_v2", focus).toString())
-                notification.extras.putBundle("miui.focus.pics", Bundle().apply {
-                    putParcelable(PICTURE, Icon.createWithResource("android", android.R.drawable.ic_menu_save))
-                })
                 manager.notify(CHANNEL, NOTIFICATION_ID, notification)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not update the native transfer dock island", e)
@@ -86,24 +104,42 @@ internal class TransferDockNativeIsland(
         }
     }
 
-    fun bounds(): Rect? = activeBounds?.takeIf { activeView?.get()?.isAttachedToWindow == true }?.let(::Rect)
-
-    fun wasRendered(): Boolean = rendered
-
     companion object {
         private const val TAG = "TransferDockNativeIsland"
+        private const val PORTAL_PACKAGE = "com.github.leaf.hyperportal"
         private const val CHANNEL = "hyperportal_transfer_dock_island"
         private const val NOTIFICATION_ID = 0x48505444
+        private const val TITLE = "中转站"
         private const val PICTURE = "hyperportal_dock"
-        private const val CONTENT_VIEW = "miui.systemui.dynamicisland.window.content.DynamicIslandContentView"
+        private const val WINDOW_VIEW = "miui.systemui.dynamicisland.window.DynamicIslandWindowView"
+        private const val CONTENT_PACKAGE = "miui.systemui.dynamicisland.window.content"
         private val installed = WeakHashMap<Class<*>, Unit>()
-        private var activeView: WeakReference<View>? = null
-        private var activeBounds: Rect? = null
-        private var rendered = false
+        private var summary: WeakReference<View>? = null
+        private var hitRect: Rect? = null
+        private var isCurrentSummary: ((View) -> Boolean)? = null
+        private var openSummary: Runnable? = null
 
         @JvmStatic
-        fun install(xposed: XposedInterface, loader: ClassLoader, onBoundsChanged: Runnable) {
-            bind(xposed, loader, onBoundsChanged)
+        fun install(xposed: XposedInterface, loader: ClassLoader, dock: Supplier<TransferDockIslandController?>) {
+            try {
+                // The window inherits this method. The stock result is preserved for all
+                // other windows and drags, including drops over a different native island.
+                val dispatch = ViewGroup::class.java.getDeclaredMethod("dispatchDragEvent", DragEvent::class.java)
+                xposed.hook(dispatch).setId("hyperportal-dock-native-drag").intercept { chain ->
+                    val window = chain.thisObject as? View
+                    if (window?.javaClass?.name != WINDOW_VIEW) return@intercept chain.proceed()
+                    val event = chain.args[0] as? DragEvent ?: return@intercept chain.proceed()
+                    val controller = dock.get() ?: return@intercept chain.proceed()
+                    if (event.action == DragEvent.ACTION_DRAG_STARTED) {
+                        val nativeResult = chain.proceed()
+                        return@intercept guard { controller.onNativeDrag(window, event) } == true || nativeResult == true
+                    }
+                    if (guard { controller.onNativeDrag(window, event) } == true) true else chain.proceed()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Native island drag dispatch unavailable", e)
+            }
+            bind(xposed, loader, dock)
             try {
                 val factory = Class.forName(
                     "com.android.systemui.shared.plugins.PluginInstance\$PluginFactory", false, loader,
@@ -112,9 +148,7 @@ internal class TransferDockNativeIsland(
                     xposed.hook(method).setId("hyperportal-dock-plugin-context").intercept { chain ->
                         val result = chain.proceed()
                         val plugin = result as? Context
-                        if (plugin?.packageName == "miui.systemui.plugin") {
-                            bind(xposed, plugin.classLoader, onBoundsChanged)
-                        }
+                        if (plugin?.packageName == "miui.systemui.plugin") bind(xposed, plugin.classLoader, dock)
                         result
                     }
                 }
@@ -123,101 +157,194 @@ internal class TransferDockNativeIsland(
             }
         }
 
-        private fun bind(xposed: XposedInterface, loader: ClassLoader, onBoundsChanged: Runnable) {
+        fun hit(x: Float, y: Float): Boolean {
+            if (hitRect?.contains(x.toInt(), y.toInt()) != true) return false
+            val view = summary?.get() ?: return false
+            return view.isAttachedToWindow && guard { isCurrentSummary?.invoke(view) } == true
+        }
+
+        fun requestOpen() {
+            openSummary?.run()
+        }
+
+        private fun bind(xposed: XposedInterface, loader: ClassLoader, dock: Supplier<TransferDockIslandController?>) {
             try {
-                val type = Class.forName(CONTENT_VIEW, false, loader)
-                val currentData = type.getMethod("getCurrentIslandData")
-                val getBigIsland = type.getMethod("getBigIslandView")
-                val getSmallIsland = runCatching { type.getMethod("getSmallIslandView") }.getOrNull()
-                val getFakeBigIsland = runCatching { type.getMethod("getFakeBigIsland") }.getOrNull()
-                val getExtras = currentData.returnType.getMethod("getExtras")
-                val updates = type.declaredMethods.filter {
-                    (it.name == "updateBigIslandView" || it.name == "updateSmallIslandView") &&
-                        it.parameterCount == 3
-                }
+                val real = Class.forName("$CONTENT_PACKAGE.DynamicIslandContentView", false, loader)
+                val fake = Class.forName("$CONTENT_PACKAGE.DynamicIslandContentFakeView", false, loader)
+                val base = real.superclass ?: return
+                val window = Class.forName(WINDOW_VIEW, false, loader)
+                val currentData = base.getMethod("getCurrentIslandData")
+                val state = base.getMethod("getState")
+                val data = currentData.returnType
+                val extras = data.getMethod("getExtras")
+                val click = real.getMethod("onIslandClick")
+                val big = base.getMethod("getBigIslandView")
+                val small = base.getMethod("getSmallIslandView")
+                val fakeBig = base.getMethod("getFakeBigIsland")
+                val longPress = window.declaredMethods.first { it.name == "onLongPress" && it.parameterCount == 3 }
+                val observer = SummaryObserver(currentData, extras, state, click, big, small, fakeBig, dock)
+
                 synchronized(installed) {
-                    if (installed.containsKey(type)) return
-                    val observers = WeakHashMap<View, ViewTreeObserver.OnPreDrawListener>()
-                    val visibilityChanged = type.getDeclaredMethod("onVisibilityAggregated", Boolean::class.javaPrimitiveType)
-                    xposed.hook(visibilityChanged).setId("hyperportal-dock-native-visibility").intercept { chain ->
-                        val result = chain.proceed()
-                        val view = chain.thisObject as? View
-                        if (view != null && chain.args[0] == false) updateBounds(view, null, onBoundsChanged)
-                        result
-                    }
-                    for (update in updates) xposed.hook(update).setId("hyperportal-dock-native-${update.name}").intercept { chain ->
-                        val result = chain.proceed()
-                        try {
-                            val content = chain.thisObject as? View
-                            val data = chain.args[0]
-                            if (content != null && data != null && isDock(getExtras.invoke(data))) {
-                                content.post {
-                                    if (!content.isAttachedToWindow || observers.containsKey(content)) return@post
-                                    val reference = WeakReference(content)
-                                    val observer = object : ViewTreeObserver.OnPreDrawListener {
-                                        override fun onPreDraw(): Boolean {
-                                            val view = reference.get() ?: return true
-                                            try {
-                                                val data = currentData.invoke(view)
-                                                if (data == null || !isDock(getExtras.invoke(data))) {
-                                                    view.viewTreeObserver.removeOnPreDrawListener(this)
-                                                    observers.remove(view)
-                                                    updateBounds(view, null, onBoundsChanged)
-                                                } else {
-                                                    val stable = getBigIsland.invoke(view) as? View
-                                                    val fake = getFakeBigIsland?.invoke(view) as? View
-                                                    val small = getSmallIsland?.invoke(view) as? View
-                                                    val bounds = visibleRect(stable) ?: visibleRect(fake) ?: visibleRect(small)
-                                                    updateBounds(view, bounds, onBoundsChanged)
-                                                }
-                                            } catch (e: Exception) {
-                                                Log.d(TAG, "Native transfer dock bounds unavailable", e)
-                                            }
-                                            return true
-                                        }
-                                    }
-                                    observers[content] = observer
-                                    content.viewTreeObserver.addOnPreDrawListener(observer)
-                                }
+                    if (installed.containsKey(real)) return
+                    for (method in real.declaredMethods.filter {
+                        (it.name == "updateBigIslandView" || it.name == "updateSmallIslandView") && it.parameterCount == 3
+                    }) {
+                        xposed.hook(method).setId("hyperportal-dock-summary-${method.name}").intercept { chain ->
+                            val result = chain.proceed()
+                            guard {
+                                val view = chain.thisObject as? View
+                                if (view != null && isDock(chain.args[0], extras)) observer.attach(view)
                             }
-                        } catch (e: Exception) {
-                            Log.d(TAG, "Could not track the native transfer dock island", e)
+                            result
                         }
-                        result
                     }
-                    installed[type] = Unit
+                    hookExpansion(xposed, real, data.getMethod("getView"), extras, dock, true)
+                    hookExpansion(xposed, fake, data.getMethod("getFakeView"), extras, dock, false)
+                    hookCustomFocusAuth(xposed, loader)
+                    xposed.hook(longPress).setId("hyperportal-dock-long-press").intercept { chain ->
+                        val handled = guard {
+                            val pressed = chain.args[0] as? View
+                            pressed != null && real.isInstance(pressed) &&
+                                isDock(currentData.invoke(pressed), extras) && isSummary(state.invoke(pressed)) &&
+                                dock.get()?.dragLatest(pressed) == true
+                        }
+                        if (handled == true) null else chain.proceed()
+                    }
+                    installed[real] = Unit
                 }
             } catch (_: ClassNotFoundException) {
                 // The plug-in normally loads after SystemUI.
             } catch (e: LinkageError) {
                 Log.d(TAG, "Native transfer dock classes are not ready", e)
             } catch (e: Exception) {
-                Log.d(TAG, "Native transfer dock view unavailable", e)
+                Log.w(TAG, "Native transfer dock view unavailable", e)
             }
         }
 
-        private fun visibleRect(view: View?): Rect? {
+        private fun hookCustomFocusAuth(xposed: XposedInterface, loader: ClassLoader) {
+            guard {
+                val controller = Class.forName("miui.systemui.notification.focus.FocusNotificationController", false, loader)
+                val authorize = controller.declaredMethods.first { it.name == "fetchAuthResult" && it.parameterCount == 5 }
+                val onSuccess = authorize.parameterTypes[4].getMethod("onAuthSuccess", String::class.java, String::class.java)
+                xposed.hook(authorize).setId("hyperportal-dock-focus-auth").intercept { chain ->
+                    val notification = chain.args[1] as? StatusBarNotification
+                    val handled = guard {
+                        if (!isDock(notification)) return@guard false
+                        val callback = chain.args[4] ?: return@guard false
+                        onSuccess.invoke(callback, notification?.key, chain.args[2])
+                        true
+                    }
+                    if (handled == true) null else chain.proceed()
+                }
+            }
+        }
+
+        private fun hookExpansion(
+            xposed: XposedInterface, type: Class<*>, getView: Method, extras: Method,
+            dock: Supplier<TransferDockIslandController?>, interactive: Boolean,
+        ) {
+            val method = type.declaredMethods.first { it.name == "updateExpandedView" && it.parameterCount == 3 }
+            xposed.hook(method).setId("hyperportal-dock-expand-${type.simpleName}").intercept { chain ->
+                guard {
+                    val data = chain.args[0]
+                    if (isDock(data, extras)) {
+                        val content = getView.invoke(data) as? View
+                        content?.findViewById<ViewGroup>(R.id.hyperportal_transfer_dock_content)?.let {
+                            dock.get()?.bindPanel(it, interactive)
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+        }
+
+        private class SummaryObserver(
+            private val currentData: Method, private val extras: Method, private val state: Method,
+            private val click: Method, private val big: Method, private val small: Method,
+            private val fakeBig: Method, private val dock: Supplier<TransferDockIslandController?>,
+        ) {
+            private val tracked = WeakHashMap<View, Unit>()
+
+            fun attach(content: View) {
+                content.post {
+                    if (!content.isAttachedToWindow || tracked.containsKey(content)) return@post
+                    tracked[content] = Unit
+                    val reference = WeakReference(content)
+                    content.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                        override fun onPreDraw(): Boolean {
+                            val view = reference.get() ?: return true
+                            guard {
+                                if (!isDock(currentData.invoke(view), extras)) {
+                                    view.viewTreeObserver.removeOnPreDrawListener(this)
+                                    tracked.remove(view)
+                                    update(view, null)
+                                } else {
+                                    val currentState = state.invoke(view)
+                                    val bounds = if (isSummary(currentState)) {
+                                        val smallState = currentState.javaClass.simpleName == "SmallIsland"
+                                        if (smallState) visibleBounds(small.invoke(view) as? View)
+                                        else visibleBounds(big.invoke(view) as? View)
+                                            ?: visibleBounds(fakeBig.invoke(view) as? View)
+                                    } else null
+                                    update(view, bounds)
+                                }
+                            }
+                            return true
+                        }
+                    })
+                }
+            }
+
+            private fun update(view: View, bounds: Rect?) {
+                if (bounds == null && summary?.get() !== view) return
+                if (bounds == hitRect && summary?.get() === view) return
+                summary = if (bounds == null) null else WeakReference(view)
+                hitRect = bounds
+                isCurrentSummary = if (bounds == null) null else { target ->
+                    isDock(currentData.invoke(target), extras) && isSummary(state.invoke(target))
+                }
+                openSummary = if (bounds == null) null else Runnable {
+                    guard {
+                        val active = summary?.get()
+                        if (active?.isShown == true && isDock(currentData.invoke(active), extras)
+                            && isSummary(state.invoke(active))) {
+                            click.invoke(active)
+                        }
+                    }
+                }
+                dock.get()?.onNativeBoundsChanged()
+            }
+        }
+
+        private fun visibleBounds(view: View?): Rect? {
             if (view?.isShown != true || view.alpha <= 0f) return null
             val rect = Rect()
-            return if (view.getGlobalVisibleRect(rect) && !rect.isEmpty) rect else null
+            if (!view.getGlobalVisibleRect(rect) || rect.isEmpty) return null
+            val origin = IntArray(2)
+            view.rootView.getLocationOnScreen(origin)
+            rect.offset(origin[0], origin[1])
+            return rect
         }
 
-        private fun updateBounds(view: View, bounds: Rect?, changed: Runnable) {
-            if (bounds == null && activeView?.get() !== view) return
-            if (bounds == activeBounds && activeView?.get() === view) return
-            if (bounds != null && !rendered) {
-                rendered = true
-                Log.i(TAG, "Native transfer dock island visible")
-            }
-            activeView = if (bounds == null) null else WeakReference(view)
-            activeBounds = bounds
-            changed.run()
+        private fun isSummary(state: Any?): Boolean = when (state?.javaClass?.simpleName) {
+            "BigIsland", "SmallIsland", "ShowOnceBigIsland" -> true
+            else -> false
         }
 
-        private fun isDock(extras: Any?): Boolean {
-            val notification = (extras as? Bundle)?.getParcelable("miui.sbn", StatusBarNotification::class.java)
-            return notification?.packageName == "com.android.systemui" &&
-                notification.tag == CHANNEL && notification.id == NOTIFICATION_ID
+        private fun isDock(data: Any?, extras: Method): Boolean {
+            val metadata = if (data != null) extras.invoke(data) as? Bundle else null
+            return isDock(metadata?.getParcelable("miui.sbn", StatusBarNotification::class.java))
+        }
+
+        private fun isDock(sbn: StatusBarNotification?): Boolean =
+            sbn?.packageName == "com.android.systemui" && sbn.uid == android.os.Process.myUid() &&
+                sbn.tag == CHANNEL && sbn.id == NOTIFICATION_ID
+
+        private inline fun <T> guard(action: () -> T): T? = try {
+            action()
+        } catch (e: Exception) {
+            Log.d(TAG, "Transfer dock native view unavailable", e)
+            null
         }
     }
 }

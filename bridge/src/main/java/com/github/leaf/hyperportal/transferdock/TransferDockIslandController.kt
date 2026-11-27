@@ -6,25 +6,26 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.PowerManager
 import android.text.TextUtils
+import android.util.Log
+import android.util.LruCache
 import android.view.DragEvent
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
-import android.view.WindowManager
+import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import android.util.Log
+import java.lang.ref.WeakReference
+import java.util.WeakHashMap
 import java.util.concurrent.Executor
 
 internal class TransferDockIslandController(
@@ -33,100 +34,147 @@ internal class TransferDockIslandController(
     private val worker: Executor,
     private val onDrop: (ClipData) -> Boolean,
 ) {
-    private val windows = context.getSystemService(WindowManager::class.java)
     private val keyguard = context.getSystemService(KeyguardManager::class.java)
     private val power = context.getSystemService(PowerManager::class.java)
     private val nativeIsland = TransferDockNativeIsland(context, worker)
     private val outboundToken = Any()
-    private val bounds = Rect()
+    private val panels = WeakHashMap<ViewGroup, Panel>()
+    private val previews = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
     private var enabled = false
     private var incoming = false
-    private var outbound = false
+    private var hovering = false
     private var saved = false
     private var saving = false
-    private var showing = false
-    private var capsuleAdded = false
+    private var fingerX = -1f
+    private var fingerY = -1f
+    private var scrollOffset = 0
+    private var revision = 0
+    private var outboundWindow: WeakReference<View>? = null
     private var items = emptyList<TransferDockItem>()
-    private var panel: HorizontalScrollView? = null
-    private var panelParams: WindowManager.LayoutParams? = null
     private val resetSaved = Runnable {
         saved = false
         render()
     }
     private val endIncoming = Runnable { setIncoming(false) }
-    private val leadingText = label("", 14f)
-    private val trailingText = label("", 14f)
-    private val icon = ImageView(context).apply {
-        setImageResource(android.R.drawable.ic_menu_save)
-        setColorFilter(Color.WHITE)
-        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-    }
-    private val capsule = object : LinearLayout(context) {
-        override fun onConfigurationChanged(config: android.content.res.Configuration) {
-            super.onConfigurationChanged(config)
-            post { render() }
-        }
-    }.apply {
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(15), 0, dp(15), 0)
-        addView(icon, LinearLayout.LayoutParams(dp(19), dp(19)))
-        addView(leadingText, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(trailingText)
-        setOnClickListener { if (!incoming && !outbound) togglePanel() }
-        setOnLongClickListener { !incoming && items.firstOrNull()?.let { startDrag(this, it) } == true }
-        setOnDragListener { _, event -> onCapsuleDrag(event) }
-    }
-    private val capsuleParams = params(dp(176), dp(34), "HyperPortal Transfer Dock")
+
+    private data class Panel(val interactive: Boolean, val revision: Int)
 
     fun setEnabled(value: Boolean) {
         if (enabled == value) return
         enabled = value
         if (enabled) refreshItems() else {
-            incoming = false
+            setIncoming(false)
             saved = false
             saving = false
             main.removeCallbacks(resetSaved)
-            if (!outbound) closePanel()
         }
         render()
     }
 
     fun setIncoming(value: Boolean) {
+        if (value && (!enabled || outboundWindow != null)) return
         main.removeCallbacks(endIncoming)
-        if (!enabled || incoming == value) return
+        if (incoming == value) return
         incoming = value
-        if (incoming) closePanel()
+        if (!value) {
+            fingerX = -1f
+            fingerY = -1f
+            hovering = false
+        }
         render()
     }
 
     fun finishIncomingSoon() {
+        if (!incoming) return
         main.removeCallbacks(endIncoming)
-        if (incoming) main.postDelayed(endIncoming, 100)
+        main.postDelayed(endIncoming, 100)
     }
 
-    fun dropAt(x: Float, y: Float, clip: ClipData?): Boolean =
-        bounds.contains(x.toInt(), y.toInt()) && acceptDrop(clip)
+    fun hoverAt(x: Float, y: Float) {
+        if (!incoming || x < 0f || y < 0f || (x == 0f && y == 0f)) return
+        fingerX = x
+        fingerY = y
+        onNativeBoundsChanged()
+    }
+
+    fun onNativeBoundsChanged() {
+        if (!incoming) return
+        val hit = TransferDockNativeIsland.hit(fingerX, fingerY)
+        if (hovering == hit) return
+        hovering = hit
+        render()
+    }
+
+    fun dropAt(x: Float, y: Float, clip: ClipData?): Boolean {
+        if (!incoming || !canShow() || clip == null || !TransferDockNativeIsland.hit(x, y)) return false
+        if (!clip.description.hasMimeType(PORTAL_MIME)) return false
+        val accepted = onDrop(clip)
+        if (accepted) {
+            saving = true
+            setIncoming(false)
+        }
+        return accepted
+    }
+
+    /** Observe native window drags. Only this dock's incoming payload can consume a drop. */
+    fun onNativeDrag(window: View, event: DragEvent): Boolean {
+        if (event.localState === outboundToken || outboundWindow?.get() === window) {
+            if (event.action == DragEvent.ACTION_DRAG_ENDED) finishOutbound()
+            return event.action == DragEvent.ACTION_DRAG_STARTED
+        }
+        if (!enabled || !canShow()) return false
+        when (event.action) {
+            DragEvent.ACTION_DRAG_STARTED -> {
+                if (event.clipDescription?.hasMimeType(PORTAL_MIME) != true) return false
+                setIncoming(true)
+                return true
+            }
+            DragEvent.ACTION_DRAG_LOCATION, DragEvent.ACTION_DROP -> {
+                if (!incoming || event.clipDescription?.hasMimeType(PORTAL_MIME) != true) return false
+                val origin = IntArray(2)
+                window.getLocationOnScreen(origin)
+                val x = origin[0] + event.x
+                val y = origin[1] + event.y
+                if (event.action == DragEvent.ACTION_DROP) return dropAt(x, y, event.clipData)
+                hoverAt(x, y)
+            }
+            DragEvent.ACTION_DRAG_EXITED -> if (incoming) {
+                fingerX = -1f
+                fingerY = -1f
+                onNativeBoundsChanged()
+            }
+            DragEvent.ACTION_DRAG_ENDED -> setIncoming(false)
+        }
+        return false
+    }
 
     fun onScreenChanged() {
-        if (!canShow()) {
-            incoming = false
-            if (!outbound) closePanel()
-        }
+        if (!canShow()) setIncoming(false)
         render()
     }
 
     fun refreshItems(justSaved: Boolean = false) {
         worker.execute {
             val snapshot = TransferDockManager.getInstance(context).getItems()
+            // The system may start its expansion transition on the next tap.
+            // Prepare the images that can enter the initial viewport before posting.
+            for (item in snapshot.take(4)) {
+                if (item.type == TransferDockItem.TYPE_IMAGE && previews.get(item.id) == null) {
+                    loadPreview(item)?.let { previews.put(item.id, it) }
+                }
+            }
             main.post {
                 items = snapshot
+                revision++
+                for ((host, panel) in panels.toList()) bindPanel(host, panel.interactive)
                 if (enabled && justSaved) {
                     saving = false
                     saved = true
                     main.removeCallbacks(resetSaved)
                     main.postDelayed(resetSaved, 1800)
                 }
-                panel?.let(::populatePanel)
                 render()
             }
         }
@@ -138,155 +186,119 @@ internal class TransferDockIslandController(
     }
 
     fun openPanel() {
-        if (!enabled || !canShow() || items.isEmpty() || panel != null) return
-        val scroll = HorizontalScrollView(context).apply {
+        if (enabled && canShow() && items.isNotEmpty()) TransferDockNativeIsland.requestOpen()
+    }
+
+    fun bindPanel(host: ViewGroup, interactive: Boolean) {
+        if (panels[host] == Panel(interactive, revision)) return
+        panels[host] = Panel(interactive, revision)
+        host.removeAllViews()
+        if (items.isEmpty()) {
+            host.addView(label(host.context, "暂无内容", 14f).apply { gravity = Gravity.CENTER })
+            return
+        }
+        val uiContext = host.context
+        val scroll = HorizontalScrollView(uiContext).apply {
             isHorizontalScrollBarEnabled = false
-            clipToOutline = true
-            background = rounded(0xff17171c.toInt(), 26)
-            setPadding(dp(9), dp(9), dp(9), dp(9))
-            setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
-                    closePanel()
-                    true
-                } else false
-            }
-            setOnDragListener { _, event -> onOutboundDrag(event) }
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            clipToPadding = false
         }
-        panel = scroll
-        val layout = params(panelWidth(), dp(102), "HyperPortal Transfer Dock Contents")
-        layout.flags = layout.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-        layout.y = bounds.bottom + dp(6)
-        panelParams = layout
-        populatePanel(scroll)
-        try {
-            windows.addView(scroll, layout)
-        } catch (e: RuntimeException) {
-            panel = null
-            panelParams = null
-            Log.w(TAG, "Could not open transfer dock contents", e)
-        }
-    }
-
-    private fun togglePanel() {
-        if (panel == null) openPanel() else closePanel()
-    }
-
-    private fun populatePanel(scroll: HorizontalScrollView) {
-        scroll.removeAllViews()
-        val row = LinearLayout(context)
-        scroll.addView(row)
-        val thumbnails = mutableListOf<Pair<String, ImageView>>()
+        val row = LinearLayout(uiContext)
+        scroll.addView(row, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        host.addView(scroll, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        if (interactive) scroll.setOnScrollChangeListener { _, x, _, _, _ -> scrollOffset = x }
+        val previewsToLoad = mutableListOf<Pair<TransferDockItem, WeakReference<ImageView>>>()
         for (item in items) {
-            val card = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
+            val card = LinearLayout(uiContext).apply {
                 gravity = Gravity.CENTER
-                setPadding(dp(8), dp(5), dp(8), dp(5))
-                background = rounded(0xff303037.toInt(), 14)
-                contentDescription = item.title
-                setOnClickListener { copy(item) }
-                setOnLongClickListener { startDrag(this, item) }
-            }
-            val preview = ImageView(context).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setImageResource(if (item.type == TransferDockItem.TYPE_TEXT) {
-                    android.R.drawable.ic_menu_edit
-                } else android.R.drawable.ic_menu_gallery)
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            }
-            card.addView(preview, LinearLayout.LayoutParams(dp(34), dp(34)))
-            card.addView(label(item.title, 12f).apply { gravity = Gravity.CENTER })
-            row.addView(card, LinearLayout.LayoutParams(dp(88), -1).apply { marginEnd = dp(6) })
-            item.thumbnailPath?.let { thumbnails.add(it to preview) }
-        }
-        worker.execute {
-            val options = BitmapFactory.Options().apply { inSampleSize = 2 }
-            val decoded = thumbnails.map { (path, view) -> view to BitmapFactory.decodeFile(path, options) }
-            main.post {
-                if (panel === scroll && scroll.getChildAt(0) === row) {
-                    for ((view, bitmap) in decoded) if (bitmap != null) view.setImageBitmap(bitmap)
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                background = rounded(0x247f8796, 13)
+                if (interactive) {
+                    setOnClickListener { copy(item) }
+                    setOnLongClickListener { view -> startDrag(view, item, true) }
                 }
             }
-        }
-    }
-
-    private fun closePanel() {
-        val view = panel ?: return
-        panel = null
-        panelParams = null
-        try {
-            windows.removeView(view)
-        } catch (e: IllegalArgumentException) {
-            Log.d(TAG, "Transfer dock contents already removed", e)
-        }
-    }
-
-    private fun onCapsuleDrag(event: DragEvent): Boolean {
-        if (onOutboundDrag(event)) return true
-        when (event.action) {
-            DragEvent.ACTION_DRAG_STARTED -> {
-                if (!enabled || !canShow() || event.clipDescription?.hasMimeType(PORTAL_MIME) != true) return false
-                setIncoming(true)
-                return true
+            when (item.type) {
+                TransferDockItem.TYPE_TEXT -> {
+                    card.addView(label(uiContext, item.text ?: item.title, 14f).apply { maxLines = 4 })
+                }
+                TransferDockItem.TYPE_IMAGE -> {
+                    card.setPadding(0, 0, 0, 0)
+                    card.clipToOutline = true
+                    card.contentDescription = item.title
+                    val image = ImageView(uiContext).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                    val preview = previews.get(item.id)
+                    if (preview != null) image.setImageBitmap(preview)
+                    else previewsToLoad.add(item to WeakReference(image))
+                    card.addView(image, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                }
+                else -> {
+                    card.addView(ImageView(uiContext).apply {
+                        setImageResource(android.R.drawable.ic_menu_agenda)
+                        contentDescription = null
+                    }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(7) })
+                    card.addView(label(uiContext, item.title, 13f).apply { maxLines = 2 })
+                }
             }
-            DragEvent.ACTION_DROP -> return acceptDrop(event.clipData)
-            DragEvent.ACTION_DRAG_ENDED -> setIncoming(false)
+            row.addView(card, LinearLayout.LayoutParams(dp(136), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                marginEnd = dp(8)
+            })
         }
-        return incoming
-    }
-
-    private fun acceptDrop(clip: ClipData?): Boolean {
-        if (!incoming || !canShow() || clip == null) return false
-        val accepted = onDrop(clip)
-        if (accepted) saving = true
-        setIncoming(false)
-        return accepted
-    }
-
-    private fun onOutboundDrag(event: DragEvent): Boolean {
-        if (event.localState !== outboundToken) return false
-        if (event.action == DragEvent.ACTION_DRAG_ENDED) {
-            outbound = false
-            TransferDockDragGuard.setDragging(false)
-            closePanel()
-            render()
+        scroll.post { scroll.scrollTo(scrollOffset, 0) }
+        if (previewsToLoad.isEmpty()) return
+        worker.execute {
+            for ((item, view) in previewsToLoad) {
+                val bitmap = previews.get(item.id) ?: loadPreview(item) ?: continue
+                previews.put(item.id, bitmap)
+                main.post { view.get()?.setImageBitmap(bitmap) }
+            }
         }
-        return event.action != DragEvent.ACTION_DROP
     }
 
-    private fun startDrag(view: View, item: TransferDockItem): Boolean {
-        if (outbound || !canShow()) return false
+    private fun loadPreview(item: TransferDockItem): Bitmap? {
+        val path = item.thumbnailPath ?: item.filePath ?: return null
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, options)
+        if (options.outWidth <= 0 || options.outHeight <= 0) return null
+        options.inSampleSize = 1
+        while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 320) {
+            options.inSampleSize *= 2
+        }
+        options.inJustDecodeBounds = false
+        return BitmapFactory.decodeFile(path, options)
+    }
+
+    fun dragLatest(view: View): Boolean =
+        items.firstOrNull()?.let { startDrag(view, it, false) } == true
+
+    private fun startDrag(view: View, item: TransferDockItem, useCard: Boolean): Boolean {
+        if (!enabled || incoming || outboundWindow != null || !canShow() || !view.isAttachedToWindow) return false
         val clip = clipFor(item, forDrag = true) ?: return false
+        val shadow = if (useCard) view else label(view.context, item.title, 14f).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(9), 0, dp(9), 0)
+            background = rounded(0xff303037.toInt(), 14)
+            measure(View.MeasureSpec.makeMeasureSpec(dp(116), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(dp(48), View.MeasureSpec.EXACTLY))
+            layout(0, 0, measuredWidth, measuredHeight)
+        }
+        outboundWindow = WeakReference(view.rootView)
         TransferDockDragGuard.setDragging(true)
-        outbound = true
         val started = try {
-            val shadowView = if (view === capsule) label(item.title, 14f).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(9), 0, dp(9), 0)
-                background = rounded(0xff303037.toInt(), 14)
-                measure(View.MeasureSpec.makeMeasureSpec(dp(116), View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(dp(48), View.MeasureSpec.EXACTLY))
-                layout(0, 0, measuredWidth, measuredHeight)
-            } else view
-            view.startDragAndDrop(clip, View.DragShadowBuilder(shadowView), outboundToken,
+            view.startDragAndDrop(clip, View.DragShadowBuilder(shadow), outboundToken,
                 View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
         } catch (e: RuntimeException) {
             Log.w(TAG, "Could not drag transfer dock item", e)
             false
         }
-        if (started) {
-            panel?.let { view ->
-                view.alpha = 0f
-                panelParams?.let {
-                    it.flags = it.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                    windows.updateViewLayout(view, it)
-                }
-            }
-            render()
-        } else {
-            outbound = false
-            TransferDockDragGuard.setDragging(false)
-        }
+        if (!started) finishOutbound()
         return started
+    }
+
+    private fun finishOutbound() {
+        outboundWindow = null
+        TransferDockDragGuard.setDragging(false)
     }
 
     private fun copy(item: TransferDockItem) {
@@ -301,7 +313,6 @@ internal class TransferDockIslandController(
     }
 
     private fun clipFor(item: TransferDockItem, forDrag: Boolean): ClipData? {
-        val text = item.text ?: item.title
         val uri = if (item.type == TransferDockItem.TYPE_TEXT) null else dockItemUri(item)
         if (uri == null && item.type != TransferDockItem.TYPE_TEXT) {
             Toast.makeText(context, "文件不可用", Toast.LENGTH_SHORT).show()
@@ -314,91 +325,27 @@ internal class TransferDockIslandController(
         }
         if (forDrag) types.add(TransferDockContract.DRAG_MIME)
         return ClipData(ClipDescription(item.title, types.toTypedArray()),
-            if (uri == null) ClipData.Item(text) else ClipData.Item(uri))
-    }
-
-    fun nativeBoundsChanged() {
-        if (capsuleAdded) positionCapsule()
+            if (uri == null) ClipData.Item(item.text ?: item.title) else ClipData.Item(uri))
     }
 
     private fun canShow() = power.isInteractive && !keyguard.isKeyguardLocked
 
     private fun render() {
-        val dropHint = incoming || (saving && items.isEmpty())
-        val publish = enabled && canShow() && (dropHint || items.isNotEmpty())
-        showing = publish && !outbound
-        val left = if (dropHint) "" else "中转站"
-        val right = when {
-            dropHint -> "中转站"
+        val text = if (!enabled || !canShow()) null else when {
+            incoming && hovering -> "松手存入"
+            incoming -> "拖拽到此处"
+            saving -> "正在存入"
             saved -> "保存成功"
-            else -> "共${items.size}项"
+            items.isNotEmpty() -> "共${items.size}项"
+            else -> null
         }
-        nativeIsland.show(if (publish) left else null, right)
-        if (!enabled && !outbound) {
-            if (capsuleAdded) {
-                capsuleAdded = false
-                windows.removeView(capsule)
-            }
-            return
-        }
-        icon.visibility = if (dropHint) View.VISIBLE else View.GONE
-        leadingText.text = left
-        trailingText.text = right
-        capsule.contentDescription = "$left $right".trim()
-        positionCapsule()
+        nativeIsland.show(text)
     }
 
-    private fun positionCapsule() {
-        val metrics = windows.currentWindowMetrics
-        val native = nativeIsland.bounds()
-        val inset = metrics.windowInsets.displayCutout?.safeInsetTop ?: 0
-        val width = dp(176)
-        val height = dp(34)
-        val left = (metrics.bounds.width() - width) / 2
-        val top = ((inset - height) / 2).coerceAtLeast(dp(3))
-        bounds.set(native ?: Rect(left, top, left + width, top + height))
-        capsule.background = if (native == null) rounded(Color.BLACK, 28) else null
-        val contentAlpha = if (native == null) 1f else 0f
-        icon.alpha = contentAlpha
-        leadingText.alpha = contentAlpha
-        trailingText.alpha = contentAlpha
-        // When another native island takes over, give its touch region back to SystemUI.
-        val interactive = showing && (incoming || saving || native != null || !nativeIsland.wasRendered())
-        capsule.alpha = if (interactive) 1f else 0f
-        capsuleParams.flags = if (interactive) {
-            capsuleParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        } else {
-            capsuleParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        }
-        capsuleParams.width = bounds.width()
-        capsuleParams.height = bounds.height()
-        capsuleParams.x = bounds.left
-        capsuleParams.y = bounds.top
-        try {
-            if (capsuleAdded) {
-                windows.updateViewLayout(capsule, capsuleParams)
-            } else {
-                windows.addView(capsule, capsuleParams)
-                capsuleAdded = true
-            }
-            val scroll = panel
-            val layout = panelParams
-            if (scroll != null && layout != null && scroll.isAttachedToWindow) {
-                layout.width = panelWidth()
-                layout.y = bounds.bottom + dp(6)
-                windows.updateViewLayout(scroll, layout)
-            }
-        } catch (e: RuntimeException) {
-            Log.w(TAG, "Could not place transfer dock island", e)
-        }
-    }
-
-    private fun panelWidth() = minOf(dp(360), windows.currentWindowMetrics.bounds.width() - dp(24))
-    private fun label(text: String, size: Float) = TextView(context).apply {
+    private fun label(uiContext: Context, text: String, size: Float) = TextView(uiContext).apply {
         this.text = text
         textSize = size
         setTextColor(Color.WHITE)
-        isSingleLine = true
         ellipsize = TextUtils.TruncateAt.END
     }
 
@@ -408,20 +355,6 @@ internal class TransferDockIslandController(
     }
 
     private fun dp(value: Int) = (context.resources.displayMetrics.density * value + 0.5f).toInt()
-
-    private fun params(width: Int, height: Int, name: String) = WindowManager.LayoutParams(
-        width, height, 2024,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-        PixelFormat.TRANSLUCENT,
-    ).apply {
-        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        if (name == "HyperPortal Transfer Dock") gravity = Gravity.TOP or Gravity.LEFT
-        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-        setFitInsetsTypes(0)
-        title = name
-    }
 
     companion object {
         private const val TAG = "TransferDockIsland"
