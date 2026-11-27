@@ -8,8 +8,15 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Outline
+import android.graphics.Paint
+import android.graphics.Point
 import android.graphics.Rect
+import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.os.Handler
@@ -22,6 +29,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -41,6 +49,12 @@ internal class TransferDockIslandController(
     private val keyguard = context.getSystemService(KeyguardManager::class.java)
     private val power = context.getSystemService(PowerManager::class.java)
     private val nativeIsland = TransferDockNativeIsland(context, worker)
+    private val previewOutline = object : ViewOutlineProvider() {
+        override fun getOutline(view: View, outline: Outline) {
+            val radius = minOf(dp(CARD_CORNER_DP).toFloat(), minOf(view.width, view.height) / 2f)
+            outline.setRoundRect(0, 0, view.width, view.height, radius)
+        }
+    }
     private val outboundToken = Any()
     private val panels = WeakHashMap<ViewGroup, Panel>()
     private val previews = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
@@ -60,6 +74,7 @@ internal class TransferDockIslandController(
     private var panelDownTime = -1L
     private var outboundWindow: WeakReference<View>? = null
     private var items = emptyList<TransferDockItem>()
+    private var latestImagePreview: Bitmap? = null
     private val resetSaved = Runnable {
         saved = false
         render()
@@ -172,8 +187,10 @@ internal class TransferDockIslandController(
                     loadPreview(item)?.let { previews.put(item.id, it) }
                 }
             }
+            val latestPreview = snapshot.firstOrNull()?.let { previews.get(it.id) }
             main.post {
                 items = snapshot
+                latestImagePreview = latestPreview
                 revision++
                 for ((host, panel) in panels.toList()) bindPanel(host, panel.interactive)
                 if (enabled && justSaved) {
@@ -263,7 +280,7 @@ internal class TransferDockIslandController(
             setColorFilter(Color.WHITE)
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             contentDescription = "清空中转站"
-            background = rounded(0x247f8796, 13)
+            background = rounded(0x247f8796, CARD_CORNER_DP)
             if (interactive) setOnClickListener { clearDock(host.rootView) }
         }
         content.addView(clear, LinearLayout.LayoutParams(dp(42), dp(48)).apply { marginEnd = dp(9) })
@@ -281,6 +298,8 @@ internal class TransferDockIslandController(
             if (item.type == TransferDockItem.TYPE_IMAGE) {
                 val preview = ImageView(uiContext).apply {
                     scaleType = ImageView.ScaleType.FIT_CENTER
+                    outlineProvider = previewOutline
+                    clipToOutline = true
                     contentDescription = item.title
                 }
                 bindItemActions(preview, item, interactive)
@@ -293,7 +312,7 @@ internal class TransferDockIslandController(
             val card = LinearLayout(uiContext).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(10), dp(6), dp(10), dp(6))
-                background = rounded(0x247f8796, 13)
+                background = rounded(0x247f8796, CARD_CORNER_DP)
             }
             bindItemActions(card, item, interactive)
             when (item.type) {
@@ -341,16 +360,22 @@ internal class TransferDockIslandController(
     }
 
     private fun showPreview(view: ImageView, bitmap: Bitmap, maxWidth: Int) {
-        val scale = minOf(dp(76).toFloat() / bitmap.height, maxWidth.toFloat() / bitmap.width)
-        val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
-        val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
+        val size = previewSize(bitmap, maxWidth, dp(76))
         val layout = view.layoutParams
-        if (layout.width != width || layout.height != height) {
-            layout.width = width
-            layout.height = height
+        if (layout.width != size.x || layout.height != size.y) {
+            layout.width = size.x
+            layout.height = size.y
             view.layoutParams = layout
         }
         if ((view.drawable as? BitmapDrawable)?.bitmap !== bitmap) view.setImageBitmap(bitmap)
+    }
+
+    private fun previewSize(bitmap: Bitmap, maxWidth: Int, maxHeight: Int): Point {
+        val scale = minOf(maxWidth.toFloat() / bitmap.width, maxHeight.toFloat() / bitmap.height)
+        return Point(
+            (bitmap.width * scale).roundToInt().coerceAtLeast(1),
+            (bitmap.height * scale).roundToInt().coerceAtLeast(1),
+        )
     }
 
     private fun bindItemActions(view: View, item: TransferDockItem, interactive: Boolean) {
@@ -372,6 +397,7 @@ internal class TransferDockIslandController(
                     return@post
                 }
                 items = emptyList()
+                latestImagePreview = null
                 previews.evictAll()
                 scrollOffset = 0
                 saved = false
@@ -406,18 +432,11 @@ internal class TransferDockIslandController(
     private fun startDrag(view: View, item: TransferDockItem, useCard: Boolean): Boolean {
         if (!enabled || incoming || outboundWindow != null || !canShow() || !view.isAttachedToWindow) return false
         val clip = clipFor(item, forDrag = true) ?: return false
-        val shadow = if (useCard) view else label(view.context, item.title, 14f).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(9), 0, dp(9), 0)
-            background = rounded(0xff303037.toInt(), 14)
-            measure(View.MeasureSpec.makeMeasureSpec(dp(116), View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(dp(48), View.MeasureSpec.EXACTLY))
-            layout(0, 0, measuredWidth, measuredHeight)
-        }
+        val shadow = if (useCard) View.DragShadowBuilder(view) else summaryDragShadow(view, item)
         outboundWindow = WeakReference(view.rootView)
         TransferDockDragGuard.setDragging(true)
         val started = try {
-            view.startDragAndDrop(clip, View.DragShadowBuilder(shadow), outboundToken,
+            view.startDragAndDrop(clip, shadow, outboundToken,
                 View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
         } catch (e: RuntimeException) {
             Log.w(TAG, "Could not drag transfer dock item", e)
@@ -428,6 +447,43 @@ internal class TransferDockIslandController(
             Log.w(TAG, "The system rejected the transfer dock drag")
         }
         return started
+    }
+
+    private fun summaryDragShadow(view: View, item: TransferDockItem): View.DragShadowBuilder {
+        if (item.type == TransferDockItem.TYPE_IMAGE) latestImagePreview?.let { return imageDragShadow(it) }
+        val label = label(view.context, item.title, 14f).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(9), 0, dp(9), 0)
+            background = rounded(0xff303037.toInt(), 14)
+            measure(View.MeasureSpec.makeMeasureSpec(dp(116), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(dp(48), View.MeasureSpec.EXACTLY))
+            layout(0, 0, measuredWidth, measuredHeight)
+        }
+        return object : View.DragShadowBuilder(label) {
+            override fun onDrawShadow(canvas: Canvas) = label.draw(canvas)
+        }
+    }
+
+    private fun imageDragShadow(bitmap: Bitmap): View.DragShadowBuilder {
+        val size = previewSize(bitmap, dp(144), dp(104))
+        val radius = minOf(dp(CARD_CORNER_DP).toFloat(), minOf(size.x, size.y) / 2f)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
+                setLocalMatrix(Matrix().apply {
+                    setScale(size.x.toFloat() / bitmap.width, size.y.toFloat() / bitmap.height)
+                })
+            }
+        }
+        return object : View.DragShadowBuilder() {
+            override fun onProvideShadowMetrics(shadowSize: Point, touchPoint: Point) {
+                shadowSize.set(size.x, size.y)
+                touchPoint.set(size.x / 2, size.y / 2)
+            }
+
+            override fun onDrawShadow(canvas: Canvas) {
+                canvas.drawRoundRect(0f, 0f, size.x.toFloat(), size.y.toFloat(), radius, radius, paint)
+            }
+        }
     }
 
     private fun finishOutbound() {
@@ -491,6 +547,7 @@ internal class TransferDockIslandController(
     private fun dp(value: Int) = (context.resources.displayMetrics.density * value + 0.5f).toInt()
 
     companion object {
+        private const val CARD_CORNER_DP = 13
         private const val TAG = "TransferDockIsland"
         private const val PORTAL_MIME = "application/x-dragshare"
     }
