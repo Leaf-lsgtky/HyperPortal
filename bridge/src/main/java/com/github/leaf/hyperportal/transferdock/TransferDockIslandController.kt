@@ -9,7 +9,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.BitmapDrawable
 import android.os.Handler
 import android.os.PowerManager
 import android.text.TextUtils
@@ -17,6 +19,7 @@ import android.util.Log
 import android.util.LruCache
 import android.view.DragEvent
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
@@ -27,6 +30,7 @@ import android.widget.Toast
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import java.util.concurrent.Executor
+import kotlin.math.roundToInt
 
 internal class TransferDockIslandController(
     private val context: Context,
@@ -51,6 +55,9 @@ internal class TransferDockIslandController(
     private var fingerY = -1f
     private var scrollOffset = 0
     private var revision = 0
+    private var clearing = false
+    private var touchTarget: WeakReference<ViewGroup>? = null
+    private var panelDownTime = -1L
     private var outboundWindow: WeakReference<View>? = null
     private var items = emptyList<TransferDockItem>()
     private val resetSaved = Runnable {
@@ -189,6 +196,54 @@ internal class TransferDockIslandController(
         if (enabled && canShow() && items.isNotEmpty()) TransferDockNativeIsland.requestOpen()
     }
 
+    fun dispatchPanelTouch(window: View, event: MotionEvent, mayStart: Boolean): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            touchTarget = null
+            if (!mayStart || !enabled || !canShow()) return false
+            val target = panelAt(window, event.x.toInt(), event.y.toInt()) ?: return false
+            touchTarget = WeakReference(target)
+            panelDownTime = event.downTime
+        }
+        val target = touchTarget ?: return false
+        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            touchTarget = null
+        }
+        target.get()?.takeIf { it.isAttachedToWindow && it.rootView === window }?.let { host ->
+            val translated = MotionEvent.obtain(event)
+            try {
+                val location = IntArray(2)
+                window.getLocationOnScreen(location)
+                val windowX = location[0]
+                val windowY = location[1]
+                host.getLocationOnScreen(location)
+                translated.offsetLocation((windowX - location[0]).toFloat(), (windowY - location[1]).toFloat())
+                host.dispatchTouchEvent(translated)
+            } finally {
+                translated.recycle()
+            }
+        }
+        return true
+    }
+
+    fun isPanelGesture(window: View, event: MotionEvent): Boolean {
+        if (!enabled) return false
+        if (panelDownTime == event.downTime) return true
+        if (event.actionMasked != MotionEvent.ACTION_DOWN) return false
+        val location = IntArray(2)
+        window.getLocationOnScreen(location)
+        if (panelAt(window, event.rawX.toInt() - location[0], event.rawY.toInt() - location[1]) == null) return false
+        panelDownTime = event.downTime
+        return true
+    }
+
+    private fun panelAt(window: View, x: Int, y: Int): ViewGroup? {
+        val bounds = Rect()
+        return panels.entries.firstOrNull { (host, panel) ->
+            panel.interactive && host.rootView === window && host.isShown &&
+                host.getGlobalVisibleRect(bounds) && bounds.contains(x, y)
+        }?.key
+    }
+
     fun bindPanel(host: ViewGroup, interactive: Boolean) {
         if (panels[host] == Panel(interactive, revision)) return
         panels[host] = Panel(interactive, revision)
@@ -198,40 +253,52 @@ internal class TransferDockIslandController(
             return
         }
         val uiContext = host.context
+        val content = LinearLayout(uiContext).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val clear = ImageView(uiContext).apply {
+            setImageResource(android.R.drawable.ic_menu_delete)
+            setColorFilter(Color.WHITE)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "清空中转站"
+            background = rounded(0x247f8796, 13)
+            if (interactive) setOnClickListener { clearDock(host.rootView) }
+        }
+        content.addView(clear, LinearLayout.LayoutParams(dp(42), dp(48)).apply { marginEnd = dp(9) })
         val scroll = HorizontalScrollView(uiContext).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            clipToPadding = false
         }
-        val row = LinearLayout(uiContext)
+        val row = LinearLayout(uiContext).apply { gravity = Gravity.CENTER_VERTICAL }
         scroll.addView(row, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        host.addView(scroll, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        content.addView(scroll, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        host.addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         if (interactive) scroll.setOnScrollChangeListener { _, x, _, _, _ -> scrollOffset = x }
         val previewsToLoad = mutableListOf<Pair<TransferDockItem, WeakReference<ImageView>>>()
         for (item in items) {
+            if (item.type == TransferDockItem.TYPE_IMAGE) {
+                val preview = ImageView(uiContext).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    contentDescription = item.title
+                }
+                bindItemActions(preview, item, interactive)
+                row.addView(preview, LinearLayout.LayoutParams(dp(76), dp(76)).apply { marginEnd = dp(8) })
+                val bitmap = previews.get(item.id)
+                if (bitmap != null) showPreview(preview, bitmap, previewWidth(scroll))
+                else previewsToLoad.add(item to WeakReference(preview))
+                continue
+            }
             val card = LinearLayout(uiContext).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(10), dp(6), dp(10), dp(6))
                 background = rounded(0x247f8796, 13)
-                if (interactive) {
-                    setOnClickListener { copy(item) }
-                    setOnLongClickListener { view -> startDrag(view, item, true) }
-                }
             }
+            bindItemActions(card, item, interactive)
             when (item.type) {
                 TransferDockItem.TYPE_TEXT -> {
                     card.addView(label(uiContext, item.text ?: item.title, 14f).apply { maxLines = 4 })
-                }
-                TransferDockItem.TYPE_IMAGE -> {
-                    card.setPadding(0, 0, 0, 0)
-                    card.clipToOutline = true
-                    card.contentDescription = item.title
-                    val image = ImageView(uiContext).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-                    val preview = previews.get(item.id)
-                    if (preview != null) image.setImageBitmap(preview)
-                    else previewsToLoad.add(item to WeakReference(image))
-                    card.addView(image, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                 }
                 else -> {
                     card.addView(ImageView(uiContext).apply {
@@ -245,19 +312,83 @@ internal class TransferDockIslandController(
                 marginEnd = dp(8)
             })
         }
+        scroll.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left == oldRight - oldLeft) return@addOnLayoutChangeListener
+            val maxWidth = previewWidth(scroll)
+            for (index in 0 until row.childCount) {
+                val image = row.getChildAt(index) as? ImageView ?: continue
+                val bitmap = (image.drawable as? BitmapDrawable)?.bitmap ?: continue
+                showPreview(image, bitmap, maxWidth)
+            }
+        }
         scroll.post { scroll.scrollTo(scrollOffset, 0) }
         if (previewsToLoad.isEmpty()) return
         worker.execute {
             for ((item, view) in previewsToLoad) {
                 val bitmap = previews.get(item.id) ?: loadPreview(item) ?: continue
                 previews.put(item.id, bitmap)
-                main.post { view.get()?.setImageBitmap(bitmap) }
+                main.post {
+                    view.get()?.let { showPreview(it, bitmap, previewWidth(scroll)) }
+                }
+            }
+        }
+    }
+
+    private fun previewWidth(scroll: View): Int {
+        val available = if (scroll.width > 0) scroll.width
+            else (scroll.resources.displayMetrics.widthPixels - dp(104)).coerceAtLeast(dp(48))
+        return minOf(dp(238), available)
+    }
+
+    private fun showPreview(view: ImageView, bitmap: Bitmap, maxWidth: Int) {
+        val scale = minOf(dp(76).toFloat() / bitmap.height, maxWidth.toFloat() / bitmap.width)
+        val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
+        val layout = view.layoutParams
+        if (layout.width != width || layout.height != height) {
+            layout.width = width
+            layout.height = height
+            view.layoutParams = layout
+        }
+        if ((view.drawable as? BitmapDrawable)?.bitmap !== bitmap) view.setImageBitmap(bitmap)
+    }
+
+    private fun bindItemActions(view: View, item: TransferDockItem, interactive: Boolean) {
+        if (!interactive) return
+        view.setOnClickListener { copy(item) }
+        view.setOnLongClickListener { startDrag(it, item, true) }
+    }
+
+    private fun clearDock(window: View) {
+        if (!enabled || !canShow() || clearing || items.isEmpty()) return
+        clearing = true
+        val owner = WeakReference(window)
+        worker.execute {
+            val cleared = TransferDockManager.getInstance(context).clearAll()
+            main.post {
+                clearing = false
+                if (!cleared) {
+                    Toast.makeText(context, "清空失败", Toast.LENGTH_SHORT).show()
+                    return@post
+                }
+                items = emptyList()
+                previews.evictAll()
+                scrollOffset = 0
+                saved = false
+                saving = false
+                main.removeCallbacks(resetSaved)
+                revision++
+                owner.get()?.let(TransferDockNativeIsland::collapsePanel)
+                render()
             }
         }
     }
 
     private fun loadPreview(item: TransferDockItem): Bitmap? {
-        val path = item.thumbnailPath ?: item.filePath ?: return null
+        return item.filePath?.let(::decodePreview) ?: item.thumbnailPath?.let(::decodePreview)
+    }
+
+    private fun decodePreview(path: String): Bitmap? {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, options)
         if (options.outWidth <= 0 || options.outHeight <= 0) return null
@@ -292,7 +423,10 @@ internal class TransferDockIslandController(
             Log.w(TAG, "Could not drag transfer dock item", e)
             false
         }
-        if (!started) finishOutbound()
+        if (!started) {
+            finishOutbound()
+            Log.w(TAG, "The system rejected the transfer dock drag")
+        }
         return started
     }
 

@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import android.view.DragEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -63,8 +64,9 @@ internal class TransferDockNativeIsland(private val context: Context, private va
                 val picture = JSONObject().put("type", 1).put("pic", PICTURE)
                 val island = JSONObject()
                     .put("business", CHANNEL)
-                    .put("islandProperty", 0)
-                    .put("islandPriority", 0)
+                    // Property 1 uses the recoverable BIG/SMALL states on HyperOS.
+                    .put("islandProperty", 1)
+                    .put("islandPriority", 1)
                     .put("islandTimeout", Int.MAX_VALUE)
                     .put("bigIslandArea", JSONObject()
                         .put("imageTextInfoLeft", JSONObject().put("type", 1)
@@ -182,6 +184,8 @@ internal class TransferDockNativeIsland(private val context: Context, private va
                 val small = base.getMethod("getSmallIslandView")
                 val fakeBig = base.getMethod("getFakeBigIsland")
                 val longPress = window.declaredMethods.first { it.name == "onLongPress" && it.parameterCount == 3 }
+                val expanded = window.getMethod("getCurrentExpandedState")
+                val dispatchTouch = window.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
                 val observer = SummaryObserver(currentData, extras, state, click, big, small, fakeBig, dock)
 
                 synchronized(installed) {
@@ -201,6 +205,20 @@ internal class TransferDockNativeIsland(private val context: Context, private va
                     hookExpansion(xposed, real, data.getMethod("getView"), extras, dock, true)
                     hookExpansion(xposed, fake, data.getMethod("getFakeView"), extras, dock, false)
                     hookCustomFocusAuth(xposed, loader)
+                    xposed.hook(dispatchTouch).setId("hyperportal-dock-panel-touch").intercept { chain ->
+                        val handled = guard {
+                            val event = chain.args[0] as? MotionEvent ?: return@guard false
+                            val view = chain.thisObject as? View ?: return@guard false
+                            val controller = dock.get() ?: return@guard false
+                            val mayStart = if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                                val owner = expanded.invoke(view) ?: return@guard false
+                                isDock(currentData.invoke(owner), extras)
+                            } else false
+                            controller.dispatchPanelTouch(view, event, mayStart)
+                        }
+                        if (handled == true) true else chain.proceed()
+                    }
+                    hookExternalTouch(xposed, loader, expanded, currentData, extras, dock)
                     xposed.hook(longPress).setId("hyperportal-dock-long-press").intercept { chain ->
                         val handled = guard {
                             val pressed = chain.args[0] as? View
@@ -218,6 +236,42 @@ internal class TransferDockNativeIsland(private val context: Context, private va
                 Log.d(TAG, "Native transfer dock classes are not ready", e)
             } catch (e: Exception) {
                 Log.w(TAG, "Native transfer dock view unavailable", e)
+            }
+        }
+
+        private fun hookExternalTouch(
+            xposed: XposedInterface, loader: ClassLoader, expanded: Method,
+            currentData: Method, extras: Method, dock: Supplier<TransferDockIslandController?>,
+        ) {
+            guard {
+                val interactor = Class.forName(
+                    "miui.systemui.dynamicisland.touch.domain.interactor.DynamicIslandTouchInteractor", false, loader,
+                )
+                val windowField = interactor.getDeclaredField("windowView").apply { isAccessible = true }
+                for (name in listOf("onInterceptTouchEvent", "onTouchEvent")) {
+                    val method = interactor.getDeclaredMethod(name, MotionEvent::class.java, String::class.java)
+                    xposed.hook(method).setId("hyperportal-dock-list-$name").intercept { chain ->
+                        val handled = guard {
+                            val event = chain.args[0] as? MotionEvent ?: return@guard false
+                            val window = windowField.get(chain.thisObject) as? View ?: return@guard false
+                            val owner = expanded.invoke(window) ?: return@guard false
+                            isDock(currentData.invoke(owner), extras) &&
+                                dock.get()?.isPanelGesture(window, event) == true
+                        }
+                        if (handled == true) false else chain.proceed()
+                    }
+                }
+            }
+        }
+
+        fun collapsePanel(window: View) {
+            guard {
+                if (window.javaClass.name != WINDOW_VIEW) return@guard
+                val owner = window.javaClass.getMethod("getCurrentExpandedState").invoke(window) ?: return@guard
+                val getData = owner.javaClass.getMethod("getCurrentIslandData")
+                if (isDock(getData.invoke(owner), getData.returnType.getMethod("getExtras"))) {
+                    window.javaClass.getMethod("collapse", String::class.java).invoke(window, "transferDockClear")
+                }
             }
         }
 
@@ -327,7 +381,7 @@ internal class TransferDockNativeIsland(private val context: Context, private va
         }
 
         private fun isSummary(state: Any?): Boolean = when (state?.javaClass?.simpleName) {
-            "BigIsland", "SmallIsland", "ShowOnceBigIsland" -> true
+            "BigIsland", "SmallIsland" -> true
             else -> false
         }
 

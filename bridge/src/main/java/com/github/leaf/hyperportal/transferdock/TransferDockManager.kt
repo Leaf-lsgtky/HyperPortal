@@ -256,7 +256,7 @@ class TransferDockManager private constructor(private val context: Context) {
         }
     }
 
-    fun clearAll() {
+    fun clearAll(): Boolean {
         synchronized(lock) {
             val removed = ArrayList(items)
             items.clear()
@@ -265,9 +265,10 @@ class TransferDockManager private constructor(private val context: Context) {
             } catch (e: Exception) {
                 items.addAll(removed)
                 Log.e(TAG, "Failed to clear transfer dock items", e)
-                return
+                return false
             }
             removed.forEach(::cleanupItemFiles)
+            return true
         }
     }
 
