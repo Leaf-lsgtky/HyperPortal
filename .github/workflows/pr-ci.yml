@@ -41,9 +41,13 @@ jobs:
             if (pr.state !== 'open' || pr.mergeable === false) {
               throw new Error('PR must be open and mergeable');
             }
+            // A PR's base.sha can predate subsequent pushes to its base branch.
+            const { data: base } = await github.rest.repos.getBranch({
+              ...context.repo, branch: pr.base.ref,
+            });
             core.setOutput('number', String(pr.number));
             core.setOutput('head_sha', pr.head.sha);
-            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('base_sha', base.commit.sha);
             core.setOutput('ref', `refs/pull/${pr.number}/merge`);
 
       - name: Checkout PR merge
