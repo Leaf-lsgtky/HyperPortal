@@ -11,6 +11,7 @@ Usage:
   python tools/build.py bridge --r8                # pre-release R8 build -> dist/HyperPortal-r8.apk
   python tools/build.py aes [--clean] [--version-code <N>]   # never R8-minified
   python tools/build.py all [--clean] [--r8]
+  python tools/build.py all --unsigned            # CI intermediate APKs only
 """
 
 import argparse
@@ -67,7 +68,7 @@ def sign_and_verify(aligned_apk, output_apk):
     print(f"[OK] Built & Verified: {output_apk.name} ({output_apk.stat().st_size:,} bytes)")
 
 
-def build_bridge(clean=False, r8=False):
+def build_bridge(clean=False, r8=False, unsigned=False):
     print("=" * 60)
     print("Building HyperPortal (Miuix Compose App & LSPosed Module)...")
     print("=" * 60)
@@ -79,17 +80,22 @@ def build_bridge(clean=False, r8=False):
     if r8:
         task += " -Phyperportal.minify=true"
         print("[R8] Building a minified release APK (pre-release verification only)")
+    if unsigned:
+        task += " -Phyperportal.unsigned=true"
+        print("[CI] Building unsigned intermediate APKs; release signing is still required")
     cmd = f"{gradle_cmd} {task}"
     print(f"[1/2] Running Gradle: {cmd}...")
     run_cmd(cmd, shell=True)
 
-    built_apk = cfg.ROOT_DIR / "bridge" / "build" / "outputs" / "apk" / "release" / "bridge-release.apk"
+    built_name = "bridge-release-unsigned.apk" if unsigned else "bridge-release.apk"
+    built_apk = cfg.ROOT_DIR / "bridge" / "build" / "outputs" / "apk" / "release" / built_name
     if not built_apk.is_file():
         raise RuntimeError(f"Gradle failed to produce release APK at {built_apk}")
 
-    out_apk = cfg.DIST_DIR / ("HyperPortal-r8.apk" if r8 else "HyperPortal.apk")
+    out_name = "HyperPortal-r8" if r8 else "HyperPortal"
+    out_apk = cfg.DIST_DIR / f"{out_name}{'-unsigned' if unsigned else ''}.apk"
     shutil.copy2(built_apk, out_apk)
-    print(f"[2/2] [OK] Built & Verified: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
+    print(f"[2/2] [OK] Built{' (unsigned)' if unsigned else ' & Verified'}: {out_apk.name} ({out_apk.stat().st_size:,} bytes)")
     return out_apk
 
 def smali_fingerprint(project):
@@ -104,7 +110,7 @@ def smali_fingerprint(project):
     return digest.hexdigest()
 
 
-def build_aes(clean=False, version_code=1000000051):
+def build_aes(clean=False, version_code=1000000051, unsigned=False):
     print("=" * 60)
     print("Building AES (ContentCatcher Privileged Hook)...")
     print("=" * 60)
@@ -183,13 +189,17 @@ def build_aes(clean=False, version_code=1000000051):
     repack.repack_apk(str(cfg.AES_BASE_APK), str(cached_classes_dex), str(classes2_dex), str(unsigned_apk), version_code)
 
     # 5. Zipalign & Sign
-    print("[5/5] Zipalign and signing...")
+    print("[5/5] Zipalign..." if unsigned else "[5/5] Zipalign and signing...")
     if aligned_apk.exists():
         aligned_apk.unlink()
     run_cmd(f'"{cfg.ZIPALIGN_EXE}" -f -p 4 "{unsigned_apk}" "{aligned_apk}"')
 
-    final_apk = cfg.DIST_DIR / "ContentCatcher-patched.apk"
-    sign_and_verify(aligned_apk, final_apk)
+    final_apk = cfg.DIST_DIR / ("ContentCatcher-unsigned.apk" if unsigned else "ContentCatcher-patched.apk")
+    if unsigned:
+        shutil.copy2(aligned_apk, final_apk)
+        print(f"[CI] Built unsigned intermediate: {final_apk.name}; release signing is still required")
+    else:
+        sign_and_verify(aligned_apk, final_apk)
     return final_apk
 
 
@@ -203,6 +213,10 @@ def main():
         action="store_true",
         help="Build the bridge with R8/minification (pre-release only; AES stays unminified)",
     )
+    parser.add_argument(
+        "--unsigned", action="store_true",
+        help="CI only: produce unsigned intermediate APKs for a separate trusted signing job",
+    )
     args = parser.parse_args()
 
     if args.target == "clean":
@@ -215,9 +229,9 @@ def main():
         return
 
     if args.target in ("bridge", "all"):
-        build_bridge(clean=args.clean, r8=args.r8)
+        build_bridge(clean=args.clean, r8=args.r8, unsigned=args.unsigned)
     if args.target in ("aes", "all"):
-        build_aes(clean=args.clean, version_code=args.version_code)
+        build_aes(clean=args.clean, version_code=args.version_code, unsigned=args.unsigned)
 
 
 if __name__ == "__main__":

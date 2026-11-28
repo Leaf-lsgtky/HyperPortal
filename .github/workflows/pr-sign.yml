@@ -1,0 +1,120 @@
+name: Sign PR APKs
+run-name: Sign APKs from PR CI run ${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows: ['PR CI']
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  sign:
+    name: Sign and verify PR APKs
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'pull_request' ||
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Never checkout PR code, run its scripts, or restore its caches here.
+      - name: Download unsigned build data
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            if (run.path !== '.github/workflows/pr-ci.yml') {
+              throw new Error('Unexpected source workflow');
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: run.id,
+            });
+            const pattern = new RegExp(`^hyperportal-pr-[1-9][0-9]*-unsigned-${run.id}-${run.run_attempt}$`);
+            const matches = artifacts.filter(a => pattern.test(a.name) && !a.expired);
+            if (matches.length !== 1) throw new Error('Expected exactly one unsigned APK artifact');
+            const { data } = await github.rest.actions.downloadArtifact({
+              ...context.repo, artifact_id: matches[0].id, archive_format: 'zip',
+            });
+            require('fs').writeFileSync('unsigned.zip', Buffer.from(data));
+
+      - name: Validate and extract APK data
+        id: build
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import zipfile
+          from pathlib import Path
+
+          expected = {'HyperPortal-unsigned.apk', 'ContentCatcher-unsigned.apk', 'build-info.json'}
+          with zipfile.ZipFile('unsigned.zip') as archive:
+              entries = archive.infolist()
+              if len(entries) != len(expected) or {i.filename for i in entries} != expected:
+                  raise SystemExit('Unexpected artifact contents')
+              if any(i.file_size > 256 * 1024 * 1024 for i in entries):
+                  raise SystemExit('Artifact file exceeds size limit')
+              info = json.loads(archive.read('build-info.json'))
+              if (info.get('repository') != os.environ['GITHUB_REPOSITORY']
+                      or info.get('run_id') != os.environ['SOURCE_RUN_ID']
+                      or info.get('run_attempt') != os.environ['SOURCE_RUN_ATTEMPT']
+                      or type(info.get('pr_number')) is not int or info['pr_number'] <= 0
+                      or info.get('r8') is not False
+                      or any(not re.fullmatch(r'[0-9a-f]{40}', info.get(key, ''))
+                             for key in ('head_sha', 'base_sha', 'merge_sha'))):
+                  raise SystemExit('Invalid build provenance')
+              Path('unsigned').mkdir()
+              for name in expected:
+                  Path('unsigned', name).write_bytes(archive.read(name))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"pr_number={info['pr_number']}\n")
+          PY
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup APK signer
+        run: '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;34.0.0"'
+
+      - name: Sign with the release key and verify
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" && test -n "$KEYSTORE_PASSWORD"
+          umask 077
+          mkdir .sign signed
+          trap 'rm -f .sign/my-release-key.jks' EXIT
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > .sign/my-release-key.jks
+          signer="${ANDROID_SDK_ROOT}/build-tools/34.0.0/apksigner"
+          "$signer" sign --ks .sign/my-release-key.jks --ks-key-alias "$KEY_ALIAS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out signed/HyperPortal.apk unsigned/HyperPortal-unsigned.apk
+          "$signer" sign --ks .sign/my-release-key.jks --ks-key-alias "$KEY_ALIAS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out signed/ContentCatcher-patched.apk unsigned/ContentCatcher-unsigned.apk
+          "$signer" verify --verbose --print-certs signed/HyperPortal.apk
+          "$signer" verify --verbose --print-certs signed/ContentCatcher-patched.apk
+          cp unsigned/build-info.json signed/build-info.json
+          cd signed
+          sha256sum HyperPortal.apk ContentCatcher-patched.apk > SHA256SUMS
+
+      - name: Upload signed APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyperportal-pr-${{ steps.build.outputs.pr_number }}-signed-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: |
+            signed/HyperPortal.apk
+            signed/ContentCatcher-patched.apk
+            signed/build-info.json
+            signed/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

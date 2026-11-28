@@ -3,6 +3,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// PR runners have no signing secrets. Their APKs are signed by a separate,
+// trusted workflow after the build; ordinary local/release builds still require
+// the release keystore and never fall back to the debug key.
+val unsignedBuild = providers.gradleProperty("hyperportal.unsigned")
+    .map { it.toBooleanStrict() }.getOrElse(false)
+
 android {
     namespace = "com.github.leaf.hyperportal"
     compileSdk = 37
@@ -28,7 +34,7 @@ android {
     }
 
     signingConfigs {
-        create("release") {
+        if (!unsignedBuild) create("release") {
             val credentials = rootProject.file(".sign/qianming.txt")
             if (!credentials.isFile) {
                 throw GradleException(
@@ -61,10 +67,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (unsignedBuild) null else signingConfigs.getByName("release")
         }
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (unsignedBuild) null else signingConfigs.getByName("release")
         }
     }
 
