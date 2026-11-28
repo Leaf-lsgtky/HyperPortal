@@ -60,12 +60,24 @@ public class TransferDockController {
     private boolean mBlurAvailable;
     private Consumer<Boolean> mBlurEnabledListener;
     private boolean mBlurListenerRegistered = false;
+    private boolean mSidebarEnabled = true;
 
     public TransferDockController(Context context) {
         this.mContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
         this.mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
         mBlurAvailable = queryBlurAvailable();
         registerBlurListener();
+    }
+
+    public void setSidebarEnabled(boolean enabled) {
+        mSidebarEnabled = enabled;
+        if (enabled) {
+            showFloatBar();
+        } else {
+            dismissCapsule();
+            hideFloatBar();
+            if (mPanelAttached) removePanelWindows();
+        }
     }
 
     private int dp(float value) {
@@ -130,6 +142,7 @@ public class TransferDockController {
      */
     public void showCapsule(final TransferDockItem item) {
         mMainHandler.post(() -> {
+            if (!mSidebarEnabled) return;
             try {
                 hideFloatBar();
 
@@ -218,7 +231,7 @@ public class TransferDockController {
     public void showFloatBar() {
         mMainHandler.post(() -> {
             try {
-                if (mPanelAttached || mCapsuleAttached) {
+                if (!mSidebarEnabled || mPanelAttached || mCapsuleAttached) {
                     return;
                 }
                 int count = TransferDockManager.getInstance(mContext).getItemCount();
@@ -334,6 +347,7 @@ public class TransferDockController {
      */
     public void openDrawer() {
         mMainHandler.post(() -> {
+            if (!mSidebarEnabled) return;
             try {
                 dismissCapsule();
                 hideFloatBar();

@@ -48,6 +48,7 @@ public class PortalFileProvider extends ContentProvider {
             bundle.putBoolean("landscape_trigger", cfg.getLandscapeTrigger());
             bundle.putInt("edge_scroll_margin", cfg.getEdgeScrollMargin());
             bundle.putInt("long_press_duration", cfg.getLongPressDuration());
+            bundle.putBoolean("transfer_dock_island", cfg.getTransferDockIsland());
             bundle.putInt("touch_slop", cfg.getTouchSlop());
             bundle.putBoolean("same_window_guard", cfg.getSameWindowGuard());
             bundle.putBoolean("coloros_consume_anim", cfg.getColorosConsumeAnim());

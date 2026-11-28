@@ -52,6 +52,7 @@ object HyperPortalPreferences {
     const val POSITION_BOTTOM = "bottom"
     const val POSITION_RIGHT = "right"
     const val DEFAULT_TRIGGER_POSITION = POSITION_BOTTOM
+    const val KEY_TRANSFER_DOCK_ISLAND = "transfer_dock_island"
 
     const val KEY_BLACKLIST = "gesture_blacklist"
 
@@ -127,6 +128,7 @@ object HyperPortalPreferences {
         val colorosConsumeAnim: Boolean,
         val triggerThreshold: Int,
         val triggerPosition: String,
+        val transferDockIsland: Boolean,
         val blacklist: Set<String>,
         val preloadTextSegmenter: Boolean,
         val targetLimit: Int,
@@ -173,6 +175,7 @@ object HyperPortalPreferences {
             colorosConsumeAnim = prefs.getBoolean(KEY_COLOROS_CONSUME_ANIM, DEFAULT_COLOROS_CONSUME_ANIM),
             triggerThreshold = prefs.getInt(KEY_TRIGGER_THRESHOLD, DEFAULT_TRIGGER_THRESHOLD),
             triggerPosition = prefs.getString(KEY_TRIGGER_POSITION, DEFAULT_TRIGGER_POSITION) ?: DEFAULT_TRIGGER_POSITION,
+            transferDockIsland = prefs.getBoolean(KEY_TRANSFER_DOCK_ISLAND, false),
             blacklist = prefs.getStringSet(KEY_BLACKLIST, emptySet())?.toSet() ?: emptySet(),
             preloadTextSegmenter = prefs.getBoolean(
                 KEY_PRELOAD_TEXT_SEGMENTER,
@@ -244,6 +247,11 @@ object HyperPortalPreferences {
     fun setTriggerPosition(context: Context, position: String) {
         val validPosition = if (position == POSITION_RIGHT) POSITION_RIGHT else POSITION_BOTTOM
         getPrefs(context).edit { putString(KEY_TRIGGER_POSITION, validPosition) }
+        notifyChanged(context)
+    }
+
+    fun setTransferDockIsland(context: Context, enabled: Boolean) {
+        getPrefs(context).edit { putBoolean(KEY_TRANSFER_DOCK_ISLAND, enabled) }
         notifyChanged(context)
     }
 
@@ -401,6 +409,7 @@ object HyperPortalPreferences {
             intent.putExtra(KEY_COLOROS_CONSUME_ANIM, cfg.colorosConsumeAnim)
             intent.putExtra(KEY_TRIGGER_THRESHOLD, cfg.triggerThreshold)
             intent.putExtra(KEY_TRIGGER_POSITION, cfg.triggerPosition)
+            intent.putExtra(KEY_TRANSFER_DOCK_ISLAND, cfg.transferDockIsland)
             intent.putExtra(KEY_TARGET_LIMIT, cfg.targetLimit)
             intent.putExtra(KEY_DEDUPLICATE_APP_TARGETS, cfg.deduplicateAppTargets)
             intent.putExtra(KEY_ENABLE_QR_SCAN, cfg.enableQrScan)

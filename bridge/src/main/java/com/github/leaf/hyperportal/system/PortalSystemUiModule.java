@@ -69,8 +69,11 @@ import com.github.leaf.hyperportal.target.TargetRepository;
 import com.github.leaf.hyperportal.target.TargetRuleStore;
 import com.github.leaf.hyperportal.transferdock.TransferDockController;
 import com.github.leaf.hyperportal.transferdock.TransferDockDragGuard;
+import com.github.leaf.hyperportal.transferdock.TransferDockFiles;
+import com.github.leaf.hyperportal.transferdock.TransferDockIslandController;
 import com.github.leaf.hyperportal.transferdock.TransferDockItem;
 import com.github.leaf.hyperportal.transferdock.TransferDockManager;
+import com.github.leaf.hyperportal.transferdock.TransferDockNativeIsland;
 import com.github.leaf.hyperportal.util.QrCodeScanner;
 import com.github.leaf.hyperportal.view.ColorOSDockBar;
 
@@ -196,6 +199,10 @@ public final class PortalSystemUiModule {
                 cl = ClassLoader.getSystemClassLoader();
             }
             installSystemUiProviderHooks(xposed, cl);
+            TransferDockNativeIsland.install(xposed, cl, () -> {
+                SystemUiOverlay overlay = sOverlay;
+                return overlay != null ? overlay.mTransferDockIsland : null;
+            });
 
             try {
                 Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
@@ -357,6 +364,11 @@ public final class PortalSystemUiModule {
                 ? (Uri) args.get(0) : null;
         String mode = args != null && args.size() > 1 && args.get(1) instanceof String
                 ? (String) args.get(1) : "r";
+        if (TransferDockFiles.handles(uri)) {
+            Context context = resolveProviderContext(chain.getThisObject());
+            if (context == null) throw new java.io.FileNotFoundException("No transfer dock context");
+            return TransferDockFiles.open(context, uri, mode);
+        }
         String path = uri != null ? uri.getPath() : null;
         if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
             Context ctx = resolveProviderContext(chain.getThisObject());
@@ -394,6 +406,10 @@ public final class PortalSystemUiModule {
                 ? (Uri) args.get(0) : null;
         String[] projection = args != null && args.size() > 1 && args.get(1) instanceof String[]
                 ? (String[]) args.get(1) : null;
+        if (TransferDockFiles.handles(uri)) {
+            Context context = resolveProviderContext(chain.getThisObject());
+            return context == null ? null : TransferDockFiles.query(context, uri, projection);
+        }
         String path = uri != null ? uri.getPath() : null;
         if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
             Context ctx = resolveProviderContext(chain.getThisObject());
@@ -451,6 +467,10 @@ public final class PortalSystemUiModule {
         List<Object> args = chain.getArgs();
         Uri uri = args != null && args.size() > 0 && args.get(0) instanceof Uri
                 ? (Uri) args.get(0) : null;
+        if (TransferDockFiles.handles(uri)) {
+            Context context = resolveProviderContext(chain.getThisObject());
+            return context == null ? null : TransferDockFiles.mimeType(context, uri);
+        }
         String path = uri != null ? uri.getPath() : null;
         if (path != null && path.startsWith(INCOMING_PATH_PREFIX)) {
             Context ctx = resolveProviderContext(chain.getThisObject());
@@ -676,6 +696,7 @@ public final class PortalSystemUiModule {
                     context.getSharedPreferences(CONFIG_CACHE_PREFS, Context.MODE_PRIVATE);
             bundle.putBoolean("config_ready", prefs.getBoolean("config_ready", false));
             bundle.putBoolean("master_switch", prefs.getBoolean("master_switch", true));
+            bundle.putBoolean("transfer_dock_island", prefs.getBoolean("transfer_dock_island", false));
             bundle.putInt("trigger_threshold", prefs.getInt("trigger_threshold", 76));
             bundle.putString("trigger_position", prefs.getString("trigger_position", "bottom"));
             bundle.putBoolean("landscape_trigger", prefs.getBoolean("landscape_trigger", false));
@@ -810,6 +831,9 @@ public final class PortalSystemUiModule {
         private int mQrSessionId = 0;
         private String mDetectedQrContent = null;
         private TransferDockController mTransferDockController;
+        private TransferDockIslandController mTransferDockIsland;
+        private boolean mUseTransferDockIsland;
+        private boolean mTransferDockModeReceived;
 
         // Cold-boot safety. The overlay used to build its target list (three
         // PackageManager queries plus an icon decode per share activity) and
@@ -945,6 +969,9 @@ public final class PortalSystemUiModule {
                 if (bundle.containsKey("master_switch")) {
                     editor.putBoolean("master_switch", bundle.getBoolean("master_switch", true));
                 }
+                if (bundle.containsKey("transfer_dock_island")) {
+                    editor.putBoolean("transfer_dock_island", bundle.getBoolean("transfer_dock_island"));
+                }
                 if (bundle.containsKey("landscape_trigger")) {
                     editor.putBoolean("landscape_trigger", bundle.getBoolean("landscape_trigger", false));
                 }
@@ -1040,6 +1067,8 @@ public final class PortalSystemUiModule {
             }
             mLandscapeAllowed = result.getBoolean("landscape_trigger", false);
             mMasterEnabled = result.getBoolean("master_switch", true);
+            applyTransferDockMode(mTransferDockModeReceived
+                    ? mUseTransferDockIsland : result.getBoolean("transfer_dock_island", false));
             ArrayList<String> pinnedOrder = result.getStringArrayList("target_order");
             if (pinnedOrder == null) {
                 pinnedOrder = result.getStringArrayList("target_pinned");
@@ -1470,6 +1499,69 @@ public final class PortalSystemUiModule {
             }
         }
 
+        private TransferDockIslandController transferDockIsland() {
+            if (mTransferDockIsland == null) {
+                mTransferDockIsland = new TransferDockIslandController(
+                        mContext, sHandler, sBgExecutor, this::onTransferDockIslandDrop);
+            }
+            return mTransferDockIsland;
+        }
+
+        private TransferDockController transferDockSidebar() {
+            if (mTransferDockController == null) {
+                mTransferDockController = new TransferDockController(mContext);
+            }
+            return mTransferDockController;
+        }
+
+        private void applyTransferDockMode(boolean island) {
+            boolean changed = island != mUseTransferDockIsland;
+            mUseTransferDockIsland = island;
+            if (island) {
+                if (mTransferDockController != null) {
+                    mTransferDockController.setSidebarEnabled(false);
+                }
+                transferDockIsland().setEnabled(mMasterEnabled);
+            } else {
+                if (mTransferDockIsland != null) mTransferDockIsland.setEnabled(false);
+                if (changed || mTransferDockController != null) {
+                    transferDockSidebar().setSidebarEnabled(mMasterEnabled);
+                }
+            }
+        }
+
+        private boolean onTransferDockIslandDrop(ClipData clip) {
+            if (!mUseTransferDockIsland || !isMasterEnabled() || clip.getItemCount() == 0) return false;
+            ClipData.Item item = clip.getItemAt(0);
+            Uri uri = item.getUri();
+            String text = item.getText() != null ? item.getText().toString() : null;
+            if (uri != null) {
+                // AES stages the original in SystemUI before starting the drag.
+                // Accept that namespace only; the recipient runs as SystemUI.
+                if (!"content".equals(uri.getScheme())
+                        || !"com.android.systemui.fileprovider".equals(uri.getAuthority())
+                        || uri.getPathSegments().size() != 2
+                        || !"hyperportal_incoming".equals(uri.getPathSegments().get(0))
+                        || uri.getLastPathSegment().startsWith("__")
+                        || !uri.getLastPathSegment().equals(sanitizeIncomingFileName(uri.getLastPathSegment()))) {
+                    return false;
+                }
+                String mime = clip.getDescription().getMimeType(0);
+                String fileName = uri.equals(mImageUri) && !TextUtils.isEmpty(mImageFileName)
+                        ? mImageFileName : uri.getLastPathSegment();
+                saveToTransferDock(mContext, text, mBitmap, uri, mime, fileName);
+                return true;
+            }
+            if (!TextUtils.isEmpty(text)) {
+                saveToTransferDock(mContext, text, null, null, null, null);
+            } else if (mBitmap != null) {
+                saveToTransferDock(mContext, null, mBitmap, null, null, null);
+            } else {
+                return false;
+            }
+            return true;
+        }
+
         private void saveToTransferDock(Context ctx, String text, Bitmap bmp, Uri uri,
                                         String mime, String fileName) {
             // Copying the original bytes and generating the thumbnail is disk
@@ -1494,19 +1586,24 @@ public final class PortalSystemUiModule {
                     final TransferDockItem result = item;
                     sHandler.post(() -> {
                         if (result != null) {
-                            if (mTransferDockController == null) {
-                                mTransferDockController = new TransferDockController(ctx);
+                            if (mUseTransferDockIsland) {
+                                transferDockIsland().refreshItems(true);
+                            } else {
+                                transferDockSidebar().showCapsule(result);
+                                toast("已存入中转站");
                             }
-                            mTransferDockController.showCapsule(result);
-                            toast("已存入中转站");
-                            Log.i(TAG, "saveToTransferDock succeeded, capsule shown: " + result.getTitle());
+                            Log.i(TAG, "Saved to transfer dock");
                         } else {
+                            if (mTransferDockIsland != null) mTransferDockIsland.saveFailed();
                             toast("存入中转站失败: 无有效内容");
                             Log.w(TAG, "saveToTransferDock failed: no content");
                         }
                     });
                 } catch (Throwable t) {
                     Log.w(TAG, "saveToTransferDock failed", t);
+                    sHandler.post(() -> {
+                        if (mTransferDockIsland != null) mTransferDockIsland.saveFailed();
+                    });
                     toastAsync("存入中转站失败");
                 }
             });
@@ -1911,6 +2008,9 @@ public final class PortalSystemUiModule {
                     mContainer.getLocationOnScreen(loc);
                     float rawX = loc[0] + event.getX();
                     float rawY = loc[1] + event.getY();
+                    if (mUseTransferDockIsland && mTransferDockIsland != null) {
+                        mTransferDockIsland.hoverAt(rawX, rawY);
+                    }
                     if (mGlowView != null) {
                         mGlowView.setTouchPosition(rawX, rawY);
                     }
@@ -1931,6 +2031,11 @@ public final class PortalSystemUiModule {
                     float rawY = loc[1] + event.getY();
                     mLastDropX = rawX;
                     mLastDropY = rawY;
+                    if (mUseTransferDockIsland && mTransferDockIsland != null
+                            && mTransferDockIsland.dropAt(rawX, rawY, event.getClipData())) {
+                        handleDragStateChanged(0, 0f);
+                        return true;
+                    }
                     ColorOSDockBar.DockItem hit = mDockBar != null ? mDockBar.findHitTarget(rawX, rawY) : null;
                     Log.i(TAG, "ACTION_DROP hit=" + (hit == null ? "null" : hit.label)
                             + " text=" + (mText == null ? "null" : mText.length())
@@ -2127,6 +2232,9 @@ public final class PortalSystemUiModule {
             filter.addAction(TransferDockDragGuard.ACTION_STATE);
             filter.addAction("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK");
             filter.addAction("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK");
+            filter.addAction(Intent.ACTION_SCREEN_OFF);
+            filter.addAction(Intent.ACTION_SCREEN_ON);
+            filter.addAction(Intent.ACTION_USER_PRESENT);
             filter.addAction(Intent.ACTION_USER_UNLOCKED);
             filter.addAction(Intent.ACTION_BOOT_COMPLETED);
             if (Build.VERSION.SDK_INT >= 33) {
@@ -2258,6 +2366,10 @@ public final class PortalSystemUiModule {
             if (intent.hasExtra("master_switch")) {
                 mMasterEnabled = intent.getBooleanExtra("master_switch", mMasterEnabled);
             }
+            if (!intent.hasExtra("from_system_server") || mTransferDockIsland != null) {
+                if (intent.hasExtra("transfer_dock_island")) mTransferDockModeReceived = true;
+                applyTransferDockMode(intent.getBooleanExtra("transfer_dock_island", mUseTransferDockIsland));
+            }
             if (intent.hasExtra("landscape_trigger")) {
                 mLandscapeAllowed = intent.getBooleanExtra("landscape_trigger", mLandscapeAllowed);
             }
@@ -2322,10 +2434,13 @@ public final class PortalSystemUiModule {
                 return;
             }
             if ("com.github.leaf.hyperportal.OPEN_TRANSFER_DOCK".equals(action)) {
-                if (mTransferDockController == null) {
-                    mTransferDockController = new TransferDockController(mContext);
-                }
-                mTransferDockController.openDrawer();
+                if (mUseTransferDockIsland) transferDockIsland().openPanel();
+                else transferDockSidebar().openDrawer();
+                return;
+            }
+            if (Intent.ACTION_SCREEN_OFF.equals(action) || Intent.ACTION_SCREEN_ON.equals(action)
+                    || Intent.ACTION_USER_PRESENT.equals(action)) {
+                if (mTransferDockIsland != null) mTransferDockIsland.onScreenChanged();
                 return;
             }
             if ("com.github.leaf.hyperportal.ACTION_SAVE_TRANSFER_DOCK".equals(action)) {
@@ -2457,6 +2572,7 @@ public final class PortalSystemUiModule {
 
             if (state == 0) {
                 // Drag ended / cancelled
+                if (mTransferDockIsland != null) mTransferDockIsland.finishIncomingSoon();
                 mQrSessionId++;
                 mDetectedQrContent = null;
                 if (mGlowView != null) {
@@ -2482,6 +2598,10 @@ public final class PortalSystemUiModule {
             if (!ensureViews()) {
                 return;
             }
+            if (mUseTransferDockIsland && mTransferDockIsland != null) {
+                mTransferDockIsland.setIncoming(true);
+                mTransferDockIsland.hoverAt(x, y);
+            }
 
             if (!mAppTargetsResolved || mTargets.isEmpty()) {
                 updateDockTargets();
@@ -2505,8 +2625,12 @@ public final class PortalSystemUiModule {
                 float glowSpan = Math.max(0.2f, enterFactor - 0.15f);
                 float progress = Math.max(0f, Math.min(1.0f, (coord - screenDim * 0.15f) / (screenDim * glowSpan)));
                 if (mGlowView != null) {
-                    mGlowView.setPhase1Progress(progress, isRight, y);
-                    mGlowView.setVisibility(View.VISIBLE);
+                    if (mUseTransferDockIsland) {
+                        mGlowView.setVisibility(View.GONE);
+                    } else {
+                        mGlowView.setPhase1Progress(progress, isRight, y);
+                        mGlowView.setVisibility(View.VISIBLE);
+                    }
                 }
                 // State 1 also carries continuous position updates from AES
                 // and WMS. Start the exit once, rather than repeatedly cancelling
@@ -2540,8 +2664,12 @@ public final class PortalSystemUiModule {
                 showOverlay();
                 setTouchable(true);
                 if (mGlowView != null) {
-                    mGlowView.setPhase2(isRight, y);
-                    mGlowView.setVisibility(View.VISIBLE);
+                    if (mUseTransferDockIsland) {
+                        mGlowView.setVisibility(View.GONE);
+                    } else {
+                        mGlowView.setPhase2(isRight, y);
+                        mGlowView.setVisibility(View.VISIBLE);
+                    }
                 }
                 if (mDockBar != null && (previousState != 2
                         || mDockBar.getVisibility() != View.VISIBLE)) {
